@@ -1,0 +1,30 @@
+{
+  "name": "sun",
+  "description": "Visual check of the atmosphere fixes (dirty filter, light fast path): the canal view across the day and night and in each weather. Compare fresh sessions with the fixes on and off, same scene order (the in-game date moves on as hours are set, which darkens later nights).",
+  "settings": {},
+  "record": ["r.ScreenPercentage", "Altar.UpscalingMethod", "r.Lumen.HardwareRayTracing.LightingMode"],
+  "masks": [[0.94, 0.0, 0.06, 0.035]],
+  "defaults": {"hour": 12, "weather": "Clear", "settle": 10, "measure": 10, "hold": 12},
+  "weathers": {"Clear": "00038EEE", "Cloudy": "00038EF0", "Overcast": "00038EEC", "Fog": "00038EEF", "Rain": "00038EF2", "Thunderstorm": "00038EF1", "Snow": "00038EED"},
+
+  "places": {
+    "canal": {"world": "CheydinhalWorld", "pos": [120983.5, 93025.3, 7180.0], "heading": 288.8, "pitch": 4.6},
+    "chapel-square": {"world": "CheydinhalWorld", "pos": [122787.4, 90721.4, 7290.0], "heading": 149.8, "pitch": 0}
+  },
+
+  "scenes": [
+    {"id": "sun-0600-clear", "type": "static", "at": "canal", "hour": 6, "weather": "Clear", "visual": true, "tags": ["sun"]},
+    {"id": "sun-1200-clear", "type": "static", "at": "canal", "hour": 12, "weather": "Clear", "visual": true, "tags": ["sun"]},
+    {"id": "sun-1200-cloudy", "type": "static", "at": "canal", "hour": 12, "weather": "Cloudy", "visual": true, "tags": ["sun"]},
+    {"id": "sun-1200-fog", "type": "static", "at": "canal", "hour": 12, "weather": "Fog", "visual": true, "tags": ["sun"]},
+    {"id": "sun-1200-rain", "type": "static", "at": "canal", "hour": 12, "weather": "Rain", "visual": true, "tags": ["sun"]},
+    {"id": "sun-1200-thunder", "type": "static", "at": "canal", "hour": 12, "weather": "Thunderstorm", "visual": true, "tags": ["sun"]},
+    {"id": "sun-1730-clear", "type": "static", "at": "canal", "hour": 17.5, "weather": "Clear", "visual": true, "tags": ["sun"]},
+    {"id": "sun-1930-clear", "type": "static", "at": "canal", "hour": 19.5, "weather": "Clear", "visual": true, "tags": ["sun"]},
+    {"id": "sun-1930-overcast", "type": "static", "at": "canal", "hour": 19.5, "weather": "Overcast", "visual": true, "tags": ["sun"]},
+    {"id": "sun-2300-clear", "type": "static", "at": "canal", "hour": 23, "weather": "Clear", "visual": true, "tags": ["sun"]},
+    {"id": "sun-2300-rain", "type": "static", "at": "canal", "hour": 23, "weather": "Rain", "visual": true, "tags": ["sun"]},
+    {"id": "sun-0300-fog", "type": "static", "at": "canal", "hour": 3, "weather": "Fog", "visual": true, "tags": ["sun"]},
+    {"id": "sun-square-1800", "type": "static", "at": "chapel-square", "hour": 18, "weather": "Clear", "visual": true, "tags": ["sun"]}
+  ]
+}

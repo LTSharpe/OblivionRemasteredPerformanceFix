@@ -1,0 +1,5 @@
+{
+  "name": "full",
+  "description": "Everything: Cheydinhal, the world tour (Niben and Leyawiin flights, a dungeon exit, Oblivion plane, Shivering Isles) and the many-actors scenes.",
+  "include": ["cheydinhal", "world", "actors"]
+}

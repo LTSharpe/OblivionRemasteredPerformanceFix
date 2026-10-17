@@ -1,0 +1,13 @@
+diff --git a/UE4SS/src/Mod/LuaMod.cpp b/UE4SS/src/Mod/LuaMod.cpp
+index 278548d..d2a52c0 100644
+--- a/UE4SS/src/Mod/LuaMod.cpp
++++ b/UE4SS/src/Mod/LuaMod.cpp
+@@ -239,7 +239,7 @@ namespace RC
+         auto& lua_data = *static_cast<LuaUnrealScriptFunctionData*>(custom_data);
+ 
+         // Returns true if a hooks were removed.
+-        auto remove_if_scheduled = [&] -> bool {
++        auto remove_if_scheduled = [&]() -> bool {
+             if (lua_data.scheduled_for_removal)
+             {
+                 const auto function_name_no_prefix = get_function_name_without_prefix(lua_data.unreal_function->GetFullName());

@@ -1,0 +1,124 @@
+{
+  "name": "npcburst",
+  "description": "Bulk NPC creation during travel, without a save (fresh start): peryite-flight flies north at running speed (340 u/s) along x = 148.8k, 9k units west of Peryite's Shrine (157.8k, -19.3k, cell 38,-5). When the player crosses the middle of cell row -7 (y = -26624) the old engine attaches row -5 and the GameThread creates the shrine's five worshippers (Er-Teeus, Kewan, Ilvel Romayn, Maren the Seal, Mirie; monk robes, a dagger) plus a wolf, a rat, a mudcrab and a slaughterfish: the same kind of burst as Sheogorath's Shrine on the Stendarr route, 4 frames of 40-97 ms (small profile). The burst is at y -26700 to -26300 of peryite-flight. (A Kvatch refugee-camp flight was tried and dropped: in a fresh game the camp's five refugees are not there.)",
+  "settings": {},
+  "record": [
+    "r.ScreenPercentage",
+    "Altar.UpscalingMethod",
+    "r.FidelityFX.FI.Enabled",
+    "t.MaxFPS",
+    "sg.ShadowQuality",
+    "r.Lumen.HardwareRayTracing",
+    "r.Lumen.HardwareRayTracing.LightingMode",
+    "r.Streaming.PoolSize"
+  ],
+  "masks": [
+    [
+      0.94,
+      0.0,
+      0.06,
+      0.035
+    ]
+  ],
+  "defaults": {
+    "hour": 12,
+    "weather": "Clear",
+    "settle": 8,
+    "measure": 20,
+    "hold": 12
+  },
+  "weathers": {
+    "Clear": "00038EEE"
+  },
+  "places": {},
+  "scenes": [
+    {
+      "id": "peryite-flight",
+      "type": "fly",
+      "world": "Tamriel",
+      "hour": 12,
+      "weather": "Clear",
+      "speed": 340,
+      "pitch": -3,
+      "flyopt": "ease=1.5 easeout=1.5",
+      "comment": "North along x = 148.8k from y = -36k (cell row -9) to -20k at running speed; Peryite's Shrine (cell 38,-5) and its five worshippers are 9k units to the east. Expected burst when the player passes the middle of row -7 (y ~ -26.6k).",
+      "tags": [
+        "traversal",
+        "outdoor",
+        "npcburst"
+      ],
+      "path": [
+        [
+          148800,
+          -36000,
+          2300
+        ],
+        [
+          148800,
+          -34769,
+          2348
+        ],
+        [
+          148800,
+          -33538,
+          2271
+        ],
+        [
+          148800,
+          -32308,
+          2284
+        ],
+        [
+          148800,
+          -31077,
+          2268
+        ],
+        [
+          148800,
+          -29846,
+          2297
+        ],
+        [
+          148800,
+          -28615,
+          2404
+        ],
+        [
+          148800,
+          -27385,
+          2436
+        ],
+        [
+          148800,
+          -26154,
+          2228
+        ],
+        [
+          148800,
+          -24923,
+          2001
+        ],
+        [
+          148800,
+          -23692,
+          1820
+        ],
+        [
+          148800,
+          -22462,
+          1380
+        ],
+        [
+          148800,
+          -21231,
+          668
+        ],
+        [
+          148800,
+          -20000,
+          312
+        ]
+      ]
+    }
+  ]
+}

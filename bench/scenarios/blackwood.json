@@ -1,0 +1,399 @@
+{
+  "name": "blackwood",
+  "description": "Travel stutter in the Blackwood forest at dusk (20:00, clear), from a new game (no save): a low flight at running speed (340 units/s) from the forest south of the Wayshrine of Stendarr north to just south of the wayshrine (12.3k units, about 40 s), then back south past the start to just north of Water's Edge (about 60 s). About 4.5k units before the wayshrine, when the player crosses the middle of cell row -24 (y = -96256), the old engine attaches cell row -22 and the game creates the five worshippers at Sheogorath's Shrine (11k units to the north-west) with their weapons, plus two mudcrabs and a slaughterfish: a burst of 55-72 ms frames on the game thread. Where the first travel-stutter fixes were found (the maintainers first measured it from a save at the same spot). Run blackwood-flight alone (-Scenes blackwood-flight) for the burst only. Not part of full; select with -Scenario blackwood.",
+  "settings": {},
+  "record": [
+    "r.ScreenPercentage",
+    "Altar.UpscalingMethod",
+    "r.FidelityFX.FI.Enabled",
+    "t.MaxFPS",
+    "sg.ShadowQuality",
+    "r.Lumen.HardwareRayTracing",
+    "r.Lumen.HardwareRayTracing.LightingMode",
+    "r.Streaming.PoolSize"
+  ],
+  "masks": [
+    [
+      0.94,
+      0.0,
+      0.06,
+      0.035
+    ]
+  ],
+  "defaults": {
+    "hour": 20,
+    "weather": "Clear",
+    "settle": 3,
+    "measure": 60,
+    "hold": 12
+  },
+  "weathers": {
+    "Clear": "00038EEE"
+  },
+  "places": {
+    "blackwood-south": {
+      "world": "Tamriel",
+      "pos": [
+        82397.6,
+        -104400.8,
+        826
+      ],
+      "heading": 0,
+      "pitch": -3
+    }
+  },
+  "scenes": [
+    {
+      "id": "blackwood-flight",
+      "type": "fly",
+      "world": "Tamriel",
+      "settle": 5,
+      "look": [
+        0,
+        -3
+      ],
+      "speed": 340,
+      "pitch": -3,
+      "flyopt": "ease=1.5 easeout=1.5",
+      "comment": "From the forest south of the Wayshrine of Stendarr (82398, -104401), at running speed (340 units/s, measured on foot), low over the forest floor (130 units above the highest ground nearby) north to just south of the wayshrine; about 40 s. The NPC burst (Sheogorath's Shrine) comes ~24 s in, at y = -96256.",
+      "path": [
+        [
+          82398,
+          -104401,
+          826
+        ],
+        [
+          82370,
+          -103853,
+          975
+        ],
+        [
+          82434,
+          -103277,
+          924
+        ],
+        [
+          82434,
+          -102701,
+          890
+        ],
+        [
+          82434,
+          -102125,
+          836
+        ],
+        [
+          82562,
+          -101549,
+          815
+        ],
+        [
+          82818,
+          -101037,
+          817
+        ],
+        [
+          82946,
+          -100461,
+          814
+        ],
+        [
+          83074,
+          -99885,
+          808
+        ],
+        [
+          83266,
+          -99373,
+          812
+        ],
+        [
+          83522,
+          -98861,
+          823
+        ],
+        [
+          83522,
+          -98285,
+          835
+        ],
+        [
+          83650,
+          -97709,
+          841
+        ],
+        [
+          83970,
+          -97261,
+          825
+        ],
+        [
+          83970,
+          -96685,
+          849
+        ],
+        [
+          83970,
+          -96109,
+          861
+        ],
+        [
+          83970,
+          -95533,
+          834
+        ],
+        [
+          83970,
+          -94957,
+          784
+        ],
+        [
+          83970,
+          -94381,
+          778
+        ],
+        [
+          83970,
+          -93805,
+          759
+        ],
+        [
+          84034,
+          -93229,
+          694
+        ],
+        [
+          84226,
+          -92717,
+          856
+        ],
+        [
+          84418,
+          -92269,
+          1018
+        ]
+      ],
+      "tags": [
+        "traversal",
+        "outdoor",
+        "foliage",
+        "npcburst"
+      ],
+      "hour": 20,
+      "weather": "Clear"
+    },
+    {
+      "id": "blackwood-return",
+      "type": "fly",
+      "world": "Tamriel",
+      "settle": 5,
+      "look": [
+        180,
+        -3
+      ],
+      "speed": 340,
+      "pitch": -3,
+      "flyopt": "ease=1.5 easeout=1.5",
+      "comment": "The way back, right after blackwood-flight in the same pass (as when running there and back): from just south of the wayshrine south along the same route at running speed past the start and on through the forest to just north of Water's Edge (81881, -112732); about 60 s.",
+      "path": [
+        [
+          84418,
+          -92269,
+          1018
+        ],
+        [
+          84226,
+          -92717,
+          856
+        ],
+        [
+          84034,
+          -93229,
+          694
+        ],
+        [
+          83970,
+          -93805,
+          759
+        ],
+        [
+          83970,
+          -94381,
+          778
+        ],
+        [
+          83970,
+          -94957,
+          784
+        ],
+        [
+          83970,
+          -95533,
+          834
+        ],
+        [
+          83970,
+          -96109,
+          861
+        ],
+        [
+          83970,
+          -96685,
+          849
+        ],
+        [
+          83970,
+          -97261,
+          825
+        ],
+        [
+          83650,
+          -97709,
+          841
+        ],
+        [
+          83522,
+          -98285,
+          835
+        ],
+        [
+          83522,
+          -98861,
+          823
+        ],
+        [
+          83266,
+          -99373,
+          812
+        ],
+        [
+          83074,
+          -99885,
+          808
+        ],
+        [
+          82946,
+          -100461,
+          814
+        ],
+        [
+          82818,
+          -101037,
+          817
+        ],
+        [
+          82562,
+          -101549,
+          815
+        ],
+        [
+          82434,
+          -102125,
+          836
+        ],
+        [
+          82434,
+          -102701,
+          890
+        ],
+        [
+          82434,
+          -103277,
+          924
+        ],
+        [
+          82370,
+          -103853,
+          975
+        ],
+        [
+          82398,
+          -104401,
+          826
+        ],
+        [
+          82668,
+          -104860,
+          886
+        ],
+        [
+          82988,
+          -105308,
+          797
+        ],
+        [
+          82988,
+          -105884,
+          766
+        ],
+        [
+          82988,
+          -106460,
+          677
+        ],
+        [
+          82988,
+          -107036,
+          681
+        ],
+        [
+          82860,
+          -107548,
+          660
+        ],
+        [
+          82796,
+          -108124,
+          490
+        ],
+        [
+          82732,
+          -108700,
+          382
+        ],
+        [
+          82732,
+          -109276,
+          379
+        ],
+        [
+          82668,
+          -109852,
+          379
+        ],
+        [
+          82476,
+          -110364,
+          329
+        ],
+        [
+          82348,
+          -110940,
+          172
+        ],
+        [
+          82284,
+          -111516,
+          160
+        ],
+        [
+          81900,
+          -111964,
+          189
+        ],
+        [
+          81772,
+          -112028,
+          210
+        ]
+      ],
+      "tags": [
+        "traversal",
+        "outdoor",
+        "foliage"
+      ],
+      "hour": 20,
+      "weather": "Clear"
+    }
+  ]
+}

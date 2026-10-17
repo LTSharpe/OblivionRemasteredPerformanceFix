@@ -1,0 +1,20 @@
+; Exports of the version.dll proxy (forwarded to System32\version.dll by proxy_stubs.asm).
+; The OBSE64 plugin exports are declared with __declspec(dllexport) in main.cpp.
+EXPORTS
+    GetFileVersionInfoA=Proxy_GetFileVersionInfoA
+    GetFileVersionInfoByHandle=Proxy_GetFileVersionInfoByHandle
+    GetFileVersionInfoExA=Proxy_GetFileVersionInfoExA
+    GetFileVersionInfoExW=Proxy_GetFileVersionInfoExW
+    GetFileVersionInfoSizeA=Proxy_GetFileVersionInfoSizeA
+    GetFileVersionInfoSizeExA=Proxy_GetFileVersionInfoSizeExA
+    GetFileVersionInfoSizeExW=Proxy_GetFileVersionInfoSizeExW
+    GetFileVersionInfoSizeW=Proxy_GetFileVersionInfoSizeW
+    GetFileVersionInfoW=Proxy_GetFileVersionInfoW
+    VerFindFileA=Proxy_VerFindFileA
+    VerFindFileW=Proxy_VerFindFileW
+    VerInstallFileA=Proxy_VerInstallFileA
+    VerInstallFileW=Proxy_VerInstallFileW
+    VerLanguageNameA=Proxy_VerLanguageNameA
+    VerLanguageNameW=Proxy_VerLanguageNameW
+    VerQueryValueA=Proxy_VerQueryValueA
+    VerQueryValueW=Proxy_VerQueryValueW

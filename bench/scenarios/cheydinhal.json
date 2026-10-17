@@ -1,0 +1,37 @@
+{
+  "name": "cheydinhal",
+  "description": "Cheydinhal: heavy outdoor spots at several times of day and weathers, interiors, and door transitions (inn, chapel, city gate).",
+  "settings": {},
+  "record": ["r.ScreenPercentage", "Altar.UpscalingMethod", "Altar.FSR3.Quality", "r.FidelityFX.FSR3.QualityMode", "r.FidelityFX.FI.Enabled", "r.VSync", "t.MaxFPS", "sg.ViewDistanceQuality", "sg.ShadowQuality", "sg.GlobalIlluminationQuality", "sg.ReflectionQuality", "sg.PostProcessQuality", "sg.TextureQuality", "sg.EffectsQuality", "sg.FoliageQuality", "sg.ShadingQuality", "r.Lumen.HardwareRayTracing", "r.Lumen.HardwareRayTracing.LightingMode", "r.RayTracing.Culling.Radius", "r.Streaming.PoolSize", "Altar.SaveOnLoading", "Altar.SaveOnFastTravel"],
+  "masks": [[0.94, 0.0, 0.06, 0.035]],
+  "defaults": {"hour": 12, "weather": "Clear", "settle": 8, "measure": 20, "hold": 12},
+  "weathers": {"Clear": "00038EEE", "Cloudy": "00038EF0", "Overcast": "00038EEC", "Fog": "00038EEF", "Rain": "00038EF2", "Thunderstorm": "00038EF1", "Snow": "00038EED"},
+
+  "places": {
+    "chapel-square": {"world": "CheydinhalWorld", "pos": [122787.4, 90721.4, 7290.0], "heading": 149.8, "pitch": 0},
+    "canal": {"world": "CheydinhalWorld", "pos": [120983.5, 93025.3, 7180.0], "heading": 288.8, "pitch": 4.6},
+    "inn-front": {"world": "CheydinhalWorld", "pos": [115778.9, 91669.2, 7185.0], "heading": 357.1, "pitch": 0},
+    "west-gate-in": {"world": "CheydinhalWorld", "pos": [114776.0, 92015.0, 7160.0], "heading": 92.6, "pitch": 0},
+    "chapel-nave": {"cell": "CheydinhalChapelOfArkay", "pos": [-877.1, -4.7, -580.0], "heading": 87.6, "pitch": 0},
+    "inn-room": {"cell": "CheydinhalBridgeInn", "pos": [301.7, -379.3, -440.0], "heading": 4.5, "pitch": 0},
+    "west-road": {"world": "Tamriel", "pos": [114441.5, 91858.6, 7110.0], "heading": 263.6, "pitch": 0}
+  },
+
+  "scenes": [
+    {"id": "canal-noon", "type": "static", "at": "canal", "hour": 12, "weather": "Clear", "visual": true, "tags": ["city"]},
+    {"id": "chapel-square-noon", "type": "static", "at": "chapel-square", "hour": 12, "weather": "Clear", "visual": true, "tags": ["city"]},
+    {"id": "inn-front-noon", "type": "static", "at": "inn-front", "hour": 12, "weather": "Clear", "tags": ["city"]},
+    {"id": "inn-door", "type": "door", "at": "inn-front", "hour": 12, "enter": "00031BA3", "exit": "000302CD", "tags": ["city", "transition"]},
+    {"id": "inn-room", "type": "static", "at": "inn-room", "hour": 12, "visual": true, "tags": ["interior"]},
+    {"id": "chapel-door", "type": "door", "at": "chapel-square", "hour": 12, "enter": "00031BB5", "exit": "00030C19", "tags": ["city", "transition"]},
+    {"id": "chapel-nave", "type": "static", "at": "chapel-nave", "hour": 12, "visual": true, "tags": ["interior"]},
+    {"id": "west-gate", "type": "door", "at": "west-gate-in", "hour": 12, "enter": "00007A6A", "exit": "0000799C", "tags": ["transition", "gate"]},
+    {"id": "west-road-noon", "type": "static", "at": "west-road", "hour": 12, "weather": "Clear", "visual": true, "tags": ["outdoor"]},
+    {"id": "canal-rain", "type": "static", "at": "canal", "hour": 12, "weather": "Rain", "tags": ["city", "weather"]},
+    {"id": "canal-dusk", "type": "static", "at": "canal", "hour": 19, "weather": "Clear", "visual": true, "tags": ["city", "night"]},
+    {"id": "canal-night", "type": "static", "at": "canal", "hour": 23, "weather": "Clear", "visual": true, "tags": ["city", "night"]},
+    {"id": "chapel-square-night", "type": "static", "at": "chapel-square", "hour": 23, "weather": "Clear", "tags": ["city", "night"]},
+    {"id": "cheydinhal-road-run", "type": "fly", "world": "Tamriel", "hour": 12, "weather": "Clear", "speed": 950, "pitch": -2, "comment": "From outside the west gate west through the hills, a little above the ground, at horse pace", "tags": ["traversal", "outdoor"], "path": [[114000, 91850, 7362], [112714, 91657, 7377], [111429, 91464, 7406], [110143, 91271, 7406], [108857, 91079, 7046], [107571, 90886, 6795], [106286, 90693, 6659], [105000, 90500, 6582], [103643, 90214, 6510], [102286, 89929, 6454], [100929, 89643, 6673], [99571, 89357, 7166], [98214, 89071, 7307], [96857, 88786, 7486], [95500, 88500, 7334], [94143, 88286, 6526], [92786, 88071, 5806], [91429, 87857, 5586], [90071, 87643, 5914], [88714, 87429, 6806]]},
+    {"id": "cheydinhal-road-walk", "type": "walk", "at": "west-road", "hour": 12, "weather": "Clear", "measure": 45, "mode": "inject", "comment": "On foot at the default character's running pace, from outside the west gate west along the line of cheydinhal-road-run, through the hills", "tags": ["traversal", "outdoor"], "waypoints": [[112714, 91657], [111429, 91464], [110143, 91271], [108857, 91079], [107571, 90886], [106286, 90693], [105000, 90500]]}
+  ]
+}

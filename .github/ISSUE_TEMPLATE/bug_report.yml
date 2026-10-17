@@ -1,0 +1,81 @@
+name: Bug report
+description: Something went wrong with the fix installed (crash, visual difference, worse performance, it didn't load).
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! First, please check whether the problem also happens **without** the fix: set every switch in
+        `OblivionPerfFix.ini` to 0 (or remove `version.dll`) and try again. That tells us whether it's the fix or the game.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, what you saw. Where in the game (place, indoors/outdoors, time of day)?
+    validations:
+      required: true
+  - type: dropdown
+    id: without
+    attributes:
+      label: Does it also happen without the fix?
+      options: ["No, only with the fix", "Yes, also without it", "Didn't check"]
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: OblivionPerfFix.log
+      description: From `OblivionRemastered\Binaries\Win64\` (Game Pass `Binaries\WinGDK\`, or next to the DLL in `OBSE\Plugins`). Paste it all.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Fix version
+      placeholder: 1.0.0-beta
+    validations:
+      required: true
+  - type: dropdown
+    id: store
+    attributes:
+      label: Which version of the game?
+      options: ["Steam", "Xbox / PC Game Pass", "Other"]
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How is it installed?
+      options: ["version.dll in Binaries\\Win64 (manual)", "Vortex", "Mod Organizer 2", "OBSE64 plugin", "Other"]
+    validations:
+      required: true
+  - type: input
+    id: cpu
+    attributes:
+      label: CPU
+      placeholder: e.g. Intel Core i5-12400F
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: Graphics card and driver version
+      placeholder: e.g. NVIDIA RTX 4070, driver 581.xx
+    validations:
+      required: true
+  - type: input
+    id: settings
+    attributes:
+      label: Resolution, upscaler, frame generation, quality preset
+      placeholder: e.g. 1440p, DLSS Quality, FG off, High
+  - type: textarea
+    id: mods
+    attributes:
+      label: Other mods
+      description: Especially UE4SS, OBSE64, OptiScaler, ReShade, anything else that adds DLLs.
+  - type: textarea
+    id: crash
+    attributes:
+      label: Crash details (if it crashed)
+      description: The error message, and if there is one, the newest folder in `Documents\My Games\Oblivion Remastered\Saved\Crashes\` zipped and attached.

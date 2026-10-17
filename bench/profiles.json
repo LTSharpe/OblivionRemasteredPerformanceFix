@@ -1,0 +1,92 @@
+{
+  "_comment": "Display and graphics profiles for Run-Benchmark.ps1 -Profile <name> (default: the scenario's \"profile\", else small). res: WxH or \"native\" (the primary monitor's resolution); mode: windowed | borderless (exclusive fullscreen is not offered: the benchmark keeps the game window in the background, and a game that loses an exclusive fullscreen gets minimised, which crashes it on restore); upscaler: fsr | none (TAA at the render scale); fsrQuality: 0 native AA, 1 quality (67%), 2 balanced (59%), 3 performance (50%), 4 ultra performance (33%); scale: render scale in percent with upscaler none; fg: FSR 3 frame generation 0/1 (needs fsr); rt: hardware ray tracing 0/1 (Lumen HWRT with lighting mode 3, the game's default and the look the fix was tested with, checked); quality: the game's ten quality options (view distance, shadows, GI, reflections, post-process, textures, effects, foliage, shading, cloth), default 3 = the highest, what the test PC plays with (qualityOptions overrides single options, e.g. { \"ShadowQuality\": 2 }): set by every profile, never inherited from the player's save; cvars: anything else, applied last. Every value is applied after the game has loaded, read back, recorded in result.json, and re-applied before each scene if the game changed it (the game turns FSR off whenever its window loses focus).",
+
+  "own": {
+    "description": "Your own settings as they are (resolution, window mode, upscaler, quality, frame cap): nothing is changed. Used by -Watch. Results depend on those settings, so say which ones you used when you share them",
+    "own": true
+  },
+  "small": {
+    "description": "The default, quiet: 854x480 window, no upscaler (TAA at 100%), ray tracing on, no frame generation. CPU-bound with little GPU load (fan noise) while you work on the PC",
+    "res": "854x480", "mode": "windowed", "upscaler": "none", "scale": 100, "fg": 0, "rt": 1
+  },
+  "small-fg": {
+    "description": "Quiet, with FSR and frame generation (2026-10-06, alt-tab fix): 854x480 window, FSR performance (render 427x240), frame generation on, ray tracing on",
+    "res": "854x480", "mode": "windowed", "upscaler": "fsr", "fsrQuality": 3, "fg": 1, "rt": 1
+  },
+  "cpu": {
+    "description": "CPU-bound, the default until 2026-10-06: 1280x720 window, FSR performance (render 640x360), ray tracing on, no frame generation",
+    "res": "1280x720", "mode": "windowed", "upscaler": "fsr", "fsrQuality": 3, "fg": 0, "rt": 1
+  },
+  "cpu-nort": {
+    "description": "CPU-bound without hardware ray tracing (software Lumen): 1280x720 window, FSR performance, no frame generation",
+    "res": "1280x720", "mode": "windowed", "upscaler": "fsr", "fsrQuality": 3, "fg": 0, "rt": 0
+  },
+  "cpu-min": {
+    "description": "Lowest GPU load, purest CPU view: 1280x720 window, FSR ultra performance, no ray tracing, no frame generation",
+    "res": "1280x720", "mode": "windowed", "upscaler": "fsr", "fsrQuality": 4, "fg": 0, "rt": 0
+  },
+  "native": {
+    "description": "Full quality at the monitor's resolution, borderless, FSR performance, ray tracing on, frame generation on",
+    "res": "native", "mode": "borderless", "upscaler": "fsr", "fsrQuality": 3, "fg": 1, "rt": 1
+  },
+  "native-nofg": {
+    "description": "The monitor's resolution borderless, FSR performance, ray tracing on, no frame generation (every frame rendered)",
+    "res": "native", "mode": "borderless", "upscaler": "fsr", "fsrQuality": 3, "fg": 0, "rt": 1
+  },
+  "native-nofg-shadowhigh": {
+    "description": "native-nofg with the game's Shadows option at High (2) instead of Ultra (3), everything else Ultra: the shadow-quality comparison",
+    "res": "native", "mode": "borderless", "upscaler": "fsr", "fsrQuality": 3, "fg": 0, "rt": 1, "qualityOptions": { "ShadowQuality": 2 }
+  },
+  "native-shadowhigh": {
+    "description": "native (frame generation on) with the game's Shadows option at High (2) instead of Ultra (3), everything else Ultra",
+    "res": "native", "mode": "borderless", "upscaler": "fsr", "fsrQuality": 3, "fg": 1, "rt": 1, "qualityOptions": { "ShadowQuality": 2 }
+  },
+  "user": {
+    "description": "The test PC's own play settings (2026-10-06): the monitor's resolution borderless, FSR performance, frame generation on, ray tracing on, Shadows High (the rest Ultra), frame rate capped at 60 before frame generation (t.MaxFPS 60; every other profile runs uncapped)",
+    "res": "native", "mode": "borderless", "upscaler": "fsr", "fsrQuality": 3, "fg": 1, "rt": 1, "qualityOptions": { "ShadowQuality": 2 }, "cvars": { "t.MaxFPS": 60 }
+  },
+  "promo": {
+    "description": "Video recording: the monitor's resolution borderless, FSR performance, ray tracing on (mode 3), Shadows High (the rest Ultra), no frame generation (online video plays at most 60 fps), v-sync off, no frame cap, SDR (HDR off), brightness -3",
+    "res": "native", "mode": "borderless", "upscaler": "fsr", "fsrQuality": 3, "fg": 0, "rt": 1, "qualityOptions": { "ShadowQuality": 2 }, "cvars": { "Altar.GraphicsOptions.HDR": 0, "Altar.GraphicsOptions.Brightness": -3 }
+  },
+  "promo-fg": {
+    "description": "Video recording with frame generation: as user (the monitor's resolution borderless, FSR performance, frame generation on, ray tracing on, Shadows High, the rest Ultra, frame rate capped at 60 before frame generation), plus SDR (HDR off) and brightness -3 as in promo",
+    "res": "native", "mode": "borderless", "upscaler": "fsr", "fsrQuality": 3, "fg": 1, "rt": 1, "qualityOptions": { "ShadowQuality": 2 }, "cvars": { "t.MaxFPS": 60, "Altar.GraphicsOptions.HDR": 0, "Altar.GraphicsOptions.Brightness": -3 }
+  },
+  "vram-1080q": {
+    "description": "VRAM study (2026-10-07): how an 8 GB card owner might play: 1920x1080 window, FSR quality (render 1280x720), ray tracing on, no frame generation, Ultra",
+    "res": "1920x1080", "mode": "windowed", "upscaler": "fsr", "fsrQuality": 1, "fg": 0, "rt": 1
+  },
+  "vram-1080q-high": {
+    "description": "VRAM study (2026-10-07): vram-1080q with every quality option at High (2) instead of Ultra",
+    "res": "1920x1080", "mode": "windowed", "upscaler": "fsr", "fsrQuality": 1, "fg": 0, "rt": 1, "quality": 2
+  },
+  "vram-1080q-nort": {
+    "description": "VRAM study (2026-10-07): vram-1080q without hardware ray tracing (software Lumen)",
+    "res": "1920x1080", "mode": "windowed", "upscaler": "fsr", "fsrQuality": 1, "fg": 0, "rt": 0
+  },
+  "small-nort": {
+    "description": "VRAM study (2026-10-07): small without hardware ray tracing (software Lumen), to split ray tracing memory off in an RMV trace",
+    "res": "854x480", "mode": "windowed", "upscaler": "none", "scale": 100, "fg": 0, "rt": 0
+  },
+  "vram-1440b": {
+    "description": "VRAM study (2026-10-07): how a 12 GB card owner might play: 2560x1440 window, FSR balanced (render ~1506x847), ray tracing on, frame generation on, Ultra",
+    "res": "2560x1440", "mode": "windowed", "upscaler": "fsr", "fsrQuality": 2, "fg": 1, "rt": 1
+  },
+  "tier12-1440q": {
+    "description": "VRAM tiers (2026-10-12): a 12 GB card owner: 2560x1440 window, FSR quality (render ~1707x960), ray tracing on, no frame generation, Ultra",
+    "res": "2560x1440", "mode": "windowed", "upscaler": "fsr", "fsrQuality": 1, "fg": 0, "rt": 1
+  },
+  "tier8-1440p-high": {
+    "description": "VRAM tiers (2026-10-12): an 8 GB card owner at 1440p: 2560x1440 window, FSR performance (render 1280x720), ray tracing on, no frame generation, every option High",
+    "res": "2560x1440", "mode": "windowed", "upscaler": "fsr", "fsrQuality": 3, "fg": 0, "rt": 1, "quality": 2
+  },
+  "gpu": {
+    "description": "GPU-bound: the monitor's resolution borderless, FSR quality, ray tracing on, no frame generation",
+    "res": "native", "mode": "borderless", "upscaler": "fsr", "fsrQuality": 1, "fg": 0, "rt": 1
+  },
+  "gpu-max": {
+    "description": "Heaviest GPU load: the monitor's resolution borderless, no upscaling (TAA at 100%), ray tracing on, no frame generation",
+    "res": "native", "mode": "borderless", "upscaler": "none", "scale": 100, "fg": 0, "rt": 1
+  }
+}

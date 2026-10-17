@@ -1,0 +1,429 @@
+{
+  "name": "leyawiin-forest",
+  "description": "Rain and fog in the forest by Fort Doublecross north-east of Leyawiin, late afternoon (16:50), from a new game (no save): the view of the fort across the small pond in rain, fog and clear weather, the Leyawiin east gate and the road outside Cheydinhal at the same hour for reference, then a low flight south-west through the rainy forest (about 160 units above the ground, around the trees and rocks) to the Niben Bay shore and out over the water. GPU-heavy foliage, water and weather. Not part of full; select with -Scenario leyawiin-forest.",
+  "settings": {},
+  "record": [
+    "r.ScreenPercentage",
+    "Altar.UpscalingMethod",
+    "Altar.FSR3.Quality",
+    "r.FidelityFX.FSR3.QualityMode",
+    "r.FidelityFX.FI.Enabled",
+    "r.VSync",
+    "t.MaxFPS",
+    "sg.ViewDistanceQuality",
+    "sg.ShadowQuality",
+    "sg.GlobalIlluminationQuality",
+    "sg.ReflectionQuality",
+    "sg.PostProcessQuality",
+    "sg.TextureQuality",
+    "sg.EffectsQuality",
+    "sg.FoliageQuality",
+    "sg.ShadingQuality",
+    "r.Lumen.HardwareRayTracing",
+    "r.Lumen.HardwareRayTracing.LightingMode",
+    "r.RayTracing.Culling.Radius",
+    "r.Streaming.PoolSize",
+    "Altar.SaveOnLoading",
+    "Altar.SaveOnFastTravel"
+  ],
+  "masks": [
+    [
+      0.94,
+      0.0,
+      0.06,
+      0.035
+    ]
+  ],
+  "defaults": {
+    "hour": 16.84,
+    "settle": 8,
+    "measure": 20,
+    "hold": 12
+  },
+  "weathers": {
+    "Rain": "00038EF2",
+    "Fog": "00038EEF",
+    "Clear": "00038EEE"
+  },
+  "places": {
+    "doublecross-forest": {
+      "world": "Tamriel",
+      "pos": [
+        117567.2,
+        -120309.2,
+        3154.6
+      ],
+      "heading": 350.2,
+      "pitch": -0.6
+    },
+    "leyawiin-east-gate": {
+      "world": "Tamriel",
+      "pos": [
+        97661.0,
+        -140875.0,
+        60.0
+      ],
+      "heading": 87.6,
+      "pitch": 0
+    },
+    "cheydinhal-west-road": {
+      "world": "Tamriel",
+      "pos": [
+        114441.5,
+        91858.6,
+        7110.0
+      ],
+      "heading": 263.6,
+      "pitch": 0
+    }
+  },
+  "scenes": [
+    {
+      "id": "leyawiin-rain-forest",
+      "type": "static",
+      "at": "doublecross-forest",
+      "weather": "Rain",
+      "visual": true,
+      "perf": false,
+      "comment": "Reference image only (visual pass): the view of the pond, willows and the wall of Fort Doublecross in the rain",
+      "tags": [
+        "outdoor",
+        "weather",
+        "foliage"
+      ]
+    },
+    {
+      "id": "leyawiin-forest-rain",
+      "type": "static",
+      "at": "doublecross-forest",
+      "weather": "Rain",
+      "visual": false,
+      "settle": 10,
+      "comment": "Perf: the forest view with Rain forced (fw); same image as leyawiin-rain-forest (visual pass)",
+      "tags": [
+        "outdoor",
+        "weather",
+        "foliage",
+        "water"
+      ]
+    },
+    {
+      "id": "leyawiin-forest-fog",
+      "type": "static",
+      "at": "doublecross-forest",
+      "weather": "Fog",
+      "visual": true,
+      "settle": 10,
+      "comment": "Perf + image: the forest view in Fog",
+      "tags": [
+        "outdoor",
+        "weather",
+        "foliage",
+        "water"
+      ]
+    },
+    {
+      "id": "leyawiin-forest-clear",
+      "type": "static",
+      "at": "doublecross-forest",
+      "weather": "Clear",
+      "visual": true,
+      "settle": 10,
+      "comment": "Perf + image: the forest view in Clear weather (how much do rain and fog cost?)",
+      "tags": [
+        "outdoor",
+        "foliage",
+        "water"
+      ]
+    },
+    {
+      "id": "leyawiin-gate-rain",
+      "type": "static",
+      "at": "leyawiin-east-gate",
+      "weather": "Rain",
+      "visual": false,
+      "settle": 10,
+      "comment": "Reference: Leyawiin east gate (same view as world.json's leyawiin-east-gate) at 16.84 in rain",
+      "tags": [
+        "outdoor",
+        "weather",
+        "water"
+      ]
+    },
+    {
+      "id": "leyawiin-gate-clear",
+      "type": "static",
+      "at": "leyawiin-east-gate",
+      "weather": "Clear",
+      "visual": true,
+      "settle": 10,
+      "comment": "Reference: Leyawiin east gate at 16.84, clear",
+      "tags": [
+        "outdoor",
+        "water"
+      ]
+    },
+    {
+      "id": "cheydinhal-road-1650",
+      "type": "static",
+      "at": "cheydinhal-west-road",
+      "weather": "Clear",
+      "visual": true,
+      "settle": 10,
+      "comment": "Reference elsewhere: the road outside Cheydinhal's west gate (cheydinhal.json west-road view) at 16.84, clear",
+      "tags": [
+        "outdoor",
+        "foliage"
+      ]
+    },
+    {
+      "id": "leyawiin-rain-flight",
+      "type": "fly",
+      "world": "Tamriel",
+      "weather": "Rain",
+      "settle": 5,
+      "look": [
+        350.2,
+        -0.6
+      ],
+      "speed": 800,
+      "pitch": -3,
+      "flyopt": "ease=5 easeout=3 turn=30",
+      "comment": "5 s looking at the fort across the pond (measured as leyawiin-rain-flight/look), then a gentle start (5 s to full speed, the view turning at 30 deg/s) and a low flight south-west through the rainy forest, around the trees and rocks, to the Niben Bay shore and out over the water; about 40 s. Path planned around the trees and rocks with the maintainers' route tool.",
+      "path": [
+        [
+          117580,
+          -120292,
+          3155
+        ],
+        [
+          117068,
+          -120740,
+          3207
+        ],
+        [
+          116620,
+          -121188,
+          3163
+        ],
+        [
+          116172,
+          -121636,
+          3235
+        ],
+        [
+          115596,
+          -121892,
+          3269
+        ],
+        [
+          115148,
+          -122340,
+          3310
+        ],
+        [
+          114636,
+          -122788,
+          3320
+        ],
+        [
+          114060,
+          -123108,
+          3100
+        ],
+        [
+          113548,
+          -123556,
+          2873
+        ],
+        [
+          112908,
+          -123684,
+          2656
+        ],
+        [
+          112268,
+          -123940,
+          2426
+        ],
+        [
+          111628,
+          -123940,
+          2213
+        ],
+        [
+          110988,
+          -123812,
+          2032
+        ],
+        [
+          110348,
+          -123748,
+          1918
+        ],
+        [
+          109708,
+          -123620,
+          1982
+        ],
+        [
+          109068,
+          -123620,
+          2121
+        ],
+        [
+          108428,
+          -123620,
+          2265
+        ],
+        [
+          107788,
+          -123620,
+          2479
+        ],
+        [
+          107148,
+          -123620,
+          2644
+        ],
+        [
+          106508,
+          -123620,
+          2799
+        ],
+        [
+          105868,
+          -123620,
+          2746
+        ],
+        [
+          105228,
+          -123620,
+          2959
+        ],
+        [
+          104588,
+          -123620,
+          3053
+        ],
+        [
+          103948,
+          -123620,
+          2953
+        ],
+        [
+          103308,
+          -123620,
+          2762
+        ],
+        [
+          102668,
+          -123620,
+          2572
+        ],
+        [
+          102028,
+          -123620,
+          2360
+        ],
+        [
+          101388,
+          -123812,
+          2137
+        ],
+        [
+          100748,
+          -124068,
+          1907
+        ],
+        [
+          100108,
+          -124068,
+          1694
+        ],
+        [
+          99532,
+          -123748,
+          1474
+        ],
+        [
+          99084,
+          -123300,
+          1263
+        ],
+        [
+          98444,
+          -123172,
+          1045
+        ],
+        [
+          97804,
+          -123108,
+          831
+        ],
+        [
+          97164,
+          -123108,
+          618
+        ],
+        [
+          96524,
+          -123108,
+          404
+        ],
+        [
+          95884,
+          -123108,
+          191
+        ],
+        [
+          95244,
+          -123108,
+          160
+        ],
+        [
+          94604,
+          -123108,
+          160
+        ],
+        [
+          93964,
+          -123108,
+          160
+        ],
+        [
+          93324,
+          -123108,
+          160
+        ],
+        [
+          92684,
+          -123108,
+          160
+        ],
+        [
+          92044,
+          -123108,
+          160
+        ],
+        [
+          91404,
+          -123108,
+          160
+        ],
+        [
+          91020,
+          -122980,
+          160
+        ]
+      ],
+      "tags": [
+        "traversal",
+        "outdoor",
+        "weather",
+        "foliage",
+        "water"
+      ]
+    }
+  ]
+}

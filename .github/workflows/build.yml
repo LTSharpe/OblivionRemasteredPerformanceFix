@@ -1,0 +1,116 @@
+# Builds the fix DLL on every push and pull request. For a version tag (v1.0.0-beta) it also packages the release zip,
+# attests where it was built (gh attestation verify) and creates a DRAFT release: a maintainer reviews and publishes it.
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    permissions:
+      contents: write       # draft release (tags only)
+      id-token: write       # build provenance attestation
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the DLL
+        shell: pwsh
+        run: ./src/OblivionPerfFix/build.ps1
+
+      - name: Check the tag matches the DLL version
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          # v1.0.0 or v1.0.0-beta both belong to OPF_VERSION "1.0.0"; the CHANGELOG must have a section for the full tag.
+          $tag = '${{ github.ref_name }}'.Substring(1)
+          $ver = (Select-String -Path src/OblivionPerfFix/src/core/common.h -Pattern '#define OPF_VERSION "([^"]+)"').Matches[0].Groups[1].Value
+          if (($tag -split '-')[0] -ne $ver) { throw "Tag $tag does not match OPF_VERSION $ver in common.h" }
+          if (-not (Select-String -Path CHANGELOG.md -Pattern "^## $([regex]::Escape($tag))(\s|$)" -Quiet)) { throw "CHANGELOG.md has no '## $tag' section" }
+
+      - name: Package
+        id: pkg
+        shell: pwsh
+        run: |
+          $ver = if ('${{ github.ref_type }}' -eq 'tag') { '${{ github.ref_name }}'.Substring(1) } else { 'dev-' + '${{ github.sha }}'.Substring(0, 7) }
+          # The same DLL and ini in two layouts: Steam (Binaries/Win64) and Xbox / PC Game Pass (Binaries/WinGDK).
+          Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+          $zips = foreach ($v in @(@{ Dir = 'Win64'; Suffix = '' }, @{ Dir = 'WinGDK'; Suffix = '-GamePass' })) {
+            $root = "package$($v.Suffix)"
+            $bin = "$root/OblivionRemastered/Binaries/$($v.Dir)"
+            New-Item -ItemType Directory -Force $bin | Out-Null
+            Copy-Item src/OblivionPerfFix/build/OblivionPerfFix.dll "$bin/version.dll"
+            Copy-Item src/OblivionPerfFix/OblivionPerfFix.ini $bin
+            $zip = "OblivionPerfFix-$ver$($v.Suffix).zip"
+            # Entry names with '/' as the zip format requires (CreateFromDirectory can write '\', which Linux unzip mishandles).
+            $base = (Resolve-Path $root).Path
+            $archive = [IO.Compression.ZipFile]::Open((Join-Path $PWD $zip), 'Create')
+            try {
+              foreach ($f in Get-ChildItem $root -Recurse -File) {
+                $name = $f.FullName.Substring($base.Length + 1) -replace '\\', '/'
+                [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $f.FullName, $name, 'Optimal')
+              }
+            } finally { $archive.Dispose() }
+            $zip
+          }
+          $sums = foreach ($f in @($zips) + 'package/OblivionRemastered/Binaries/Win64/version.dll') {
+            '{0}  {1}' -f (Get-FileHash $f -Algorithm SHA256).Hash.ToLower(), (Split-Path $f -Leaf)
+          }
+          $sums | Set-Content SHA256SUMS.txt -Encoding ascii
+
+          # Release notes: this version's CHANGELOG section, the checksums and how to verify the build.
+          $section = [regex]::Match((Get-Content CHANGELOG.md -Raw), "(?ms)^## $([regex]::Escape($ver))(?=\s).*?\r?\n(.*?)(?=^## |\z)").Groups[1].Value.Trim()
+          @(
+            $section, '',
+            '### Install',
+            "Steam: extract ``$($zips[0])`` into the game folder (right-click the game > Manage > Browse local files).",
+            "Xbox / PC Game Pass (experimental): extract ``$($zips[1])`` into the game folder (usually ``C:\XboxGames\The Elder Scrolls IV - Oblivion Remastered``).",
+            'See the README for details.', '',
+            '### Checksums (SHA-256)', '```', $sums, '```', '',
+            '### Verify the build', 'These files were built by GitHub Actions from the tagged source. Check one with the GitHub CLI:', '```',
+            "gh attestation verify $($zips[0]) --repo ${{ github.repository }}", '```'
+          ) | Set-Content release-notes.md -Encoding utf8
+
+          Add-Content $env:GITHUB_OUTPUT "zip=$($zips[0])"
+          Add-Content $env:GITHUB_OUTPUT "zipGamePass=$($zips[1])"
+          Add-Content $env:GITHUB_OUTPUT "version=$ver"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OblivionPerfFix-${{ steps.pkg.outputs.version }}
+          path: |
+            ${{ steps.pkg.outputs.zip }}
+            ${{ steps.pkg.outputs.zipGamePass }}
+            SHA256SUMS.txt
+            release-notes.md
+            src/OblivionPerfFix/build/OblivionPerfFix.pdb
+
+      - name: Attest build provenance
+        if: github.ref_type == 'tag'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            ${{ steps.pkg.outputs.zip }}
+            ${{ steps.pkg.outputs.zipGamePass }}
+            package/OblivionRemastered/Binaries/Win64/version.dll
+
+      - name: Create a draft release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ghArgs = @('release', 'create', '${{ github.ref_name }}', '${{ steps.pkg.outputs.zip }}', '${{ steps.pkg.outputs.zipGamePass }}',
+                      'SHA256SUMS.txt', 'src/OblivionPerfFix/build/OblivionPerfFix.pdb',
+                      '--draft', '--title', 'OblivionPerfFix ${{ steps.pkg.outputs.version }}', '--notes-file', 'release-notes.md')
+          if ('${{ steps.pkg.outputs.version }}' -match '-') { $ghArgs += '--prerelease' }
+          gh @ghArgs
+          if ($LASTEXITCODE) { throw "gh release create failed ($LASTEXITCODE)" }

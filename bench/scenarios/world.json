@@ -1,0 +1,35 @@
+{
+  "name": "world",
+  "description": "Open world, Oblivion plane and Shivering Isles: two flights over water and jungle in Tamriel, a flight across the Kvatch gate's plane, a flight over the Dementia swamps to New Sheoth, and steady views at each.",
+  "settings": {},
+  "record": ["r.ScreenPercentage", "Altar.UpscalingMethod", "Altar.FSR3.Quality", "r.FidelityFX.FSR3.QualityMode", "r.FidelityFX.FI.Enabled", "r.VSync", "t.MaxFPS", "sg.ViewDistanceQuality", "sg.ShadowQuality", "sg.GlobalIlluminationQuality", "sg.ReflectionQuality", "sg.PostProcessQuality", "sg.TextureQuality", "sg.EffectsQuality", "sg.FoliageQuality", "sg.ShadingQuality", "r.Lumen.HardwareRayTracing", "r.Lumen.HardwareRayTracing.LightingMode", "r.RayTracing.Culling.Radius", "r.Streaming.PoolSize", "Altar.SaveOnLoading", "Altar.SaveOnFastTravel"],
+  "masks": [[0.94, 0.0, 0.06, 0.035]],
+  "defaults": {"hour": 12, "settle": 8, "measure": 20, "hold": 12},
+  "weathers": {"Clear": "00038EEE", "Cloudy": "00038EF0", "Overcast": "00038EEC", "Fog": "00038EEF", "Rain": "00038EF2", "Thunderstorm": "00038EF1", "Oblivion": "00032E15", "OblivionStorm": "00067199", "SEClear": "00078801", "SECloudy": "00044F59", "SEFog": "00044F5A", "SERain": "00044F5C", "SEThunderstorm": "00044F5D", "SEManiaFog": "00079D76"},
+
+  "places": {
+    "rumare-south-shore": {"world": "Tamriel", "pos": [22945.0, 30981.0, 870.0], "heading": 10, "pitch": 2},
+    "leyawiin-east-gate": {"world": "Tamriel", "pos": [97661.0, -140875.0, 60.0], "heading": 87.6, "pitch": 0},
+    "kvatch-plane-gate": {"world": "OblivionMQKvatch", "pos": [1373.0, -1088.0, 700.0], "heading": 0, "pitch": 5},
+    "bliss-gate": {"world": "SENSBliss", "pos": [41572.0, 24927.0, 3320.0], "heading": 135, "pitch": 0},
+    "crucible-gate": {"world": "SENSCrucible", "pos": [46132.0, 12265.0, 1330.0], "heading": 315, "pitch": 0},
+    "highcross": {"world": "SEWorld", "pos": [38897.0, 66520.0, 4470.0], "heading": 0, "pitch": 0},
+    "vilverin-entrance": {"cell": "Vilverin", "pos": [-5435.0, 86.0, 520.0], "heading": 0, "pitch": 0}
+  },
+
+  "scenes": [
+    {"id": "niben-flight", "type": "fly", "world": "Tamriel", "hour": 12, "weather": "Clear", "speed": 2000, "pitch": -6, "comment": "Up the Upper Niben from the south-east, across Lake Rumare, to the Imperial City", "path": [[65413, 8069, 700], [62218, 13824, 700], [56443, 22774, 700], [53248, 29184, 700], [48128, 31744, 700], [40448, 31300, 800], [32768, 36864, 900], [27648, 39322, 1200], [28000, 45000, 2500], [28590, 50954, 4500]], "tags": ["traversal", "outdoor", "water"]},
+    {"id": "rumare-south-shore", "type": "static", "at": "rumare-south-shore", "hour": 12, "weather": "Clear", "visual": true, "tags": ["outdoor", "water"]},
+    {"id": "vilverin-exit", "type": "door", "at": "vilverin-entrance", "hour": 12, "weather": "Clear", "comment": "From inside the Ayleid ruin of Vilverin out to the shore of Lake Rumare, and back in", "tags": ["transition", "dungeon"], "legs": [{"name": "out", "door": "00016B61"}, {"name": "in", "door": "00066AC8"}]},
+    {"id": "leyawiin-jungle-flight", "type": "fly", "world": "Tamriel", "hour": 12, "weather": "Clear", "speed": 900, "pitch": -3, "lookOffset": -20, "comment": "North along the east bank of the Niben below Leyawiin, low between the trees, water on the left", "path": [[101000, -167936, 350], [100872, -165888, 350], [99208, -163840, 380], [97488, -161792, 350], [98952, -159744, 300], [98440, -157696, 330], [98184, -155648, 350], [99208, -153600, 330], [100744, -151552, 400], [101128, -149504, 350], [101512, -147456, 320], [101256, -145408, 300], [101384, -143360, 320]], "tags": ["traversal", "outdoor", "water", "foliage"]},
+    {"id": "leyawiin-east-gate", "type": "static", "at": "leyawiin-east-gate", "hour": 12, "weather": "Clear", "visual": true, "tags": ["outdoor", "water"]},
+    {"id": "leyawiin-east-gate-rain", "type": "static", "at": "leyawiin-east-gate", "hour": 12, "weather": "Rain", "tags": ["outdoor", "weather"]},
+    {"id": "oblivion-gate", "type": "static", "at": "kvatch-plane-gate", "hour": 12, "weather": "Oblivion", "visual": true, "tags": ["oblivion"]},
+    {"id": "oblivion-flight", "type": "fly", "world": "OblivionMQKvatch", "hour": 12, "weather": "Oblivion", "speed": 1000, "pitch": -4, "comment": "From the gate north across the island to the towers of the Kvatch gate's plane", "path": [[1373, -1088, 1500], [900, 2500, 2000], [300, 6000, 2400], [0, 9000, 2800], [500, 13000, 3400], [1500, 16500, 4000], [2400, 19000, 4300]], "tags": ["oblivion", "traversal"]},
+    {"id": "si-dementia-flight", "type": "fly", "world": "SEWorld", "hour": 12, "weather": "SEClear", "speed": 1500, "pitch": -8, "comment": "Over the Dementia swamps north-east to New Sheoth", "path": [[16000, -14000, 1500], [22000, -6000, 2600], [30000, 2000, 2300], [38000, 8000, 1900], [43000, 11000, 2100]], "tags": ["shivering", "traversal", "outdoor"]},
+    {"id": "si-crucible", "type": "static", "at": "crucible-gate", "hour": 12, "weather": "SEClear", "visual": true, "tags": ["shivering", "city"]},
+    {"id": "si-bliss", "type": "static", "at": "bliss-gate", "hour": 12, "weather": "SEClear", "visual": true, "tags": ["shivering", "city"]},
+    {"id": "si-bliss-gate", "type": "door", "at": "bliss-gate", "hour": 12, "enter": "00012C9A", "exit": "00012F6F", "tags": ["shivering", "transition", "gate"]},
+    {"id": "si-highcross", "type": "static", "at": "highcross", "hour": 12, "weather": "SEClear", "visual": true, "tags": ["shivering", "outdoor"]}
+  ]
+}

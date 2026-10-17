@@ -1,0 +1,9 @@
+build/
+*.log
+__pycache__/
+# Benchmark output and downloaded tools (UE4SS, PresentMon)
+captures/
+third_party/
+lab/
+# Benchmark runtime files (command/log files shared with the in-game mod, status, locks, save guard)
+run/

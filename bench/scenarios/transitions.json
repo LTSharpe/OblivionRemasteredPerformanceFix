@@ -1,0 +1,47 @@
+{
+  "name": "transitions",
+  "description": "Area transitions: everything in cheydinhal and world, plus doors that start in the open world (Tamriel, a 'parent world' of the game's fast-transition system: the interior can be injected into the loaded world and the way back out needs no travel), a city gate (Cheydinhal, an 'injected world'), a chain through the city, long holds inside (interior fps with the outdoor world loaded) and a door soak. Door refs and arrival points from esm_lookup.py cells/markers.",
+  "include": ["cheydinhal", "world"],
+  "record": ["r.FidelityFX.FSR3.Enabled"],
+
+  "places": {
+    "wawnet-inn-front": {"world": "Tamriel", "pos": [-458.6, 63928.2, 1125.3], "heading": 179.4, "pitch": 0},
+    "vilverin-outside": {"world": "Tamriel", "pos": [52034.6, 87420.5, 333.9], "heading": 266.8, "pitch": 0},
+    "roxey-inn-front": {"world": "Tamriel", "pos": [47930.5, 102965.4, 3032.0], "heading": 147.1, "pitch": 0},
+    "pellgate-mare-front": {"world": "Tamriel", "pos": [21477.9, 23455.4, 410.6], "heading": 341.4, "pitch": 0},
+    "pellgate-irroki-front": {"world": "Tamriel", "pos": [21889.3, 24560.8, 656.0], "heading": 213.4, "pitch": 0},
+    "wawnet-inn-room": {"cell": "WawnetInnTavern", "pos": [-463.0, 2366.0, 979.0], "heading": 0.0, "pitch": 0},
+    "roxey-inn-room": {"cell": "RoxeyInn", "pos": [1759.0, 2729.0, 7133.0], "heading": 3.3, "pitch": 0},
+    "vilverin-hall": {"cell": "Vilverin", "pos": [-5435.0, 86.0, 510.0], "heading": 0.0, "pitch": 0},
+    "ic-market-ft": {"world": "ICMarketDistrict", "pos": [33298.3, 68771.1, 3550.0], "heading": 41.3, "pitch": 0, "comment": "Imperial City Market District (start of the fast travel scene: a city, so no wildlife blocks fast travel)"},
+    "west-gate-out": {"world": "Tamriel", "pos": [114525.0, 91857.0, 7110.0], "heading": 266.0, "pitch": 0, "comment": "outside the Cheydinhal west gate, close enough to activate it (the gate's arrival point west-road is 177 units away, beyond the activation range)"}
+  },
+
+  "scenes": [
+    {"id": "wawnet-inn-door", "type": "door", "at": "wawnet-inn-front", "hour": 12, "weather": "Clear", "comment": "Wawnet Inn at Weye: from the open world into a house and back out", "enter": "00031386", "exit": "00031383", "tags": ["transition", "tamriel"]},
+    {"id": "vilverin-door", "type": "door", "at": "vilverin-outside", "hour": 12, "weather": "Clear", "comment": "Ayleid ruin of Vilverin from the lake shore: in, then back out (vilverin-exit does it the other way round, starting inside)", "tags": ["transition", "tamriel", "dungeon"], "legs": [{"name": "in", "door": "00066AC8"}, {"name": "out", "door": "00016B61"}]},
+    {"id": "roxey-inn-door", "type": "door", "at": "roxey-inn-front", "hour": 12, "weather": "Clear", "comment": "Roxey Inn on the Red Ring Road", "enter": "000AA381", "exit": "0002C8CE", "tags": ["transition", "tamriel"]},
+    {"id": "pellgate-mare-door", "type": "door", "at": "pellgate-mare-front", "hour": 12, "weather": "Clear", "comment": "The Sleeping Mare, Pell's Gate (village inn)", "enter": "00094ED1", "exit": "00094F7E", "tags": ["transition", "tamriel"]},
+    {"id": "pellgate-irroki-door", "type": "door", "at": "pellgate-irroki-front", "hour": 12, "weather": "Clear", "comment": "Irroki the Wide's House, Pell's Gate (a private house: bEnableFastTransitionPreLoadHouses)", "enter": "00094ED0", "exit": "00094F34", "tags": ["transition", "tamriel", "house"]},
+    {"id": "cheydinhal-gate-ft", "type": "door", "at": "west-gate-out", "hour": 12, "weather": "Clear", "comment": "Cheydinhal west gate from the road outside: in, out, in, out (with bEnableFastTransitionInjectedWorlds the city is injected into Tamriel)", "tags": ["transition", "gate", "city"], "legs": [{"name": "in", "door": "0000799C"}, {"name": "out", "door": "00007A6A"}, {"name": "in2", "at": "west-gate-out", "door": "0000799C"}, {"name": "out2", "door": "00007A6A"}]},
+    {"id": "cheydinhal-chain", "type": "door", "at": "west-gate-out", "hour": 12, "weather": "Clear", "comment": "Into the city by the west gate, to the Bridge Inn (teleport inside the city), into the inn and out, back to the gate (teleport) and out", "tags": ["transition", "gate", "city", "chain"], "legs": [{"name": "gate-in", "door": "0000799C"}, {"name": "inn-in", "at": "inn-front", "door": "00031BA3"}, {"name": "inn-out", "door": "000302CD"}, {"name": "gate-out", "at": "west-gate-in", "door": "00007A6A"}]},
+    {"id": "wawnet-inside-long", "type": "door", "at": "wawnet-inn-front", "hour": 12, "weather": "Clear", "comment": "Wawnet Inn, 30 s inside (interior frame rate with the outdoor world still loaded when the interior is injected), then out", "tags": ["transition", "tamriel", "interior-hold"], "legs": [{"name": "enter", "door": "00031386", "hold": 30}, {"name": "exit", "door": "00031383"}]},
+    {"id": "roxey-inside-long", "type": "door", "at": "roxey-inn-front", "hour": 12, "weather": "Clear", "comment": "Roxey Inn, 30 s inside, then out", "tags": ["transition", "tamriel", "interior-hold"], "legs": [{"name": "enter", "door": "000AA381", "hold": 30}, {"name": "exit", "door": "0002C8CE"}]},
+    {"id": "wawnet-soak", "type": "door", "at": "wawnet-inn-front", "hour": 12, "weather": "Clear", "hold": 6, "comment": "Soak: 12 times in and out of the Wawnet Inn (24 transitions) in one world", "tags": ["soak"], "legs": [
+      {"name": "in01", "door": "00031386"}, {"name": "out01", "door": "00031383"}, {"name": "in02", "door": "00031386"}, {"name": "out02", "door": "00031383"},
+      {"name": "in03", "door": "00031386"}, {"name": "out03", "door": "00031383"}, {"name": "in04", "door": "00031386"}, {"name": "out04", "door": "00031383"},
+      {"name": "in05", "door": "00031386"}, {"name": "out05", "door": "00031383"}, {"name": "in06", "door": "00031386"}, {"name": "out06", "door": "00031383"},
+      {"name": "in07", "door": "00031386"}, {"name": "out07", "door": "00031383"}, {"name": "in08", "door": "00031386"}, {"name": "out08", "door": "00031383"},
+      {"name": "in09", "door": "00031386"}, {"name": "out09", "door": "00031383"}, {"name": "in10", "door": "00031386"}, {"name": "out10", "door": "00031383"},
+      {"name": "in11", "door": "00031386"}, {"name": "out11", "door": "00031383"}, {"name": "in12", "door": "00031386"}, {"name": "out12", "door": "00031383"}]},
+    {"id": "fast-travel", "type": "door", "at": "ic-market-ft", "hour": 12, "weather": "Clear", "comment": "Map fast travel (the map's own icon click and the game's 'travel to ...?' box; legs need no door): Imperial City Market District -> Cheydinhal west gate (city world), -> Weye (Tamriel), -> Leyawiin west gate (city world), -> Imperial City Market District. Starts in a city: wildlife near Weye sometimes keeps the game from offering fast travel", "tags": ["fasttravel"], "legs": [
+      {"name": "to-cheydinhal", "fasttravel": "Cheydinhal - West Gate"}, {"name": "to-weye", "fasttravel": "Weye"},
+      {"name": "to-leyawiin", "fasttravel": "Leyawiin - West Gate"}, {"name": "to-ic-market", "fasttravel": "Imperial City Market District"}]},
+    {"id": "tamriel-weye-noon", "type": "static", "at": "wawnet-inn-front", "hour": 12, "weather": "Clear", "visual": true, "measure": 10, "comment": "Outside the Wawnet Inn (visual reference; also makes the next interior teleport start from Tamriel)", "tags": ["outdoor", "tamriel"]},
+    {"id": "wawnet-room", "type": "static", "at": "wawnet-inn-room", "hour": 12, "visual": true, "measure": 15, "comment": "Inside the Wawnet Inn, reached by teleport from Tamriel (injected when fast transition is on)", "tags": ["interior", "tamriel"]},
+    {"id": "roxey-front-noon", "type": "static", "at": "roxey-inn-front", "hour": 12, "weather": "Clear", "visual": true, "measure": 10, "tags": ["outdoor", "tamriel"]},
+    {"id": "roxey-room", "type": "static", "at": "roxey-inn-room", "hour": 12, "visual": true, "measure": 15, "comment": "Inside the Roxey Inn, by teleport from Tamriel", "tags": ["interior", "tamriel"]},
+    {"id": "vilverin-shore", "type": "static", "at": "vilverin-outside", "hour": 12, "weather": "Clear", "visual": true, "measure": 10, "tags": ["outdoor", "tamriel"]},
+    {"id": "vilverin-hall-view", "type": "static", "at": "vilverin-hall", "hour": 12, "visual": true, "measure": 15, "comment": "First hall of Vilverin, by teleport from Tamriel", "tags": ["interior", "tamriel", "dungeon"]}
+  ]
+}

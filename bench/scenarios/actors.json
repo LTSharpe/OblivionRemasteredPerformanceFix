@@ -1,0 +1,33 @@
+{
+  "name": "actors",
+  "description": "Many characters on screen: the Imperial City Market District in the morning, a spawned crowd of soldiers, and a spawned battle of Legion soldiers against Daedra at the Oblivion gate site south of Bruma.",
+  "settings": {},
+  "masks": [[0.94, 0.0, 0.06, 0.035]],
+  "defaults": {"hour": 12, "settle": 8, "measure": 20, "hold": 12},
+  "weathers": {"Clear": "00038EEE", "Cloudy": "00038EF0", "Overcast": "00038EEC", "Rain": "00038EF2", "Snow": "00038EED"},
+
+  "places": {
+    "ic-market-inn":     {"world": "ICMarketDistrict", "pos": [33298.3, 68771.1, 3550.0], "heading": 41.3, "pitch": 0},
+    "ic-market-courier": {"world": "ICMarketDistrict", "pos": [33365.1, 69791.8, 3540.0], "heading": 215, "pitch": 0},
+    "bruma-south-field": {"world": "Tamriel", "pos": [28000.0, 140500.0, 25420.0], "heading": 60, "pitch": 0},
+    "bruma-gate-field":  {"world": "Tamriel", "pos": [30050.0, 142010.0, 25650.0], "heading": 80, "pitch": 0}
+  },
+
+  "scenes": [
+    {"id": "ic-market-morning", "type": "static", "at": "ic-market-inn", "hour": 10, "weather": "Clear", "settle": 12, "tags": ["city", "actors"],
+     "comment": "Shops are open and the streets are busy; the district's own population, nothing spawned"},
+    {"id": "ic-market-morning-2", "type": "static", "at": "ic-market-courier", "hour": 10, "weather": "Clear", "tags": ["city", "actors"],
+     "comment": "Second view of the same crowd, from the Black Horse Courier toward the centre"},
+    {"id": "ic-market-inn-door", "type": "door", "at": "ic-market-inn", "hour": 10, "enter": "0002C3DC", "exit": "0002C26D", "tags": ["city", "actors", "transition"],
+     "comment": "Into The Merchants Inn and back out into the busy district"},
+    {"id": "actors-crowd", "type": "static", "at": "bruma-south-field", "hour": 12, "weather": "Clear", "settle": 12, "tags": ["actors"],
+     "comment": "40 Imperial Legion soldiers spawned around the player, no fighting: the steady cost of many characters",
+     "spawn": [{"id": "0018B118", "count": 20, "distance": 450, "side": "front"}, {"id": "0018B118", "count": 10, "distance": 450, "side": "left"}, {"id": "0018B118", "count": 10, "distance": 450, "side": "right"}]},
+    {"id": "actors-battle", "type": "static", "at": "bruma-gate-field", "hour": 12, "weather": "Clear", "settle": 4, "measure": 25, "detect": true, "tags": ["actors", "combat"],
+     "comment": "16 Legion soldiers against 20 Daedra at the gate site south of Bruma. Fights never run the same way twice: compare with repeats",
+     "spawn": [{"id": "0018D4CF", "count": 16, "distance": 500, "side": "left"},
+               {"id": "00000FD6", "count": 10, "distance": 500, "side": "right"},
+               {"id": "00000FD4", "count": 6, "distance": 750, "side": "right"},
+               {"id": "00034EA3", "count": 4, "distance": 650, "side": "front"}]}
+  ]
+}

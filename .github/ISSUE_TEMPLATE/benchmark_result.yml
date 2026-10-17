@@ -1,0 +1,40 @@
+name: Benchmark result
+description: Share a stock-vs-fix comparison made with tools/Bench-Report.ps1 (docs/benchmark.md).
+labels: [benchmark]
+body:
+  - type: input
+    id: cpu
+    attributes:
+      label: CPU
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: Graphics card and driver version
+    validations:
+      required: true
+  - type: input
+    id: profile
+    attributes:
+      label: Benchmark profile and fix version
+      placeholder: e.g. small, 1.0.0-beta
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Comparison report
+      description: Paste the `report.md` that `tools/Bench-Report.ps1` wrote (in `captures/bench/_report/<time>/`). It holds no user, PC or folder names.
+      render: markdown
+    validations:
+      required: true
+  - type: textarea
+    id: files
+    attributes:
+      label: result-*.json files
+      description: Drag the `result-*.json` files from the same folder here (per-scene numbers and settings, with personal data removed).
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes

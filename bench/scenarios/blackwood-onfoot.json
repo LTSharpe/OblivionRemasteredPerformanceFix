@@ -1,0 +1,151 @@
+{
+  "name": "blackwood-onfoot",
+  "description": "On-foot variant of blackwood: from a new game (no save), at dusk (20:00, clear), the character runs north with the game's own movement from the forest south of the Wayshrine of Stendarr along the flight's route to just south of the wayshrine (~37 s). About 4.5k units before the wayshrine, when the player crosses the middle of cell row -24 (y = -96256), the old engine attaches cell row -22 and the game creates the five worshippers at Sheogorath's Shrine (11k units to the north-west) with their weapons, plus two mudcrabs and a slaughterfish: a burst of 55-72 ms frames on the game thread. Not part of full; select with -Scenario blackwood-onfoot.",
+  "settings": {},
+  "record": [
+    "r.ScreenPercentage",
+    "Altar.UpscalingMethod",
+    "r.FidelityFX.FI.Enabled",
+    "t.MaxFPS",
+    "sg.ShadowQuality",
+    "r.Lumen.HardwareRayTracing",
+    "r.Lumen.HardwareRayTracing.LightingMode",
+    "r.Streaming.PoolSize"
+  ],
+  "masks": [
+    [
+      0.94,
+      0.0,
+      0.06,
+      0.035
+    ]
+  ],
+  "defaults": {
+    "hour": 20,
+    "weather": "Clear",
+    "settle": 3,
+    "measure": 60,
+    "hold": 12
+  },
+  "weathers": {
+    "Clear": "00038EEE"
+  },
+  "places": {
+    "blackwood-south": {
+      "world": "Tamriel",
+      "pos": [
+        82397.6,
+        -104400.8,
+        826
+      ],
+      "heading": 0,
+      "pitch": -3
+    }
+  },
+  "scenes": [
+    {
+      "id": "blackwood-walk",
+      "type": "walk",
+      "at": "blackwood-south",
+      "mode": "input",
+      "measure": 60,
+      "waypoints": [
+        [
+          82370,
+          -103853
+        ],
+        [
+          82434,
+          -103277
+        ],
+        [
+          82434,
+          -102701
+        ],
+        [
+          82434,
+          -102125
+        ],
+        [
+          82562,
+          -101549
+        ],
+        [
+          82818,
+          -101037
+        ],
+        [
+          82946,
+          -100461
+        ],
+        [
+          83074,
+          -99885
+        ],
+        [
+          83266,
+          -99373
+        ],
+        [
+          83522,
+          -98861
+        ],
+        [
+          83522,
+          -98285
+        ],
+        [
+          83650,
+          -97709
+        ],
+        [
+          83970,
+          -97261
+        ],
+        [
+          83970,
+          -96685
+        ],
+        [
+          83970,
+          -96109
+        ],
+        [
+          83970,
+          -95533
+        ],
+        [
+          83970,
+          -94957
+        ],
+        [
+          83970,
+          -94381
+        ],
+        [
+          83970,
+          -93805
+        ],
+        [
+          84034,
+          -93229
+        ],
+        [
+          84226,
+          -92717
+        ],
+        [
+          84418,
+          -92269
+        ]
+      ],
+      "comment": "On foot at running speed (337-342 units/s through APawn::AddMovementInput, walk mode input) from the start along the flight's route to just south of the wayshrine, ~37 s",
+      "tags": [
+        "traversal",
+        "outdoor"
+      ],
+      "hour": 20,
+      "weather": "Clear"
+    }
+  ]
+}

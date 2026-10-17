@@ -1,0 +1,394 @@
+{
+  "name": "roxey-night",
+  "description": "Reported in play 2026-10-09: fast travel to Roxey Inn at night, then along the Red Ring Road west to Sercen: ~45 fps before FG and stutters at 4K with FSR Performance and frame generation. Static view at the inn at night, then a terrain-following flight at running speed (340 u/s) from the inn front along the ROAD-graph path of silver-road (points 0-26) to just past Sercen. Fresh benchmark world.",
+  "profile": "user",
+  "settings": {},
+  "record": [
+    "r.ScreenPercentage",
+    "Altar.UpscalingMethod",
+    "r.FidelityFX.FI.Enabled",
+    "t.MaxFPS",
+    "sg.ShadowQuality",
+    "r.Lumen.HardwareRayTracing",
+    "r.Lumen.HardwareRayTracing.LightingMode",
+    "r.Streaming.PoolSize"
+  ],
+  "masks": [
+    [
+      0.94,
+      0.0,
+      0.06,
+      0.035
+    ]
+  ],
+  "defaults": {
+    "hour": 23,
+    "weather": "Clear",
+    "settle": 12,
+    "measure": 20,
+    "hold": 12
+  },
+  "weathers": {
+    "Clear": "00038EEE"
+  },
+  "places": {
+    "roxey-inn-road": {
+      "world": "Tamriel",
+      "pos": [
+        47930.5,
+        102965.4,
+        3032.0
+      ],
+      "heading": 245,
+      "pitch": 0
+    }
+  },
+  "scenes": [
+    {
+      "id": "roxey-night-static",
+      "type": "static",
+      "at": "roxey-inn-road",
+      "hour": 23,
+      "weather": "Clear",
+      "settle": 15,
+      "measure": 20,
+      "visual": true,
+      "tags": [
+        "outdoor",
+        "night",
+        "roxey"
+      ],
+      "comment": "Standing outside Roxey Inn at 23:00 looking west along the road: steady cost of the night view"
+    },
+    {
+      "id": "roxey-sercen-night",
+      "type": "fly",
+      "world": "Tamriel",
+      "hour": 23,
+      "weather": "Clear",
+      "settle": 15,
+      "speed": 340,
+      "pitch": -3,
+      "flyopt": "ease=1.5 easeout=1.5",
+      "tags": [
+        "traversal",
+        "outdoor",
+        "night",
+        "roxey"
+      ],
+      "comment": "Inn front -> road west past Sercen (36376, 103358) at running speed; first two points from esm_lookup path, the rest silver-road points 0-26",
+      "path": [
+        [
+          47930,
+          102965,
+          3452
+        ],
+        [
+          46357,
+          102150,
+          3724
+        ],
+        [
+          44784,
+          101334,
+          3720
+        ],
+        [
+          44381,
+          101629,
+          3804
+        ],
+        [
+          43979,
+          101924,
+          3940
+        ],
+        [
+          43576,
+          102220,
+          4044
+        ],
+        [
+          43149,
+          102407,
+          4113
+        ],
+        [
+          42711,
+          102628,
+          4188
+        ],
+        [
+          42272,
+          102848,
+          4185
+        ],
+        [
+          41834,
+          103069,
+          4188
+        ],
+        [
+          41395,
+          103289,
+          4121
+        ],
+        [
+          40916,
+          103309,
+          4068
+        ],
+        [
+          40438,
+          103212,
+          3943
+        ],
+        [
+          39960,
+          103114,
+          3836
+        ],
+        [
+          39482,
+          103017,
+          3716
+        ],
+        [
+          39004,
+          102920,
+          3516
+        ],
+        [
+          38526,
+          102822,
+          3204
+        ],
+        [
+          38048,
+          102725,
+          2980
+        ],
+        [
+          37570,
+          102627,
+          2844
+        ],
+        [
+          37092,
+          102530,
+          2705
+        ],
+        [
+          36864,
+          102390,
+          2588
+        ],
+        [
+          36566,
+          102164,
+          2508
+        ],
+        [
+          36073,
+          102169,
+          2471
+        ],
+        [
+          35581,
+          102175,
+          2463
+        ],
+        [
+          35088,
+          102181,
+          2468
+        ],
+        [
+          34596,
+          102186,
+          2460
+        ],
+        [
+          34103,
+          102192,
+          2444
+        ],
+        [
+          33611,
+          102197,
+          2417
+        ],
+        [
+          33437,
+          102598,
+          2476
+        ]
+      ]
+    },
+    {
+      "id": "roxey-sercen-noon",
+      "type": "fly",
+      "world": "Tamriel",
+      "hour": 12,
+      "weather": "Clear",
+      "settle": 15,
+      "speed": 340,
+      "pitch": -3,
+      "flyopt": "ease=1.5 easeout=1.5",
+      "tags": [
+        "traversal",
+        "outdoor",
+        "day",
+        "roxey"
+      ],
+      "comment": "The same flight at noon: day/night GPU comparison",
+      "path": [
+        [
+          47930,
+          102965,
+          3452
+        ],
+        [
+          46357,
+          102150,
+          3724
+        ],
+        [
+          44784,
+          101334,
+          3720
+        ],
+        [
+          44381,
+          101629,
+          3804
+        ],
+        [
+          43979,
+          101924,
+          3940
+        ],
+        [
+          43576,
+          102220,
+          4044
+        ],
+        [
+          43149,
+          102407,
+          4113
+        ],
+        [
+          42711,
+          102628,
+          4188
+        ],
+        [
+          42272,
+          102848,
+          4185
+        ],
+        [
+          41834,
+          103069,
+          4188
+        ],
+        [
+          41395,
+          103289,
+          4121
+        ],
+        [
+          40916,
+          103309,
+          4068
+        ],
+        [
+          40438,
+          103212,
+          3943
+        ],
+        [
+          39960,
+          103114,
+          3836
+        ],
+        [
+          39482,
+          103017,
+          3716
+        ],
+        [
+          39004,
+          102920,
+          3516
+        ],
+        [
+          38526,
+          102822,
+          3204
+        ],
+        [
+          38048,
+          102725,
+          2980
+        ],
+        [
+          37570,
+          102627,
+          2844
+        ],
+        [
+          37092,
+          102530,
+          2705
+        ],
+        [
+          36864,
+          102390,
+          2588
+        ],
+        [
+          36566,
+          102164,
+          2508
+        ],
+        [
+          36073,
+          102169,
+          2471
+        ],
+        [
+          35581,
+          102175,
+          2463
+        ],
+        [
+          35088,
+          102181,
+          2468
+        ],
+        [
+          34596,
+          102186,
+          2460
+        ],
+        [
+          34103,
+          102192,
+          2444
+        ],
+        [
+          33611,
+          102197,
+          2417
+        ],
+        [
+          33437,
+          102598,
+          2476
+        ]
+      ]
+    }
+  ]
+}

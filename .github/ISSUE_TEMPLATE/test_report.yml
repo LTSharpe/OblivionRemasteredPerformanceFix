@@ -1,0 +1,60 @@
+name: Test report (it works / it doesn't on my PC)
+description: Tried the beta? Tell us how it went on your hardware. This is how the fix gets out of beta.
+labels: [test-report]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every report helps, including "works fine, no difference". We especially need the Xbox / PC Game Pass version,
+        NVIDIA and Intel Arc graphics cards, Intel CPUs, CPUs with AVX-512 (Intel 11th gen, AMD Ryzen 7000/9000) and
+        Steam Deck.
+  - type: dropdown
+    id: result
+    attributes:
+      label: Overall
+      options: ["Works, smoother", "Works, no noticeable difference", "Works, but something is off (describe below)", "Doesn't load / crashes"]
+    validations:
+      required: true
+  - type: dropdown
+    id: store
+    attributes:
+      label: Which version of the game?
+      options: ["Steam", "Xbox / PC Game Pass", "Other"]
+    validations:
+      required: true
+  - type: input
+    id: cpu
+    attributes:
+      label: CPU
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: Graphics card and driver version
+    validations:
+      required: true
+  - type: input
+    id: ram
+    attributes:
+      label: RAM and VRAM
+      placeholder: e.g. 16 GB RAM, 8 GB VRAM
+  - type: input
+    id: settings
+    attributes:
+      label: Resolution, upscaler, frame generation, quality preset
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: First lines of OblivionPerfFix.log
+      description: The lines up to and including the patch report (which fixes were applied). The whole file is fine too. If no log appeared at all, write that here.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Where you played, fps before/after if you measured, anything that looked or felt different.

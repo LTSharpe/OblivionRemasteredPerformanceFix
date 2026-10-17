@@ -1,0 +1,101 @@
+{
+  "name": "gpuscene-vis",
+  "description": "GpuSceneKeepCapacity image check: frozen reference images of instance-heavy views (forest at noon, the road west of Roxey Inn at noon and at night). Compare a visual pass with the fix against one with -FixIni @{ GpuSceneKeepCapacity = 0 } (tools/Compare-Benchmark.ps1); the maintainers also ran it with every GPU scene buffer at twice its size (a lab-build key) to check the buffer layout. Profile user (the monitor's resolution); -Profile small works too. Not part of full; select with -Scenario gpuscene-vis -Pass visual.",
+  "profile": "user",
+  "settings": {},
+  "record": [
+    "r.ScreenPercentage",
+    "Altar.UpscalingMethod",
+    "r.FidelityFX.FI.Enabled",
+    "t.MaxFPS",
+    "sg.ShadowQuality",
+    "r.Lumen.HardwareRayTracing",
+    "r.Lumen.HardwareRayTracing.LightingMode",
+    "r.Streaming.PoolSize"
+  ],
+  "masks": [
+    [
+      0.94,
+      0.0,
+      0.06,
+      0.035
+    ]
+  ],
+  "defaults": {
+    "hour": 12,
+    "weather": "Clear",
+    "settle": 12,
+    "measure": 10,
+    "hold": 12
+  },
+  "weathers": {
+    "Clear": "00038EEE"
+  },
+  "places": {
+    "roxey-inn-road": {
+      "world": "Tamriel",
+      "pos": [
+        47930.5,
+        102965.4,
+        3032.0
+      ],
+      "heading": 245,
+      "pitch": 0
+    },
+    "doublecross-forest": {
+      "world": "Tamriel",
+      "pos": [
+        117567.2,
+        -120309.2,
+        3154.6
+      ],
+      "heading": 350.2,
+      "pitch": -0.6
+    },
+    "roxey-road-west": {
+      "world": "Tamriel",
+      "pos": [
+        45497.0,
+        101700.0,
+        3700.0
+      ],
+      "heading": 290,
+      "pitch": -4
+    }
+  },
+  "scenes": [
+    {
+      "id": "vis-forest-noon",
+      "type": "static",
+      "at": "doublecross-forest",
+      "hour": 12,
+      "weather": "Clear",
+      "visual": true,
+      "tags": [
+        "vis"
+      ]
+    },
+    {
+      "id": "vis-roxey-road-noon",
+      "type": "static",
+      "at": "roxey-road-west",
+      "hour": 12,
+      "weather": "Clear",
+      "visual": true,
+      "tags": [
+        "vis"
+      ]
+    },
+    {
+      "id": "vis-roxey-night",
+      "type": "static",
+      "at": "roxey-inn-road",
+      "hour": 23,
+      "weather": "Clear",
+      "visual": true,
+      "tags": [
+        "vis"
+      ]
+    }
+  ]
+}

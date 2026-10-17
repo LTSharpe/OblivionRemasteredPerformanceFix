@@ -1,0 +1,478 @@
+<#
+.SYNOPSIS
+  Shared helpers for the benchmark (dot-source this file): the command bridge to the OblvBench
+  UE4SS mod, game start/stop, and the "game in use" lock. Also handy on its own when
+  developing scenes:
+
+    . .\tools\BenchBridge.ps1
+    Send-Bench 'state'
+    Send-Bench 'tp world CheydinhalWorld 122787 90721 7278 150'
+#>
+
+$script:BenchRoot = Split-Path $PSScriptRoot
+. (Join-Path $PSScriptRoot 'GamePaths.ps1')
+# Runtime files (shared with the in-game mod; status, locks, save guard): the repo's run\ folder by default
+# (Get-BenchRuntimeDir in GamePaths.ps1; $env:OBLV_BENCH_RUNTIME overrides it).
+$script:BenchRun = Get-BenchRuntimeDir $script:BenchRoot
+$script:BenchCmdFile = Join-Path $script:BenchRun 'bench-commands.txt'
+$script:BenchLogFile = Join-Path $script:BenchRun 'bench.log'
+$script:BenchLockFile = Join-Path $script:BenchRun 'game.lock'
+$script:BenchHeartbeatFile = Join-Path $script:BenchRun 'bench-heartbeat.txt'   # rewritten every second by the mod's frame loop
+$script:BenchStatusFile = Join-Path $script:BenchRun 'bench-status.json'       # what the runner is doing (tools\Bench-Status.ps1)
+$script:BenchDeadline = $null                                                         # [datetime]: Assert-GameOk throws DEADLINE after it
+$script:BenchId = [int]((Get-Date).TimeOfDay.TotalSeconds) * 100
+$script:GameProcessName = 'OblivionRemastered-Win64-Shipping'
+# The game through Steam's library list, and the Saved folder where the game itself keeps config and saves
+# (GamePaths.ps1; $env:OBLIVION_GAME_DIR / $env:OBLIVION_SAVED_DIR override them).
+$script:GameDir = try { (Get-OblivionGame).GameDir } catch {
+    Write-Warning "$_ Trying the default Steam folder."; 'C:\Program Files (x86)\Steam\steamapps\common\Oblivion Remastered' }
+$script:GameWin64 = Join-Path $script:GameDir 'OblivionRemastered\Binaries\Win64'
+$script:GameSaved = (Get-OblivionSavedDir).Path
+$script:SteamAppId = 2623190
+$script:SteamProcesses = @('steam', 'steamwebhelper')
+$script:GameProcesses = @('OblivionRemastered', $script:GameProcessName)    # launcher stub and the game
+
+if (-not ('OblvBench.Clock' -as [type])) {
+    Add-Type -Path (Join-Path $PSScriptRoot 'BenchLib.cs') -ReferencedAssemblies System.Drawing, System.Core
+}
+
+function Get-QpcMs { [OblvBench.Clock]::QpcMs() }
+
+# ---------------------------------------------------------------- failing fast
+
+<# Throws "GAMEDOWN: <kind>: <what>" as soon as the watchdog (BenchLib GameWatch, started by Start-Game or
+   Watch-Game) has seen the game exit, crash, hang, stall or show an error, and "DEADLINE: ..." once the
+   run is past $script:BenchDeadline. Every wait in the benchmark goes through this, so nothing waits on
+   a game that can no longer answer. #>
+function Assert-GameOk {
+    if ([OblvBench.GameWatch]::Running) {
+        $p = [OblvBench.GameWatch]::Problem
+        if ($p) { throw "GAMEDOWN: $([OblvBench.GameWatch]::Kind): $p" }
+    }
+    if ($script:BenchDeadline -and (Get-Date) -gt $script:BenchDeadline) {
+        throw ("DEADLINE: the run passed its time limit ({0:HH:mm:ss}, -MaxMinutes)" -f $script:BenchDeadline)
+    }
+}
+
+<# Start-Sleep that gives up at once when the game goes down (see Assert-GameOk). #>
+function Wait-Game([double]$Seconds) {
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($true) {
+        Assert-GameOk
+        $left = $Seconds * 1000 - $sw.ElapsedMilliseconds
+        if ($left -le 0) { return }
+        Start-Sleep -Milliseconds ([int][math]::Min(250, $left))
+    }
+}
+
+<# Watches a running game (process exit, crash reporter, error dialogs, hung window, frame heartbeat). #>
+function Watch-Game($Game) {
+    if ([OblvBench.GameWatch]::Running -and [OblvBench.GameWatch]::Pid -eq $Game.Id) { return }
+    [OblvBench.GameWatch]::Start($Game.Id, $script:BenchHeartbeatFile)
+}
+
+# ---------------------------------------------------------------- status file
+
+$script:BenchStatus = [ordered]@{}
+<# Merges the values into bench-status.json in the runtime folder (written atomically; read by tools\Bench-Status.ps1). #>
+function Set-BenchStatus([hashtable]$Values) {
+    foreach ($k in $Values.Keys) { $script:BenchStatus[$k] = $Values[$k] }
+    $script:BenchStatus['updatedAt'] = (Get-Date).ToString('s')
+    $tmp = "$script:BenchStatusFile.tmp"
+    try {
+        [IO.File]::WriteAllText($tmp, ($script:BenchStatus | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding $false))
+        Move-Item -LiteralPath $tmp -Destination $script:BenchStatusFile -Force
+    } catch { }
+}
+
+# ---------------------------------------------------------------- scenarios
+
+<# Loads bench\scenarios\<name>.json. "include": ["a", "b"] pulls in the scenes, places, weathers and
+   masks of other scenarios (the including file wins where both define the same thing). #>
+function Get-BenchScenario([string]$Name) {
+    $path = Join-Path $script:BenchRoot "bench\scenarios\$Name.json"
+    if (-not (Test-Path $path)) { throw "no scenario '$Name' ($path)" }
+    $s = Get-Content $path -Raw | ConvertFrom-Json
+    foreach ($key in 'settings', 'defaults', 'weathers', 'places') { if (-not $s.PSObject.Properties[$key]) { $s | Add-Member NoteProperty $key ([pscustomobject]@{}) } }
+    foreach ($key in 'record', 'masks', 'scenes') { if (-not $s.PSObject.Properties[$key]) { $s | Add-Member NoteProperty $key @() } }
+    if ($s.PSObject.Properties['include']) {
+        foreach ($inc in @($s.include)) {
+            $i = Get-BenchScenario $inc
+            foreach ($key in 'settings', 'defaults', 'weathers', 'places') {
+                foreach ($p in $i.$key.PSObject.Properties) { if (-not $s.$key.PSObject.Properties[$p.Name]) { $s.$key | Add-Member NoteProperty $p.Name $p.Value } }
+            }
+            $s.scenes = @($s.scenes) + @($i.scenes)
+            $s.record = @(@($s.record) + @($i.record) | Select-Object -Unique)
+            if (-not @($s.masks).Count) { $s.masks = $i.masks }
+            foreach ($key in @('exec')) { if (-not $s.PSObject.Properties[$key] -and $i.PSObject.Properties[$key]) { $s | Add-Member NoteProperty $key $i.$key } }
+        }
+    }
+    $s
+}
+
+# ---------------------------------------------------------------- bridge
+
+function Read-BenchLogFrom([long]$Position) {
+    if (-not (Test-Path $script:BenchLogFile)) { return '' }
+    $fs = [IO.File]::Open($script:BenchLogFile, 'Open', 'Read', 'ReadWrite')
+    try {
+        if ($fs.Length -le $Position) { return '' }
+        $fs.Position = $Position
+        (New-Object IO.StreamReader $fs).ReadToEnd()
+    } finally { $fs.Dispose() }
+}
+
+function Get-BenchLogLength { if (Test-Path $script:BenchLogFile) { (Get-Item $script:BenchLogFile).Length } else { 0 } }
+
+function Add-BenchLine([string]$Line) {
+    $enc = New-Object Text.UTF8Encoding $false
+    for ($try = 0; ; $try++) {
+        try { [IO.File]::AppendAllText($script:BenchCmdFile, "$Line`n", $enc); return }
+        catch [IO.IOException] { if ($try -ge 20) { throw }; Start-Sleep -Milliseconds 10 }
+    }
+}
+
+<# Sends "<verb> <args>" to the mod and returns its answer. Throws on ERR or timeout unless -NoThrow
+   (then returns $null). #>
+function Send-Bench {
+    param([Parameter(Mandatory, Position = 0)][string]$Command, [int]$TimeoutMs = 8000, [switch]$NoThrow)
+    $id = ++$script:BenchId
+    # a game that is down cannot answer: fail at once (-NoThrow callers, e.g. clean-up, just get $null)
+    if ([OblvBench.GameWatch]::Running -and [OblvBench.GameWatch]::Problem) { if ($NoThrow) { return $null }; Assert-GameOk }
+    $pos = Get-BenchLogLength
+    Add-BenchLine "$id $Command"
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+        $m = [regex]::Match((Read-BenchLogFrom $pos), "(?m)^\S+ ACK $id (OK|ERR) ?(.*?)\r?$")
+        if ($m.Success) {
+            if ($m.Groups[1].Value -eq 'OK') { return $m.Groups[2].Value }
+            if ($NoThrow) { return $null }
+            throw "OblvBench: '$Command' failed: $($m.Groups[2].Value)"
+        }
+        if ([OblvBench.GameWatch]::Running -and [OblvBench.GameWatch]::Problem) { if ($NoThrow) { return $null }; Assert-GameOk }
+        Start-Sleep -Milliseconds 15
+    }
+    if ($NoThrow) { return $null }
+    throw "OblvBench: no answer to '$Command' within $TimeoutMs ms (game stalled, or mod not loaded)"
+}
+
+function ConvertFrom-BenchState([string]$Text) {
+    $h = @{}
+    foreach ($m in [regex]::Matches($Text, '(\w+)=(\S*)')) { $h[$m.Groups[1].Value] = $m.Groups[2].Value }
+    $h
+}
+
+<# Full state, or with -Light only what is cheap to read every 100 ms (position, level, travel flag). #>
+function Get-BenchState([int]$TimeoutMs = 8000, [switch]$Light) {
+    $s = Send-Bench $(if ($Light) { 'where' } else { 'state' }) -TimeoutMs $TimeoutMs -NoThrow
+    if ($null -eq $s) { return $null }
+    ConvertFrom-BenchState $s
+}
+
+<# Polls the state until the condition (scriptblock taking the state hashtable) has held for
+   -Stable consecutive polls. Returns the last state, or $null on timeout. #>
+function Wait-BenchState {
+    param([Parameter(Mandatory)][scriptblock]$Condition, [double]$TimeoutSec = 60, [int]$Stable = 1, [int]$PollMs = 200)
+    $sw = [Diagnostics.Stopwatch]::StartNew(); $ok = 0
+    while ($sw.Elapsed.TotalSeconds -lt $TimeoutSec) {
+        Assert-GameOk
+        $s = Get-BenchState 3000
+        if ($s -and (& $Condition $s)) { $ok++; if ($ok -ge $Stable) { return $s } } else { $ok = 0 }
+        Start-Sleep -Milliseconds $PollMs
+    }
+    $null
+}
+
+<# "EV ..." lines the mod logged after a log position, with the mod's clock (seconds). #>
+function Get-BenchEvents([long]$Position) {
+    foreach ($line in (Read-BenchLogFrom $Position) -split "`r?`n") {
+        if ($line -match '^(\S+) EV (.*)$') { [pscustomobject]@{ Clock = [double]$Matches[1]; Text = $Matches[2] } }
+    }
+}
+
+# ---------------------------------------------------------------- game process
+
+function Get-Game { Get-Process $script:GameProcessName -ErrorAction SilentlyContinue | Select-Object -First 1 }
+
+# ---------------------------------------------------------------- staying out of the PC user's way
+# You may be working on this PC while runs go on (docs\benchmark.md, "Staying out of the way"): no window, no focus
+# change, no confined cursor, no sound, Steam usable as normal.
+
+$script:BenchMutedFile = Join-Path $script:BenchRun 'bench-audio-muted.txt'   # exists while the game may be left muted (Windows remembers it)
+[OblvBench.GameAudio]::FlagPath = $script:BenchMutedFile                          # also in a process that only un-mutes (-Close, the idle watcher)
+
+<# Asks Steam to start the game. Not with Start-Process from here: this process descends from the app the PC user
+   is typing in, so it can pass on the right to take the foreground (ShellExecute -> Steam -> the game), and then
+   Steam's launch dialog or the game takes the keyboard focus from the PC user (2026-10-06: typing interrupted during
+   a launch). The request goes through a process that Windows' WMI service creates, which has no such right;
+   Start-Process only if WMI fails. #>
+function Start-SteamLaunch {
+    $cmd = (Get-ItemProperty 'Registry::HKEY_CLASSES_ROOT\steam\Shell\Open\Command' -ErrorAction SilentlyContinue).'(default)'
+    $url = "steam://rungameid/$($script:SteamAppId)"
+    if ($cmd -match '%1') {
+        try {
+            $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = ($cmd -replace '%1', $url) } -ErrorAction Stop
+            if ($r.ReturnValue -eq 0) { return }
+            Write-Warning "launch through WMI failed (code $($r.ReturnValue)): asking Steam directly"
+        } catch { Write-Warning "launch through WMI failed ($_): asking Steam directly" }
+    }
+    Start-Process $url
+}
+
+<# The bench-only hook DLL (tools\benchhook), built on demand; $null (with a warning) if it cannot be built. #>
+function Get-BenchHookDll {
+    if ($script:BenchHookDll) { return $script:BenchHookDll }
+    try { $script:BenchHookDll = & (Join-Path $PSScriptRoot 'benchhook\build.ps1') | Select-Object -Last 1 }
+    catch { Write-Warning "OblvBenchHook.dll not available ($_): the game window is only kept off-screen from outside, it can flash up briefly" }
+    $script:BenchHookDll
+}
+
+<# From now on (until Stop-Unobtrusive or the end of this process): the game's window is created and kept
+   off-screen, without a taskbar button and never active (hook DLL in the game's window thread; it stays in
+   effect in a game left running after this process ends), Steam's launch dialog goes off-screen, the focus
+   goes back to the PC user if the game or that dialog takes it, a cursor confined by the game is released, and
+   the game is muted in the volume mixer (unless -Audible). Safe to call again. #>
+function Start-Unobtrusive([switch]$Audible, [switch]$Capturable) {
+    $dll = Get-BenchHookDll
+    if ($dll) { [OblvBench.GameHider]::Start($dll, [string[]]@($script:GameProcessName)); if ($PSBoundParameters.ContainsKey('Capturable')) { [OblvBench.GameHider]::SetCapturable([bool]$Capturable) } }   # -Capturable (the runner always passes it; Start-Game's call keeps it): owned window, so OBS can capture it
+    [OblvBench.WindowKeeper]::Keep([string[]]$script:SteamProcesses, [string[]]$script:GameProcesses)
+    if (-not $Audible) { [OblvBench.GameAudio]::Start([string[]]@($script:GameProcessName)) }
+    if ($g = Get-Game) { Start-CrashGuard $g.Id }        # a game started earlier (parked, or restarted after a crash)
+}
+
+$script:CrashGuardPidFile = Join-Path $script:BenchRun 'crash-guard.pid'   # "<guard pid> <game pid>"
+
+<# Makes sure a hidden tools\Crash-Guard.ps1 keeps this game's crash UI (UE's crash reporter, Windows error
+   reporting, its message boxes, AMD's bug report tool) off the screen for as long as the game runs, also between
+   benchmark runs (hand probing). One guard per game process; it ends by itself 20 s after the game. Backs up the
+   hook DLL in the game, which keeps the crash reporter from starting at all (docs\benchmark.md, "Staying out of
+   the way"). #>
+function Start-CrashGuard([int]$GamePid) {
+    if (Test-Path $script:CrashGuardPidFile) {
+        $p = ([IO.File]::ReadAllText($script:CrashGuardPidFile)).Trim() -split '\s+'
+        if ($p.Count -ge 2 -and [int]$p[1] -eq $GamePid) {
+            $g = Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$p[0])" -ErrorAction SilentlyContinue
+            if ($g -and $g.CommandLine -match 'Crash-Guard') { return }
+        }
+    }
+    $proc = Start-Process powershell -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+        "`"$(Join-Path $PSScriptRoot 'Crash-Guard.ps1')`"", '-GamePid', $GamePid)
+    Set-Content $script:CrashGuardPidFile "$($proc.Id) $GamePid" -Encoding ascii
+}
+
+function Stop-Unobtrusive {
+    [OblvBench.GameAudio]::Stop(); [OblvBench.WindowKeeper]::Stop(); [OblvBench.GameHider]::Stop()
+}
+
+<# Watch mode (-Visible): the hook DLL goes into the game as well, with "show" set, so its window is left alone (it comes
+   to the front as usual) while the game-side parts work as in a hidden run: no crash UI, and spectator mode's NPC
+   conversation guard (Set-BenchObserver). #>
+function Start-ShownHook {
+    $dll = Get-BenchHookDll
+    if ($dll) { [OblvBench.GameHider]::Start($dll, [string[]]@($script:GameProcessName), $true) }
+}
+
+<# Spectator mode's observer: with $true NPC AI treats the player as not there. The hook in the game
+   (tools\benchhook\BenchHook.cpp, "observer mode") gives no AI package the player as its target and refuses every
+   conversation an NPC starts with the player (forced greetings, which `tdetect` does not stop); and the player's
+   Chameleon is 100, so even with detection on (the battle's "detect": true) nobody detects the player, and no enemy
+   fights it. $false gives the player back. Returns the hook's state in the given game, e.g. "installed, process
+   SetPackageTarget slot +0x1C8, ...". #>
+function Set-BenchObserver([bool]$On, [int]$GamePid = 0) {
+    [OblvBench.GameHider]::SetObserver($On)
+    Send-Bench "obv player.setav chameleon $(if ($On) { 100 } else { 0 })" -NoThrow | Out-Null
+    if (-not $GamePid -and ($g = Get-Game)) { $GamePid = $g.Id }
+    [OblvBench.GameHider]::TalkGuardText([OblvBench.GameHider]::TalkGuardFor($GamePid))
+}
+
+<# What the hider, the keeper and the muter did since the last call, one line each. #>
+function Get-UnobtrusiveLog {
+    foreach ($l in [OblvBench.GameHider]::TakeLog()) { "hook: $l" }
+    foreach ($l in [OblvBench.WindowKeeper]::TakeLog()) { "window: $l" }
+    foreach ($l in [OblvBench.GameAudio]::TakeLog()) { "audio: $l" }
+}
+
+<# Un-mutes the game in the volume mixer (Windows would keep it muted for the next launch too). Returns the
+   number of audio sessions found: 0 = no running game with audio, so nothing could be done (the flag file
+   then stays, and the next benchmark game or Repair-GameMute un-mutes it). #>
+function Set-GameUnmuted {
+    [OblvBench.GameAudio]::Stop()
+    $n = 0
+    try { $n = [OblvBench.GameAudio]::SetMute([string[]]@($script:GameProcessName), $false) } catch { Write-Warning "un-muting the game failed: $_" }
+    $n
+}
+
+<# Turns the game's own master volume to 0 (only for this game session: the settings the game writes as it
+   quits are put back by the save guard) and waits until its audio session's meter shows silence, so the
+   mixer mute can be lifted without a sound. $true when silent. #>
+function Set-GameSilent([int]$TimeoutMs = 3000) {
+    $r = Send-Bench 'cvar Altar.Audio.MasterVolume 0' -TimeoutMs $TimeoutMs -NoThrow
+    if ($r -notmatch '=0(\.0*)?$') { return $false }
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+        $peak = try { [OblvBench.GameAudio]::Peak([string[]]@($script:GameProcessName)) } catch { 1 }
+        if ($peak -lt 0.0001) { Start-Sleep -Milliseconds 100; return $true }   # also -1: no audio session, nothing to hear
+        Start-Sleep -Milliseconds 50
+    }
+    $false
+}
+
+<# A game that went down while the benchmark had it muted stays muted in Windows' volume mixer: if one runs
+   now (e.g. the player's), un-mute it. #>
+function Repair-GameMute {
+    if ((Test-Path $script:BenchMutedFile) -and (Get-Game) -and -not [OblvBench.GameAudio]::Running) {
+        if ((Set-GameUnmuted) -gt 0) { 'the game had been left muted by a benchmark that went down: un-muted' }
+    }
+}
+
+<# Brings a benchmark game (hidden off-screen) onto the primary monitor with a taskbar button, un-muted and in
+   front, to look at it or play; Hide-GameWindow puts it back. A new run hides it again. #>
+function Show-GameWindow {
+    $g = Get-Game
+    if (-not $g) { throw 'no game running' }
+    [OblvBench.GameHider]::SetShow($true)
+    Set-BenchObserver $false $g.Id | Out-Null               # to play it, NPCs must see the player and talk to it
+    Set-GameUnmuted | Out-Null
+    [OblvBench.WindowKeeper]::BringOnScreen([OblvBench.GameWatch]::FindGameWindow($g.Id))
+}
+
+function Hide-GameWindow {
+    $g = Get-Game
+    if (-not $g) { throw 'no game running' }
+    [OblvBench.GameHider]::SetShow($false)
+    [OblvBench.WindowKeeper]::SendOffScreen([OblvBench.GameWatch]::FindGameWindow($g.Id))
+}
+
+# ---------------------------------------------------------------- UE4SS only while the benchmark uses the game
+# UE4SS (and the OblvBench/OblvLab mods) is put into the game folder just before the benchmark starts the game and taken
+# out again once the game has closed (Install-UE4SS.ps1 -Enable / -Disable), so a game started from Steam by the player
+# runs without it (docs\benchmark.md, "UE4SS only during benchmark runs"). $env:OBLIVION_UE4SS_DIR picks another
+# unpacked UE4SS build for the benchmark (default third_party\ue4ss).
+
+<# Puts UE4SS and the project's mods into the game folder (the game must be closed). Throws if it cannot. #>
+function Enable-BenchUE4SS {
+    & (Join-Path $PSScriptRoot 'Install-UE4SS.ps1') -Enable -Quiet
+}
+
+<# Takes UE4SS out of the game folder once no game runs (UE4SS.log and crash dumps go to <runtime>\ue4ss-logs).
+   Never throws: returns what it did, or why not. #>
+function Disable-BenchUE4SS {
+    if (Get-Process $script:GameProcesses -ErrorAction SilentlyContinue) { return 'UE4SS left enabled: the game is still running' }
+    try { & (Join-Path $PSScriptRoot 'Install-UE4SS.ps1') -Disable -Quiet; 'UE4SS disabled (a game started outside the benchmark runs without it)' }
+    catch { "could not disable UE4SS: $_" }
+}
+
+<# Why Steam did not start the game, from its UI log (logs\webhelper_js.txt) since $Since; $null if nothing known.
+   (2026-10-15, worker cellrow) A launch-time Steam Cloud sync failure makes Steam show a "cloud sync failed" dialog in
+   its launch window, which the benchmark keeps hidden, and Steam then ignores every further launch request until
+   someone answers it in Steam (a person's decision: the benchmark does not answer it). #>
+function Get-SteamLaunchProblem([datetime]$Since) {
+    try {
+        $root = if (Get-Command Get-SteamRoot -ErrorAction SilentlyContinue) { Get-SteamRoot } else { $null }
+        if (-not $root) { $root = (Get-ItemProperty 'HKCU:\Software\Valve\Steam' -ErrorAction SilentlyContinue).SteamPath }
+        $f = if ($root) { Join-Path $root 'logs\webhelper_js.txt' } else { $null }
+        if (-not $f -or -not (Test-Path -LiteralPath $f)) { return $null }
+        $fs = [IO.File]::Open($f, 'Open', 'Read', 'ReadWrite')
+        try { $len = $fs.Length; $fs.Position = [Math]::Max(0, $len - 65536); $tail = (New-Object IO.StreamReader($fs)).ReadToEnd() } finally { $fs.Dispose() }
+        foreach ($l in ($tail -split "`n")) {
+            if ($l -notmatch '^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\].*(cloud sync failed dialog|syncfailed)') { continue }
+            if ([datetime]::ParseExact($Matches[1], 'yyyy-MM-dd HH:mm:ss', $null) -lt $Since.AddSeconds(-2)) { continue }
+            return "Steam's cloud sync of the game's saves failed at launch and Steam waits for an answer in its (hidden) launch dialog ($($l.Trim())); it ignores further launches until someone answers it in Steam or Steam is restarted"
+        }
+    } catch {}
+    $null
+}
+
+function Start-Game {
+    param([int]$TimeoutSec = 240, [switch]$Unobtrusive, [switch]$Audible)
+    if (Get-Game) { throw 'The game is already running.' }
+    # Steam refuses a launch while the previous instance (launcher stub, crash reporter) is still around
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ((Get-Process OblivionRemastered, CrashReportClient -ErrorAction SilentlyContinue) -and $sw.Elapsed.TotalSeconds -lt 30) { Start-Sleep -Milliseconds 500 }
+    # New run: the mod starts reading at the end of the command file, so empty both files first.
+    Set-Content $script:BenchCmdFile '' -NoNewline -Encoding ascii
+    Set-Content $script:BenchLogFile '' -NoNewline -Encoding ascii
+    if (Test-Path $script:BenchHeartbeatFile) { Remove-Item -LiteralPath $script:BenchHeartbeatFile -ErrorAction SilentlyContinue }
+    Enable-BenchUE4SS                      # only for this game: taken out again once it has closed
+    if ($Unobtrusive) { Start-Unobtrusive -Audible:$Audible } else { Start-ShownHook }
+    $launchedAt = Get-Date
+    Start-SteamLaunch
+    $sw = [Diagnostics.Stopwatch]::StartNew(); $asked = 1; $checked = 0
+    while (-not ($p = Get-Game)) {
+        if ($sw.Elapsed.TotalSeconds -gt 60 * $asked -and $asked -lt 2) { Start-SteamLaunch; $asked++ }   # Steam sometimes drops the first request
+        if ($sw.Elapsed.TotalSeconds -gt $checked + 10) {   # a known Steam reason ends the wait early
+            $checked = $sw.Elapsed.TotalSeconds
+            $why = Get-SteamLaunchProblem $launchedAt
+            if ($why) { throw "The game did not start: $why" }
+        }
+        if ($sw.Elapsed.TotalSeconds -gt $TimeoutSec) {
+            $why = Get-SteamLaunchProblem (Get-Date).AddHours(-12)
+            throw "The game process did not appear within $TimeoutSec s (is Steam running? Did it show an error? The benchmark keeps Steam minimised; Steam\logs\console_log.txt and webhelper_js.txt have the reason)$(if ($why) { ". Last known Steam problem: $why" })"
+        }
+        if ($script:BenchDeadline) { Assert-GameOk }
+        Start-Sleep -Milliseconds 500
+    }
+    Watch-Game $p                          # from here on a crash or hang during start-up ends the wait at once
+    if ($Unobtrusive) { Start-CrashGuard $p.Id }   # its crash UI stays off the screen for as long as it runs
+    while ($true) {
+        Assert-GameOk
+        $p.Refresh()
+        if ([OblvBench.GameWatch]::FindGameWindow($p.Id) -ne [IntPtr]::Zero -and (Read-BenchLogFrom 0) -match 'LOADED bench\.lua') { break }   # not MainWindowHandle: it skips owned windows (-Record)
+        if ($sw.Elapsed.TotalSeconds -gt $TimeoutSec) { throw "No window / OblvBench mod within $TimeoutSec s. Is UE4SS installed (tools\Install-UE4SS.ps1)?" }
+        Start-Sleep -Milliseconds 500
+    }
+    $p
+}
+
+function Stop-Game {
+    param([int]$GraceSec = 12)
+    [OblvBench.GameWatch]::Stop()          # quitting is not a crash
+    $p = Get-Game
+    if (-not $p) { return }
+    if ((Test-Path $script:BenchMutedFile) -or [OblvBench.GameAudio]::Running) {
+        # Windows would remember the mute, so un-mute while the game still runs, but silence it first: a game
+        # parked at the main menu plays the main theme, and the PC user heard it for the seconds the quit took.
+        if (Set-GameSilent) { Set-GameUnmuted | Out-Null }
+        else {
+            # could not silence it (mod not answering): un-mute and end it at once rather than let it play for seconds
+            Write-Host 'Could not silence the game before un-muting it; ending it.'
+            Set-GameUnmuted | Out-Null
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
+    if (-not $p.HasExited) { Send-Bench 'quit' -TimeoutMs 3000 -NoThrow | Out-Null }
+    if (-not $p.WaitForExit($GraceSec * 1000)) {
+        Write-Host 'Game did not quit by itself; closing it.'
+        Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+        $p.WaitForExit(15000) | Out-Null
+    }
+    # the launcher stub exits with the game; give it a moment so the next start is clean
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ((Get-Process OblivionRemastered -ErrorAction SilentlyContinue) -and $sw.Elapsed.TotalSeconds -lt 15) { Start-Sleep -Milliseconds 500 }
+}
+
+# ---------------------------------------------------------------- "game in use" lock
+
+<# Other sessions measure on the same game instance. A lock file plus a scan for running capture
+   tools keeps the benchmark from restarting the game under them. #>
+function Get-GameBusyReason {
+    if (Test-Path $script:BenchLockFile) {
+        $text = (Get-Content $script:BenchLockFile -Raw)
+        $stale = $false
+        if ($text -match 'pid=(\d+)') { $stale = ([int]$Matches[1] -eq $PID) -or -not (Get-Process -Id ([int]$Matches[1]) -ErrorAction SilentlyContinue) }
+        if (-not $stale) { return "lock file $($script:BenchLockFile): $($text.Trim())" }
+    }
+    $mine = $PID
+    $busy = Get-CimInstance Win32_Process -Filter "Name='powershell.exe' or Name='pwsh.exe' or Name like 'PresentMon%'" |
+        Where-Object { $_.ProcessId -ne $mine -and $_.CommandLine -match 'Profile-Oblivion|Run-ABTest|Sample-Stacks|Count-Calls|Trace-Vtable|Snap-Callers|Log-Args|Compare-Settings|Run-Benchmark|PresentMon' -and $_.CommandLine -notmatch 'Get-CimInstance' }
+    if ($busy) { return "another capture is running: " + (($busy | ForEach-Object { "pid $($_.ProcessId) $($_.Name)" }) -join ', ') }
+    $null
+}
+
+function Lock-Game([string]$Purpose) {
+    Set-Content $script:BenchLockFile ("owner=Run-Benchmark pid=$PID since={0} purpose=$Purpose" -f (Get-Date -Format 'HH:mm:ss')) -Encoding ascii
+}
+
+function Unlock-Game {
+    if ((Test-Path $script:BenchLockFile) -and ((Get-Content $script:BenchLockFile -Raw) -match "pid=$PID\b")) { Remove-Item -LiteralPath $script:BenchLockFile }
+}

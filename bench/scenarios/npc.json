@@ -1,0 +1,26 @@
+{
+  "name": "npc",
+  "description": "Per-NPC cost: the actors-crowd field south of Bruma, first empty, then with the crowd built up in steps (10, 20, 40 Legion soldiers; the 40 have the composition of actors-crowd). Each step ADDS soldiers, so run the scenes in this order in one pass (the default). Not part of full; select it with -Scenario npc.",
+  "settings": {},
+  "masks": [[0.94, 0.0, 0.06, 0.035]],
+  "defaults": {"hour": 12, "settle": 12, "measure": 20, "hold": 12},
+  "weathers": {"Clear": "00038EEE"},
+
+  "places": {
+    "bruma-south-field": {"world": "Tamriel", "pos": [28000.0, 140500.0, 25420.0], "heading": 60, "pitch": 0}
+  },
+
+  "scenes": [
+    {"id": "npc-field", "type": "static", "at": "bruma-south-field", "hour": 12, "weather": "Clear", "tags": ["npc"],
+     "comment": "The actors-crowd view with nobody spawned: the reference for the per-NPC cost"},
+    {"id": "npc-crowd-10", "type": "static", "at": "bruma-south-field", "hour": 12, "weather": "Clear", "tags": ["npc"],
+     "comment": "10 soldiers in front",
+     "spawn": [{"id": "0018B118", "count": 10, "distance": 450, "side": "front"}]},
+    {"id": "npc-crowd-20", "type": "static", "at": "bruma-south-field", "hour": 12, "weather": "Clear", "tags": ["npc"],
+     "comment": "10 more in front: 20",
+     "spawn": [{"id": "0018B118", "count": 10, "distance": 450, "side": "front"}]},
+    {"id": "npc-crowd-40", "type": "static", "at": "bruma-south-field", "hour": 12, "weather": "Clear", "tags": ["npc"],
+     "comment": "10 more on each side: 40, the composition of actors-crowd",
+     "spawn": [{"id": "0018B118", "count": 10, "distance": 450, "side": "left"}, {"id": "0018B118", "count": 10, "distance": 450, "side": "right"}]}
+  ]
+}
