@@ -1,0 +1,90 @@
+# Uploads a published release's zips to Nexus Mods (mod 5709) as new versions of the existing files, so everyone who
+# tracks the mod is notified and Vortex / Mod Organizer 2 show the update. Runs only when a maintainer publishes a
+# GitHub release (the draft that build.yml creates). The API key is the secret NEXUSMODS_API_KEY of the environment
+# "nexus" (limited to v* tags); without it this workflow only warns. Manual re-run: Actions > Nexus upload > Run
+# workflow, from the release tag.
+name: Nexus upload
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    environment: nexus
+    env:
+      TAG: ${{ github.event.release.tag_name || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check the API key is set
+        id: key
+        env:
+          KEY: ${{ secrets.NEXUSMODS_API_KEY }}
+        run: |
+          if [ -n "$KEY" ]; then echo "ok=1" >> "$GITHUB_OUTPUT"
+          else echo "::warning::NEXUSMODS_API_KEY is not set in the 'nexus' environment: nothing uploaded to Nexus"; fi
+
+      - uses: actions/checkout@v4
+        if: steps.key.outputs.ok == '1'
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Download the release's zips and check them
+        id: files
+        if: steps.key.outputs.ok == '1'
+        run: |
+          ver="${TAG#v}"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern 'OblivionPerfFix-*.zip' --pattern 'SHA256SUMS.txt'
+          sha256sum -c --ignore-missing SHA256SUMS.txt
+          for f in "OblivionPerfFix-$ver.zip" "OblivionPerfFix-$ver-GamePass.zip"; do test -f "$f" || { echo "::error::$f missing"; exit 1; }; done
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "obse=$(test -f "OblivionPerfFix-$ver-OBSE.zip" && echo 1)" >> "$GITHUB_OUTPUT"
+          # This version's CHANGELOG section (the same text as the release notes' first part).
+          {
+            echo 'changelog<<EOF_CHANGELOG'
+            awk -v h="## $ver" '$0 == h || index($0, h " ") == 1 { on = 1; next } on && /^## / { exit } on' CHANGELOG.md
+            echo 'EOF_CHANGELOG'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Steam
+        if: steps.key.outputs.ok == '1'
+        uses: Nexus-Mods/upload-action@98532f7670c27cbecc78fae03fa3e278147827e2  # v1.0.0-beta.11
+        with:
+          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
+          mod_id: '5709'
+          file_id: '23930'
+          filename: OblivionPerfFix-${{ steps.files.outputs.version }}.zip
+          display_name: OblivionPerfFix ${{ steps.files.outputs.version }}
+          version: ${{ steps.files.outputs.version }}
+          archive_existing_version: 'true'
+          update_mod_version: 'true'
+          changelog: ${{ steps.files.outputs.changelog }}
+
+      - name: Xbox / PC Game Pass
+        if: steps.key.outputs.ok == '1'
+        uses: Nexus-Mods/upload-action@98532f7670c27cbecc78fae03fa3e278147827e2  # v1.0.0-beta.11
+        with:
+          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
+          file_id: '23931'
+          filename: OblivionPerfFix-${{ steps.files.outputs.version }}-GamePass.zip
+          display_name: OblivionPerfFix ${{ steps.files.outputs.version }} GamePass
+          version: ${{ steps.files.outputs.version }}
+          archive_existing_version: 'true'
+
+      # The OBSE64 zip needs its own Nexus file entry first (one manual upload); then set the repository variable
+      # NEXUS_FILE_ID_OBSE to that file's ID and later versions go up here.
+      - name: OBSE64 route
+        if: steps.key.outputs.ok == '1' && steps.files.outputs.obse == '1' && vars.NEXUS_FILE_ID_OBSE != ''
+        uses: Nexus-Mods/upload-action@98532f7670c27cbecc78fae03fa3e278147827e2  # v1.0.0-beta.11
+        with:
+          api_key: ${{ secrets.NEXUSMODS_API_KEY }}
+          file_id: ${{ vars.NEXUS_FILE_ID_OBSE }}
+          filename: OblivionPerfFix-${{ steps.files.outputs.version }}-OBSE.zip
+          display_name: OblivionPerfFix ${{ steps.files.outputs.version }} OBSE64
+          version: ${{ steps.files.outputs.version }}
+          archive_existing_version: 'true'

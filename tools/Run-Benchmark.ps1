@@ -1356,6 +1356,14 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
                         $events = @(Get-BenchEvents $logPos | ForEach-Object { '{0:F2} {1}' -f $_.Clock, $_.Text })
                         Add-Segment @{ id = "$($scene.id)/$leg"; type = 'door'; t0 = $t0; t1 = $t1; tA = $tA; arrived = [bool]$arr; activationRetries = $retries
                             shot = Save-Shot "$($scene.id)-$leg"; state = Get-BenchState; events = $events }
+                        if ($ftTarget -and $arr) {
+                            # the map stays in the menu stack after the travel (menu=1, 2026-10-17 anvil-docks): a door
+                            # activated afterwards does nothing, so close it the way the player menu does
+                            for ($q = 0; $q -lt 3 -and (Get-BenchState).menu -eq '1'; $q++) { Send-Bench 'ft close' -NoThrow | Out-Null; Wait-Game 1 }
+                            $menuNow = (Get-BenchState).menu
+                            Step "  ${ftTarget}: menu=$menuNow after closing the map"
+                            if ($menuNow -eq '1') { Warn "$($scene.id)/${leg}: a menu is still open after the fast travel" }
+                        }
                         $script:place = $null
                         if (-not $arr) { break }
                     }

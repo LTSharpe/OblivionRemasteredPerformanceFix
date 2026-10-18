@@ -11,7 +11,7 @@
 #include <string_view>
 #include <vector>
 
-#define OPF_VERSION "1.0.0"
+#define OPF_VERSION "1.1.0"
 
 namespace opf {
 
@@ -75,6 +75,8 @@ struct Config {
     int rdgSubmitBatch = 32;           // RdgSubmitBatch: command lists per GPU submission while parallel translate is on (0 = off)
     int rdgSubmitMaxAgeUs = 1000;      // not in the shipped ini: longest time a command list is held back
     bool clothConfigCache = true;      // ClothConfigCache: skip the per-frame cloth config copy when nothing changed
+    bool frozenClothStretchFix = true; // FrozenClothStretchFix: a frozen cloth's LOD change keeps its pose (game bug: stretched robes)
+    bool npcFadeInNoRebuild = true;    // NpcFadeInNoRebuild: a character's fade-in dither value reaches the GPU without a render-state rebuild
     bool prepareCollisionBehindLoadingScreen = true;   // PrepareCollisionBehindLoadingScreen: hand a transition's new area to physics while still frozen (A-B clean, 2026-10-05)
     bool editorIdLookupGuard = true;   // NameLookupCrashGuard: name lookups skip freed name-table entries instead of crashing (game bug)
     bool trapCrashGuard = true;        // TrapCrashGuard: traps drop actors that no longer exist instead of crashing (game bug)
@@ -250,6 +252,8 @@ bool AtmosphereCloudPathInfo(AtmosphereCloudPathInfoOut* out);
 // self-test: the game thread's part for a component (before = its bytes before the Set), without the class checks
 bool AtmosphereCloudTestPost(const uint8_t* before, const uint8_t* component, int32_t size);
 void AtmosphereCloudTestForget(const uint8_t* component, int32_t size);
+bool AtmosphereSkyChoiceTest(const uint8_t* component, int32_t size);  // self-test: the sky light choice check
+int32_t AtmosphereSunIndexOffset();
 void AtmosphereCloudTestAge(uint64_t us);
 void LogAtmosphereStats();      // atmosphere.cpp
 bool FindRdgParallelTranslateSite();               // parallel_translate.cpp
@@ -313,6 +317,25 @@ void LogClothConfigStats();
 bool ClothConfigFixInfo(ClothConfigInfo* out);
 ClothConfigStats GetClothConfigStats();
 void ClothConfigTestOriginal(void* fakeInitialize);  // self-test only: replaces the original Initialize
+// frozen_cloth_lod.cpp (FrozenClothStretchFix): a suspended cloth's zero-time LOD update uses the engine's per-cloth teleport
+bool InstallFrozenClothStretchFix(bool beforeGameCode);  // one call redirected (only while the game starts)
+void SetFrozenClothStretchFix(bool enabled);             // live, once installed
+void LogFrozenClothStats();
+void* FrozenClothTestCallSite();                         // self-test only
+void FrozenClothTestOriginal(void* fn);                  // self-test only
+void FrozenClothTestCall(uint8_t* solver, float dt, uint8_t* proxy);  // self-test only
+// npc_fade_in.cpp (NpcFadeInNoRebuild): Altar's per-primitive dither value (characters fading in) updates the GPU scene
+// instead of recreating the render state
+struct NpcFadeInInfoOut {
+    uint8_t *setter, *markDirty, *getWorld;
+    uint32_t floatOff, boolOff, sceneOff, updateSlot, proxyBoolOff, proxyFloatOff;
+};
+bool InstallNpcFadeInNoRebuild(bool beforeGameCode);  // the float setter's entry redirected (only while the game starts)
+void SetNpcFadeInNoRebuild(bool enabled);             // live, once installed
+void LogNpcFadeInStats();
+bool NpcFadeInInfo(NpcFadeInInfoOut* out);
+void NpcFadeInTestSetup(void* fakeMarkDirty, void* fakeGetWorld, int32_t proxyOff);  // self-test only
+void NpcFadeInTestCall(uint8_t* comp, float value);                                   // self-test only
 
 // fade_hook.cpp (the end of a transition's loading screen; PrepareCollisionBehindLoadingScreen runs from it)
 struct FadeHookSites {

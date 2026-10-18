@@ -213,6 +213,8 @@ bool g_largestGpuAsked = false;
 
 }  // namespace
 
+IDXGIAdapter3* GameAdapter() { return g_adapter; }
+
 uint64_t LargestGpuMemoryMB(const char** name)
 {
     if (!g_largestGpuAsked) {

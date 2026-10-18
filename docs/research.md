@@ -170,6 +170,26 @@ loading itself is unchanged (arrival 2.7-3.1 s after the door is used, both).
 
 **Weather transitions.** During a rain-to-clear blend below Echo Mine (480p, 60 fps cap, three runs each, taken in turn), handing over the sun's additional render-side fields reduced render-thread time from 6.9-7.9 to 5.5-6.4 ms. About 270 rebuilds every five seconds became none; before every update, the rendered sun held the expected previous values. The twelve-field path is limited to recently rendered sun and moon lights; other lights rebuild as before.
 
+**The sky's light choice (1.1.0, issue #1 "Flickering Cloud Layer").**
+- **Found:** the game has three directional lights, all `bAtmosphereSunLight`: the sun (`DirectionalLight`, index 0),
+  `Thunder` on the same actor (index 0, `bAffectsWorld` 0 at rest) and `DirectionalLight_Moon` (index 1).
+  `FScene::AtmosphereLights[i]` (sky, sun disc, cloud lighting) is chosen in `ProcessAtmosphereLightAddition` only when a
+  light is added (the brightest at that index; removal re-picks among the others). Stock, every weather light is
+  re-added every frame (PostSet), so the choice follows the brightness. The filter and the fast path (and stock UE's own
+  `UpdateLightColorAndBrightness`) do not re-pick, so a flash that took index 0 kept it while dimming.
+- **Reproduced (2026-10-18, 480p, cloudy noon at Hircine's Shrine, Thunder made to affect the world and set 5000 -> 2
+  -> 0 through its stock setter):** filter on: screen luma 75 -> 169 -> 22-27 (sky and clouds dark) -> 86; filter off
+  (stock): 75 -> 168 -> 78/75 -> 75. The reporter's log shows a lit directional light that was not the sky light
+  (8 per minute "not drawn as sky lights") at the shrine, i.e. Thunder lit.
+- **The change:** on every Set of a light component the DLL notes whether it has a directional proxy and its
+  `AtmosphereSunLightIndex` (offset from the property tables, 0x49C); while another lit directional light at the same
+  index was Set in the last 2 s, or the light has a proxy but was not drawn as a sky light in the last 100 ms, its
+  PostSets go through (rebuilt every frame, as stock), which re-picks the brightest. Afterwards: 72.6/69.7 (fix) vs
+  73.0/70.4 (stock); the check counted only during the flashes and while the world loaded; 0 in normal play.
+- **Also:** cloud values left for a proxy carry their component; they are dropped when the light is rebuilt or found
+  without a proxy, and the render side writes them only into a proxy whose `LightComponent` is that component (a
+  removed proxy's address reused by a later one got the old values before).
+
 <a id="rdgparalleltranslate"></a>
 
 ### Parallel command translation (`RdgParallelTranslate`)
@@ -583,6 +603,36 @@ runs each way) the main thread's hand-overs at C 1.3-1.4 ms in all instead of 9.
 within the run-to-run noise. No change on the Brotch walk.
 
 ## Travelling: characters and cells
+
+<a id="npcfadeinnorebuild"></a>
+
+### Characters fade in without being rebuilt every frame (`NpcFadeInNoRebuild`)
+
+[Explanation](how-it-works.md#npcfadeinnorebuild).
+
+- **Found (2026-10-17, a player's report of more than 16 GB of video memory at Anvil's docks):** at every dock exit the
+  game's DXGI usage rose 2-3.5 GiB within ~1 s, 2.5-5 s after arrival, and went over the budget for 2-2.75 s; UE 5.3's
+  residency manager then evicted and made resident ~4 GiB in 2.5 s and frames took 420-620 ms with the GPU nearly idle
+  (`D3D12.ResidencyManagement=0` removed the freeze but left memory demoted to system RAM). A D3D12 allocation trace
+  named the rise: RDG transient heaps and buffer pools (~1.7 GiB, normal) plus +1.5 GiB of acceleration-structure pool
+  from 698 skinned-mesh BLAS built in 2.5 s, each for a brand-new `FSkeletalMeshObjectGPUSkin`: ~160 components had their
+  render state recreated ~50 times in 16 s.
+- **Cause:** the remaster's `UPrimitiveComponent` fields `bDoDither` (+0x316) and `DitherScale` (+0x318), copied by the
+  scene proxy at construction (+0x7D, +0x80) and read only by the primitive uniform / GPU-scene parameter builder. Their
+  setters (`exe+0x3044B20`, `exe+0x3044B00`) call `MarkRenderStateDirty` on every change. `UVCharacterFadeInOutComponent`
+  (tick `exe+0x48D5A40`) runs a fade-in for every spawned actor (5 -> 0 at 4 per second, then dither off) and sets the
+  value on every primitive of the actor every frame.
+- **The change:** the float setter's entry jumps to a hook. A changed value on a registered component with a live,
+  not-dirty render state whose proxy matches the bool is stored, written to the proxy's copy (one aligned 4-byte store)
+  and pushed with `FScene::UpdateCustomPrimitiveData` (the engine's per-primitive path; its apply step marks the
+  uniform buffer and the GPU-scene entry dirty). Everything else, and every change of the bool, goes through
+  `MarkRenderStateDirty` as before. Found by shape; the proxy offset is read from `UpdateCustomPrimitiveData`'s code.
+- **Results:** ABBA on `anvil-docks` (4K user profile, fresh launch per arm): dock-exit VRAM peak 12.93-13.11 -> 11.23-
+  11.49 GiB, over budget 2.0-2.75 s -> 0 s, skinned mesh objects per run 24,740 -> 2,441, after-arrival fps 18.5 -> 52.3
+  (exit) and 46.3 -> 66.9 / 43.6 -> 72.8 (exit2), dock circuit 78.1 -> 95.4 fps (Render 5.61 -> 4.55 ms, RHI 8.74 ->
+  6.68, Game 8.54 -> 7.31, GPU 12.38 -> 10.35), settled docks VRAM -0.6..-0.8 GiB. Visual: one guard held at dither
+  values 0-5 with the key 0/1/1/0, identical pictures; component and proxy values sampled every 5 ms: off = a new proxy
+  every frame, on = the same proxy, its value equal in all but single-sample read races. A day of normal play on it.
 
 <a id="npccreationpacing"></a>
 
@@ -1018,6 +1068,26 @@ spread over a few frames, about five more gaps over 25 ms in a two-minute flight
   Also checked: Esc, Tab, closing from another page, the wait menu, a conversation, a loading screen and the main menu;
   sharpness of screenshots confirms the render scale (FSR on 545, off 263, back 548). `Save_Settings.sav` was
   byte-identical before and after every test.
+
+<a id="frozenclothstretchfix"></a>
+
+### Frozen cloth keeps its shape (`FrozenClothStretchFix`)
+
+[Explanation](how-it-works.md#frozenclothstretchfix).
+
+- **Found (2026-10-13, Ilav's robe stretched in play; full process dump):** the robe's cloth was suspended, at LOD 1,
+  with zero solver time, and its 353 particles were 6.6-7.8 m from their animation targets; the renderer's positions
+  matched the solver's, so the fault was in the CPU-side cloth state. Stock `WriteSimulationData` (`exe+0x53CF250`)
+  calls `Solver::Update(0)` (`exe+0x53CF40B`) when a suspended cloth's LOD changes; that moves the reference frame with
+  the asset's ordinary velocity scales (robe linear 0.5, guard 0.3) and no physics step follows.
+- **Reproduced without the DLL:** a frozen guard moved 1000 cm, then forced to LOD 1: every particle 300.0 cm behind; the
+  same with the DLL removed. Recreating the proxy repairs it.
+- **The change:** only that call goes through a stub. When the proxy has no running task and the component is
+  explicitly suspended, each cloth's teleport flag (+0x45) is set before the update unless a reset (+0x44) is pending;
+  `Cloth::Update` already applies teleport by zeroing the velocity scales and clears both flags. Positive time steps,
+  running cloth and the normal simulation tick are untouched. All layouts are checked by pattern at start-up.
+- **Results:** guard 300.0 cm -> 0.0001 cm; grey robe (Ilav's asset) 500 cm -> median 0.24 / max 2.83 cm (its own drape);
+  rotation, LOD 2 and the non-adjacent LOD 2 -> 0 also clean; ordinary simulation after resuming unchanged.
 
 ## Memory safety and diagnostics
 

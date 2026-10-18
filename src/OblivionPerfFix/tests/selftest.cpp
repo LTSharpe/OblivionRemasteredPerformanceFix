@@ -680,6 +680,8 @@ void Setup(int32_t rendered, int32_t instances, bool render)
 }
 }  // namespace icr
 
+// ---- fakes for the shared BLAS scratch test (blas_scratch.cpp, lab switch BlasSharedScratch) ----
+
 // ---- fakes for the view rename guard test (view_rename_guard.cpp, ViewRenameGuard) ----
 namespace vrg {
 alignas(16) uint8_t g_base[0x100];  // FD3D12BaseShaderResource: RenameListenersCS at +0x10, ResourceLocation at +0x48
@@ -1206,6 +1208,44 @@ int wmain(int argc, wchar_t** argv)
         AtmosphereCloudTestAge(300000);
         Check(!AtmosphereCloudTestPost(comp, comp, 0x500) && AtmosphereCloudPathInfo(&cp) && cp.pending == 0 && cp.late == 1,
               "cloud path: values not picked up in time: the light is rebuilt instead");
+        // what waits for a light is dropped once the light has lost that proxy (dimmed to 0 through the fast path, which
+        // removes it from the scene): a later proxy at the same address copies the component itself (issue #1)
+        memcpy(proxy + 0x2C8, &surface, 4);  // the rebuild above built it from the component
+        setAtm(proxy, transmittance, sunDisc);
+        memcpy(before, comp, sizeof comp);
+        memcpy(comp + 0x4BC, &surface2, 4);
+        Check(AtmosphereCloudTestPost(before, comp, 0x500) && AtmosphereCloudPathInfo(&cp) && cp.pending == 1,
+              "cloud path: values left for the proxy (before it goes away)");
+        *reinterpret_cast<void**>(comp + 0x3A8) = nullptr;  // removed from the scene
+        Check(AtmosphereCloudTestPost(comp, comp, 0x500) && AtmosphereCloudPathInfo(&cp) && cp.pending == 0,
+              "cloud path: a light that lost its proxy drops what waited for it");
+        *reinterpret_cast<void**>(comp + 0x3A8) = proxy;  // shown again, the new proxy at the old address
+        setAtm(proxy, transmittance, sunDisc);
+        Check(memcmp(proxy + 0x2C8, &surface, 4) == 0, "cloud path: the new proxy at that address gets no old values");
+        // a forwarded PostSet while the light has no proxy drops them too
+        memcpy(proxy + 0x2C8, &surface2, 4);  // built from the component when shown
+        memcpy(before, comp, sizeof comp);
+        memcpy(comp + 0x4BC, &surface, 4);
+        Check(AtmosphereCloudTestPost(before, comp, 0x500) && AtmosphereCloudPathInfo(&cp) && cp.pending == 1,
+              "cloud path: values left again");
+        *reinterpret_cast<void**>(comp + 0x3A8) = nullptr;
+        AtmosphereCloudTestForget(comp, 0x500);
+        Check(AtmosphereCloudPathInfo(&cp) && cp.pending == 0, "cloud path: a rebuild without a proxy drops them");
+        *reinterpret_cast<void**>(comp + 0x3A8) = proxy;
+        // values left for one light are not written into another light's proxy that now lives at that address
+        memcpy(proxy + 0x2C8, &surface, 4);
+        setAtm(proxy, transmittance, sunDisc);
+        memcpy(before, comp, sizeof comp);
+        memcpy(comp + 0x4BC, &surface2, 4);
+        Check(AtmosphereCloudTestPost(before, comp, 0x500) && AtmosphereCloudPathInfo(&cp) && cp.pending == 1,
+              "cloud path: values left for the first light");
+        *reinterpret_cast<void**>(proxy + 0x10) = before;  // the address now holds another light's proxy
+        setAtm(proxy, transmittance, sunDisc);
+        Check(memcmp(proxy + 0x2C8, &surface, 4) == 0 && AtmosphereCloudPathInfo(&cp) && cp.pending == 0,
+              "cloud path: another light's proxy at that address is left alone, the values dropped");
+        *reinterpret_cast<void**>(proxy + 0x10) = comp;
+        memcpy(proxy + 0x2C8, &surface2, 4);  // as a rebuild would leave it
+        Check(AtmosphereCloudPathInfo(&cp) && cp.outOfStep == 0, "cloud path: still never out of step");
         // a directional light the renderer does not draw as a sky light (the weather's lightning light): its specular
         // scale or source angle would never be written, so it is rebuilt as before
         {
@@ -1223,6 +1263,38 @@ int wmain(int argc, wchar_t** argv)
         *reinterpret_cast<void**>(comp + 0x3A8) = nullptr;
         Check(AtmosphereCloudTestPost(comp, comp, 0x500) && AtmosphereCloudPathInfo(&cp) && cp.pending == 0,
               "cloud path: a light without a proxy (hidden): nothing to update, nothing left waiting");
+        // the sky's light choice (issue #1): two lit directional lights at one atmosphere index are rebuilt as in the game
+        {
+            const int32_t idx = AtmosphereSunIndexOffset();
+            printf("  AtmosphereSunLightIndex at 0x%X\n", static_cast<unsigned>(idx));
+            Check(idx > 0x30 && idx < 0x500, "sky light choice: AtmosphereSunLightIndex found in the property tables");
+            alignas(16) static uint8_t sunProxy[0x300], thunderProxy[0x300];
+            alignas(16) static uint8_t sun[0x500], thunder[0x500];
+            *reinterpret_cast<void**>(sunProxy) = cp.vtable;
+            *reinterpret_cast<void**>(thunderProxy) = cp.vtable;
+            *reinterpret_cast<void**>(sun + 0x3A8) = sunProxy;
+            *reinterpret_cast<void**>(sunProxy + 0x10) = sun;
+            *reinterpret_cast<void**>(thunderProxy + 0x10) = thunder;
+            if (idx > 0 && idx < 0x500) sun[idx] = thunder[idx] = 0;
+            setAtm(sunProxy, transmittance, sunDisc);  // the renderer draws the sun as the sky light
+            Check(!AtmosphereSkyChoiceTest(sun, 0x500) && !AtmosphereSkyChoiceTest(thunder, 0x500) &&
+                      !AtmosphereSkyChoiceTest(sun, 0x500),
+                  "sky light choice: the sun alone (the thunder light unlit): not contested");
+            *reinterpret_cast<void**>(thunder + 0x3A8) = thunderProxy;  // a flash: both lit at index 0
+            Check(AtmosphereSkyChoiceTest(thunder, 0x500) && AtmosphereSkyChoiceTest(sun, 0x500),
+                  "sky light choice: two lit lights at index 0: both rebuilt as in the game");
+            if (idx > 0 && idx < 0x500) thunder[idx] = 1;
+            AtmosphereSkyChoiceTest(thunder, 0x500);
+            Check(!AtmosphereSkyChoiceTest(sun, 0x500), "sky light choice: lit at different indices: the sun not contested");
+            if (idx > 0 && idx < 0x500) thunder[idx] = 0;
+            *reinterpret_cast<void**>(thunder + 0x3A8) = nullptr;  // the flash over
+            Check(!AtmosphereSkyChoiceTest(thunder, 0x500) && !AtmosphereSkyChoiceTest(sun, 0x500),
+                  "sky light choice: the thunder light out again: the sun alone, not contested");
+            Sleep(150);  // the sun lit but no longer drawn as the sky light: another light holds its index
+            Check(AtmosphereSkyChoiceTest(sun, 0x500), "sky light choice: a lit sun not drawn as the sky light is rebuilt");
+            setAtm(sunProxy, transmittance, sunDisc);
+            Check(!AtmosphereSkyChoiceTest(sun, 0x500), "sky light choice: drawn again: not contested");
+        }
     }
 
     // RdgParallelTranslate: the RDG translate-priority site, switched on and off.
@@ -2433,6 +2505,124 @@ int wmain(int argc, wchar_t** argv)
         Check(at(pi.maxTickRate, 0x37FD1A0) && pi.numMaxTickSlots == 2, "pacing: UpdateTimeAndHandleMaxTickRate exe+0x37FD1A0, 2 slots");
         Check(at(pi.flowReturn[0], 0x4881C55) && at(pi.flowReturn[1], 0x4881E74) && at(pi.chooseWriter, 0x4592810),
               "pacing: level flow RunSession calls return to exe+0x4881C55 / exe+0x4881E74, writer session exe+0x4592810");
+        // FrozenClothStretchFix: actual mapped-EXE call discovery + trampoline ABI, then engine-facing flag semantics.
+        Check(!InstallFrozenClothStretchFix(false), "clothlod: refuses late installation");
+        Check(InstallFrozenClothStretchFix(true), "clothlod: uniquely verifies and installs the LOD call");
+        if (FrozenClothTestCallSite()) {
+            auto* site = static_cast<uint8_t*>(FrozenClothTestCallSite());
+            Check(site == game.base + 0x53CF40B, "clothlod: only WriteSimulationData's zero-time update is patched");
+            static uint8_t component[0x950]{}, proxy[0xA0]{}, solver[0x90]{}, testCloths[3][0x50]{};
+            static uint8_t* items[3]{testCloths[0],testCloths[1],testCloths[2]};
+            static int calls = 0, seenReset[3]{}, seenTeleport[3]{};
+            static float seenDt = 0;
+            struct A { uint8_t** data; int32_t num,max; };
+            *reinterpret_cast<void**>(proxy+0x58)=component;
+            *reinterpret_cast<void**>(proxy+0x78)=solver;
+            *reinterpret_cast<void**>(component+0x940)=proxy;
+            *reinterpret_cast<A*>(proxy+0x90)={items,3,3};
+            *reinterpret_cast<A*>(solver+0x70)={items,3,3};
+            component[0x918]=0x0D;
+            auto fake = +[](uint8_t* s,float dt) {
+                ++calls; seenDt=dt;
+                for(int i=0;i<3;++i) {
+                    seenReset[i]=testCloths[i][0x44]; seenTeleport[i]=testCloths[i][0x45];
+                    testCloths[i][0x44]=testCloths[i][0x45]=0; // engine consumes both, reset has precedence
+                }
+                (void)s;
+            };
+            FrozenClothTestOriginal(reinterpret_cast<void*>(fake));
+            SetFrozenClothStretchFix(false);
+            FrozenClothTestCall(solver,0,proxy);
+            Check(calls==1 && !seenTeleport[0], "clothlod: disabled passes through exactly once");
+            SetFrozenClothStretchFix(true);
+            testCloths[1][0x44]=1; testCloths[2][0x45]=1;
+            FrozenClothTestCall(solver,0,proxy);
+            Check(calls==2 && seenTeleport[0]==1 && seenReset[1]==1 && !seenTeleport[1] && seenTeleport[2]==1,
+                  "clothlod: handles multiple cloths, preserves reset and existing teleport");
+            Check(!testCloths[0][0x45] && !testCloths[1][0x44] && !testCloths[2][0x45], "clothlod: leaves flag consumption to engine");
+            component[0x918]=5;
+            FrozenClothTestCall(solver,0,proxy);
+            Check(calls==3 && !seenTeleport[0], "clothlod: parent-pose bit alone is not suspension; running cloth untouched");
+            component[0x918]=13;
+            FrozenClothTestCall(solver,0.016f,proxy);
+            Check(calls==4 && seenDt==0.016f && !seenTeleport[0], "clothlod: positive physics delta untouched");
+            *reinterpret_cast<void**>(proxy)=solver;
+            FrozenClothTestCall(solver,0,proxy);
+            Check(!seenTeleport[0], "clothlod: never mutates during an outstanding task");
+            *reinterpret_cast<void**>(proxy)=nullptr;
+            items[2]=nullptr;
+            FrozenClothTestCall(solver,0,proxy);
+            Check(!seenTeleport[0], "clothlod: validates every cloth before first mutation");
+            items[2]=testCloths[2];
+            reinterpret_cast<A*>(solver+0x70)->num=2;
+            FrozenClothTestCall(solver,0,proxy);
+            Check(!seenTeleport[0], "clothlod: mismatched ownership falls back");
+            reinterpret_cast<A*>(solver+0x70)->num=3;
+            // Invoke the installed stub with the caller's real r14 convention, rcx solver and xmm1 delta.
+            uint8_t code[]{0x41,0x56,0x48,0x83,0xEC,0x20,0x4D,0x8B,0xF0,0x48,0xB8,
+                0,0,0,0,0,0,0,0,0xFF,0xD0,0x48,0x83,0xC4,0x20,0x41,0x5E,0xC3};
+            void* stub=RipTarget(site,1,5); memcpy(code+11,&stub,8);
+            void* thunk=VirtualAlloc(nullptr,sizeof code,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
+            if(thunk) {
+                memcpy(thunk,code,sizeof code); DWORD old;
+                const bool executable=VirtualProtect(thunk,sizeof code,PAGE_EXECUTE_READ,&old)!=0;
+                Check(executable,"clothlod: ABI test thunk executable");
+                if(executable) {
+                    FlushInstructionCache(GetCurrentProcess(),thunk,sizeof code);
+                    reinterpret_cast<void(*)(uint8_t*,float,uint8_t*)>(thunk)(solver,0,proxy);
+                    Check(seenTeleport[0]==1 && seenTeleport[1]==1 && seenTeleport[2]==1 && seenDt==0,
+                          "clothlod: actual trampoline forwards solver, delta and caller proxy correctly");
+                }
+                VirtualFree(thunk,0,MEM_RELEASE);
+            } else Check(false,"clothlod: ABI test allocation");
+            SetFrozenClothStretchFix(false);
+        }
+        // NpcFadeInNoRebuild: the fade-in value setter (exe+0x3044B00), redirected at start-up; the hook against fakes
+        Check(!InstallNpcFadeInNoRebuild(false), "fade: refuses to install after game code started");
+        Check(InstallNpcFadeInNoRebuild(true) && game.base[0x3044B00] == 0xE9, "fade: the float setter exe+0x3044B00 now jumps to the hook");
+        {
+            NpcFadeInInfoOut fi{};
+            NpcFadeInInfo(&fi);
+            Check(fi.floatOff == 0x318 && fi.boolOff == 0x316 && fi.proxyFloatOff == 0x80 && fi.proxyBoolOff == 0x7D,
+                  "fade: component +0x318 / +0x316, proxy +0x80 / +0x7D");
+            Check(fi.markDirty == game.base + 0x2FE7980 && fi.getWorld == game.base + 0x2FE58E0 && fi.sceneOff == 0x1E0 && fi.updateSlot == 0x58,
+                  "fade: MarkRenderStateDirty exe+0x2FE7980, GetWorld exe+0x2FE58E0, world+0x1E0 scene, UpdateCustomPrimitiveData +0x58");
+            static int dirties = 0, updates = 0;
+            alignas(16) static uint8_t comp[0x800] = {}, proxy[0x100] = {}, world[0x200] = {};
+            static void* sceneVt[16] = {};
+            static void* scene[1] = {sceneVt};
+            sceneVt[0x58 / 8] = reinterpret_cast<void*>(static_cast<void (*)(void*, uint8_t*)>([](void*, uint8_t*) { ++updates; }));
+            *reinterpret_cast<void**>(world + 0x1E0) = scene;
+            *reinterpret_cast<uint8_t**>(comp + 0x600) = proxy;
+            auto mark = static_cast<void (*)(uint8_t*)>([](uint8_t*) { ++dirties; });
+            auto getWorld = static_cast<uint8_t* (*)(uint8_t*)>([](uint8_t*) -> uint8_t* { return world; });
+            NpcFadeInTestSetup(reinterpret_cast<void*>(mark), reinterpret_cast<void*>(getWorld), 0x600);
+            comp[0x8C] = 3; comp[0x316] = 1; proxy[0x7D] = 1;
+            *reinterpret_cast<float*>(comp + 0x318) = 0.5f;
+            SetNpcFadeInNoRebuild(false);
+            NpcFadeInTestCall(comp, 0.5f);
+            Check(dirties == 0 && updates == 0, "fade: an unchanged value does nothing");
+            NpcFadeInTestCall(comp, 0.4f);
+            Check(dirties == 1 && updates == 0 && *reinterpret_cast<float*>(comp + 0x318) == 0.4f, "fade off: a changed value recreates (the game's behaviour)");
+            SetNpcFadeInNoRebuild(true);
+            dirties = 0;
+            NpcFadeInTestCall(comp, 0.3f);
+            Check(dirties == 0 && updates == 1 && *reinterpret_cast<float*>(proxy + 0x80) == 0.3f && *reinterpret_cast<float*>(comp + 0x318) == 0.3f,
+                  "fade on: a changed value goes to the proxy and the GPU scene, no recreate");
+            proxy[0x7D] = 0;
+            NpcFadeInTestCall(comp, 0.2f);
+            Check(dirties == 1 && updates == 1, "fade on: a proxy built with the other bool value recreates");
+            proxy[0x7D] = 1; comp[0x8C] = 0x83; dirties = 0;
+            NpcFadeInTestCall(comp, 0.1f);
+            Check(dirties == 1 && updates == 1, "fade on: a render state already marked dirty goes the game's way");
+            comp[0x8C] = 1; dirties = 0;
+            NpcFadeInTestCall(comp, 0.05f);
+            Check(dirties == 1 && updates == 1, "fade on: no render state: the game's way");
+            comp[0x8C] = 3; *reinterpret_cast<uint8_t**>(comp + 0x600) = nullptr; dirties = 0;
+            NpcFadeInTestCall(comp, 0.0f);
+            Check(dirties == 1 && updates == 1, "fade on: no scene proxy: the game's way");
+            SetNpcFadeInNoRebuild(false);
+        }
 
         // the scheduler, with fakes for every game function it calls
         g_pcSemVtable[2] = reinterpret_cast<void*>(&FakeSemUnlock);

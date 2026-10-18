@@ -1,5 +1,6 @@
 # Builds the fix DLL on every push and pull request. For a version tag (v1.0.0-beta) it also packages the release zip,
 # attests where it was built (gh attestation verify) and creates a DRAFT release: a maintainer reviews and publishes it.
+# Publishing it starts nexus.yml (the upload to Nexus Mods).
 name: Build
 
 on:
@@ -41,13 +42,16 @@ jobs:
         shell: pwsh
         run: |
           $ver = if ('${{ github.ref_type }}' -eq 'tag') { '${{ github.ref_name }}'.Substring(1) } else { 'dev-' + '${{ github.sha }}'.Substring(0, 7) }
-          # The same DLL and ini in two layouts: Steam (Binaries/Win64) and Xbox / PC Game Pass (Binaries/WinGDK).
+          # The same DLL and ini in three layouts: Steam (Binaries/Win64), Xbox / PC Game Pass (Binaries/WinGDK), and the
+          # OBSE64 route for players whose version.dll is taken by another mod (OBSE/Plugins, under its own name).
           Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
-          $zips = foreach ($v in @(@{ Dir = 'Win64'; Suffix = '' }, @{ Dir = 'WinGDK'; Suffix = '-GamePass' })) {
+          $zips = foreach ($v in @(@{ Dir = 'Win64'; Suffix = ''; Dll = 'version.dll' },
+                                   @{ Dir = 'WinGDK'; Suffix = '-GamePass'; Dll = 'version.dll' },
+                                   @{ Dir = 'Win64/OBSE/Plugins'; Suffix = '-OBSE'; Dll = 'OblivionPerfFix.dll' })) {
             $root = "package$($v.Suffix)"
             $bin = "$root/OblivionRemastered/Binaries/$($v.Dir)"
             New-Item -ItemType Directory -Force $bin | Out-Null
-            Copy-Item src/OblivionPerfFix/build/OblivionPerfFix.dll "$bin/version.dll"
+            Copy-Item src/OblivionPerfFix/build/OblivionPerfFix.dll "$bin/$($v.Dll)"
             Copy-Item src/OblivionPerfFix/OblivionPerfFix.ini $bin
             $zip = "OblivionPerfFix-$ver$($v.Suffix).zip"
             # Entry names with '/' as the zip format requires (CreateFromDirectory can write '\', which Linux unzip mishandles).
@@ -73,6 +77,7 @@ jobs:
             '### Install',
             "Steam: extract ``$($zips[0])`` into the game folder (right-click the game > Manage > Browse local files).",
             "Xbox / PC Game Pass (experimental): extract ``$($zips[1])`` into the game folder (usually ``C:\XboxGames\The Elder Scrolls IV - Oblivion Remastered``).",
+            "With OBSE64, or another mod that already uses ``version.dll``: extract ``$($zips[2])`` into the game folder instead (the fix goes into ``OBSE\Plugins``).",
             'See the README for details.', '',
             '### Checksums (SHA-256)', '```', $sums, '```', '',
             '### Verify the build', 'These files were built by GitHub Actions from the tagged source. Check one with the GitHub CLI:', '```',
@@ -81,6 +86,7 @@ jobs:
 
           Add-Content $env:GITHUB_OUTPUT "zip=$($zips[0])"
           Add-Content $env:GITHUB_OUTPUT "zipGamePass=$($zips[1])"
+          Add-Content $env:GITHUB_OUTPUT "zipObse=$($zips[2])"
           Add-Content $env:GITHUB_OUTPUT "version=$ver"
 
       - uses: actions/upload-artifact@v4
@@ -89,6 +95,7 @@ jobs:
           path: |
             ${{ steps.pkg.outputs.zip }}
             ${{ steps.pkg.outputs.zipGamePass }}
+            ${{ steps.pkg.outputs.zipObse }}
             SHA256SUMS.txt
             release-notes.md
             src/OblivionPerfFix/build/OblivionPerfFix.pdb
@@ -100,6 +107,7 @@ jobs:
           subject-path: |
             ${{ steps.pkg.outputs.zip }}
             ${{ steps.pkg.outputs.zipGamePass }}
+            ${{ steps.pkg.outputs.zipObse }}
             package/OblivionRemastered/Binaries/Win64/version.dll
 
       - name: Create a draft release
@@ -109,8 +117,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ghArgs = @('release', 'create', '${{ github.ref_name }}', '${{ steps.pkg.outputs.zip }}', '${{ steps.pkg.outputs.zipGamePass }}',
-                      'SHA256SUMS.txt', 'src/OblivionPerfFix/build/OblivionPerfFix.pdb',
+                      '${{ steps.pkg.outputs.zipObse }}', 'SHA256SUMS.txt', 'src/OblivionPerfFix/build/OblivionPerfFix.pdb',
                       '--draft', '--title', 'OblivionPerfFix ${{ steps.pkg.outputs.version }}', '--notes-file', 'release-notes.md')
-          if ('${{ steps.pkg.outputs.version }}' -match '-') { $ghArgs += '--prerelease' }
+          # Betas are normal releases (Latest once published); only -rc / -test tags are pre-releases.
+          if ('${{ steps.pkg.outputs.version }}' -match '-(rc|test)') { $ghArgs += '--prerelease' } else { $ghArgs += '--latest' }
           gh @ghArgs
           if ($LASTEXITCODE) { throw "gh release create failed ($LASTEXITCODE)" }

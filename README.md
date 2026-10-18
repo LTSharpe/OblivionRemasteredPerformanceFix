@@ -85,7 +85,8 @@ repeat our table exactly, or to run the town, door and travel scenes, see
 
 ## Install (two minutes)
 
-1. Download `OblivionPerfFix-<version>.zip` from [Releases](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/releases).
+1. Download `OblivionPerfFix-<version>.zip` from [Releases](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/releases)
+   or from [Nexus Mods](https://www.nexusmods.com/oblivionremastered/mods/5709) (the same files).
 2. Open the game folder: in Steam, right-click *Oblivion Remastered* > *Manage* > *Browse local files*.
 3. Extract the zip into that folder. It puts two files into `OblivionRemastered\Binaries\Win64\`: `version.dll` and
    `OblivionPerfFix.ini`.
@@ -96,9 +97,14 @@ repeat our table exactly, or to run the town, door and travel scenes, see
 |---|---|
 | Steam, no mod manager | the four steps above |
 | Vortex or Mod Organizer 2 | install the same zip as a mod: it has the game's folder layout. In Mod Organizer 2 the files must land in the game's folder, not in `Data` (use its Root Builder plugin, or extract by hand) |
-| OBSE64, or another mod that already uses `version.dll` (some upscaler mods do) | don't overwrite that `version.dll`. Put our DLL into `OblivionRemastered\Binaries\Win64\OBSE\Plugins\` instead, under any name (for example `OblivionPerfFix.dll`), with `OblivionPerfFix.ini` next to it. A few fixes can only be installed before the game's own code runs and stay off on this route (the log says which) |
+| OBSE64, or another mod that already uses `version.dll` (some upscaler mods do) | don't overwrite that `version.dll`: download `OblivionPerfFix-<version>-OBSE.zip` instead and extract it into the game folder. It puts `OblivionPerfFix.dll` and its ini into `OblivionRemastered\Binaries\Win64\OBSE\Plugins\`, where OBSE64 loads it. A few fixes can only be installed before the game's own code runs and stay off on this route (the log says which). If both are installed, the fix loads once |
 | Xbox / PC Game Pass (experimental) | download `OblivionPerfFix-<version>-GamePass.zip`; its files go into `OblivionRemastered\Binaries\WinGDK\` in the game's folder (usually `C:\XboxGames\The Elder Scrolls IV - Oblivion Remastered\`). Not tested yet: the log says which fixes found their code; no log at all means it didn't load. A [test report](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/new/choose) helps everyone |
 | Steam Deck / Linux (untested) | as for Steam, then add `WINEDLLOVERRIDES="version=n,b" %command%` to the game's launch options |
+
+**Updates:** track the mod on [Nexus Mods](https://www.nexusmods.com/oblivionremastered/mods/5709) (Vortex and Mod Organizer 2
+then show when a new version is out), or on GitHub choose *Watch > Custom > Releases*. To update, extract the new zip
+over the old files. If you changed settings in `OblivionPerfFix.ini`, set them again in the new one: new fixes come with
+new keys.
 
 Nothing else to set up: all fixes are on by default, and they adapt to your PC (see [Compatibility](#compatibility)).
 Every fix has its own switch in `OblivionPerfFix.ini` (1 = on, 0 = off), explained in the file itself.

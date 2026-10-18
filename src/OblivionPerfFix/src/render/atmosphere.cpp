@@ -57,6 +57,17 @@
 //    same getters (subclasses) are wrapped too;
 //  - the component's SceneProxy: the pointer member whose object has one of those vtables (found on first use, checked
 //    on every use).
+// What waits for a proxy is dropped when its light loses that proxy (a rebuild, or found without one: e.g. dimmed to 0
+// through the fast path), and the render side writes it only into the proxy of the light it was left for, so a later
+// proxy at the same address never gets old values.
+//
+// The sky's light choice (issue #1, 2026-10-18): the renderer picks the light for each atmosphere index
+// (FScene::AtmosphereLights: sky, sun disc, cloud lighting) only when a light is added, as the brightest one at that
+// index. The game re-adds every light the weather drives every frame, so the choice follows the brightness; with the
+// filter and the fast path a choice made at a lightning flash stayed while the Thunder light (index 0, like the sun) dimmed,
+// and the sky and the cloud layer went dark until it reached 0. So while two lit directional lights share an index (seen
+// in their Sets), or a lit one has not been drawn as a sky light lately, their Sets go the stock way (PostSet: rebuilt
+// every frame, as in the game). AtmosphereSunLightIndex's offset comes from the property tables.
 #include "common.h"
 
 #include <algorithm>
@@ -198,6 +209,7 @@ struct CloudPath {
     uint32_t valueBytes = 0;
     uint32_t lightInfo = 0;  // FLightSceneProxy::LightSceneInfo (0: the light-info fields are left out)
     uint32_t component = 0;  // FLightSceneProxy::LightComponent (0: not found; only the sky-light-only fields are used)
+    int32_t sunIndex = -1;   // UDirectionalLightComponent::AtmosphereSunLightIndex (-1: not found, every one counts as index 0)
     void** vtables[kMaxCloudVtables] = {};
     int numVtables = 0;
     int slot = -1;
@@ -211,6 +223,7 @@ struct CloudPath {
 // Values left for one proxy (game thread -> render thread), under g_cloudLock.
 struct CloudEntry {
     void* proxy = nullptr;
+    const void* component = nullptr;  // the light the values belong to
     uint8_t values[kMaxCloudBytes] = {};  // every field's component value (CloudField::slot)
     uint64_t sinceUs = 0;     // waiting since (not moved on by newer values)
     bool pending = false;
@@ -238,6 +251,17 @@ constexpr int kSeenLights = 4;
 SeenLight g_cloudSeen[kSeenLights];
 
 bool BeingRebuilt(const void* proxy, uint64_t now);
+
+// Under g_cloudLock: drop what waits for this light (its proxy is going away). A proxy made later, possibly at the same
+// address, copies the component's values itself and must not get these.
+void DropCloudFor(const void* component)
+{
+    for (CloudEntry& c : g_cloudEntries)
+        if (c.pending && c.component == component) {
+            c.pending = false;
+            g_cloudPending.fetch_sub(1, std::memory_order_relaxed);
+        }
+}
 
 uint64_t NowUs()
 {
@@ -276,18 +300,28 @@ enum class LightProxy { Directional, None, Other };
 // The light's render proxy: a directional one (wrapped vtable, *proxy set), none (the light is not in the scene: hidden,
 // e.g. the moon by day), or anything else / not known (rebuild as before). Game thread: the component holds its proxy
 // pointer only while the proxy lives.
+// The light component's SceneProxy member: the pointer member whose object has a directional proxy vtable (-1: none
+// here; found only on a light that has its proxy).
+int32_t ScanProxyOffset(const uint8_t* obj, int32_t size)
+{
+    for (int32_t o = static_cast<int32_t>(kClassPrivate) + 8; o + 8 <= size; o += 8) {
+        void* vt = nullptr;
+        if (ReadObjectVtable(*reinterpret_cast<const uintptr_t*>(obj + o), &vt) && IsCloudVtable(vt)) {
+            g_cloud.sceneProxy.store(o, std::memory_order_relaxed);
+            Log("[atm] cloud path: the light component's render proxy pointer at 0x%X", o);
+            return o;
+        }
+    }
+    return -1;
+}
+
 LightProxy FindLightProxy(const uint8_t* obj, int32_t size, void** proxy)
 {
     int32_t off = g_cloud.sceneProxy.load(std::memory_order_relaxed);
     if (off < 0) {
         if (g_cloud.scans.fetch_add(1, std::memory_order_relaxed) >= kMaxProxyScans) return LightProxy::Other;
-        for (int32_t o = static_cast<int32_t>(kClassPrivate) + 8; o + 8 <= size; o += 8) {
-            void* vt = nullptr;
-            if (ReadObjectVtable(*reinterpret_cast<const uintptr_t*>(obj + o), &vt) && IsCloudVtable(vt)) { off = o; break; }
-        }
-        if (off < 0) return LightProxy::Other;  // found only on a light that has its proxy
-        g_cloud.sceneProxy.store(off, std::memory_order_relaxed);
-        Log("[atm] cloud path: the light component's render proxy pointer at 0x%X", off);
+        off = ScanProxyOffset(obj, size);
+        if (off < 0) return LightProxy::Other;
     }
     if (off + 8 > size) return LightProxy::Other;
     *proxy = *reinterpret_cast<void* const*>(obj + off);
@@ -327,12 +361,74 @@ void NoteSkyLight(const void* component, uint64_t now)  // render thread
     oldest->component.store(component, std::memory_order_release);
 }
 
-bool DrawnAsSkyLight(const void* component, uint64_t now)
+bool DrawnAsSkyLight(const void* component, uint64_t now, uint64_t withinUs = kCloudLateUs)
 {
     for (const SeenLight& s : g_cloudSeen)
-        if (s.component.load(std::memory_order_acquire) == component && now - s.us.load(std::memory_order_acquire) <= kCloudLateUs)
+        if (s.component.load(std::memory_order_acquire) == component && now - s.us.load(std::memory_order_acquire) <= withinUs)
             return true;
     return false;
+}
+
+// The sky's light choice (issue #1). The renderer picks the light that lights the sky and the clouds for each atmosphere
+// index (FScene::AtmosphereLights) only when a light is added to the scene: the brightest one at that index. The game
+// rebuilds (removes and re-adds) every light the weather drives every frame, so its choice always follows the current
+// brightness. Skipping those rebuilds keeps an old choice: after a lightning flash the dimming Thunder light (index 0,
+// like the sun) went on lighting the sky until it reached 0, and the cloud layer went dark. So while two lit directional
+// lights share an index, their Sets go the stock way (PostSet, rebuilt every frame), as in the game.
+struct LitLight {
+    std::atomic<const void*> component{nullptr};
+    std::atomic<int> index{-1};  // atmosphere index; -1: no directional proxy at its last Set
+    std::atomic<uint64_t> us{0};
+};
+constexpr int kLitLights = 8;
+constexpr uint64_t kLitStaleUs = 2000000;  // a light not Set for this long no longer counts (only costs rebuilds)
+constexpr uint64_t kSkyChoiceUs = 100000;  // a lit light not drawn as a sky light for this long has lost its index
+LitLight g_lit[kLitLights];
+std::atomic<uint64_t> g_contested{0};
+
+// Game thread, every Set on a light component: note whether it is lit (a directional proxy) and at which index; true if
+// another lit directional light at the same index was seen lately (then this light is rebuilt as in the game).
+bool SkyChoiceContested(const uint8_t* obj, int32_t size)
+{
+    if (g_cloud.sceneProxy.load(std::memory_order_relaxed) < 0) {
+        // not known yet: look for it now and then (lights without a proxy cannot show it), without the cloud path's budget
+        thread_local uint64_t lastScanUs = 0;
+        const uint64_t t = NowUs();
+        if (t - lastScanUs < 100000) return false;
+        lastScanUs = t;
+        if (ScanProxyOffset(obj, size) < 0) return false;
+    }
+    void* proxy = nullptr;
+    const LightProxy kind = FindLightProxy(obj, size, &proxy);
+    int index = -1;
+    if (kind == LightProxy::Directional)
+        index = g_cloud.sunIndex >= 0 && g_cloud.sunIndex < size ? obj[g_cloud.sunIndex] : 0;
+    const uint64_t now = NowUs();
+    LitLight* mine = nullptr;
+    LitLight* oldest = &g_lit[0];
+    bool contested = false;
+    for (LitLight& l : g_lit) {
+        const void* c = l.component.load(std::memory_order_relaxed);
+        const uint64_t us = l.us.load(std::memory_order_relaxed);
+        if (c == obj) {
+            mine = &l;
+            continue;
+        }
+        if (index >= 0 && c && now - us <= kLitStaleUs && l.index.load(std::memory_order_relaxed) == index) contested = true;
+        if (us < oldest->us.load(std::memory_order_relaxed)) oldest = &l;
+    }
+    if (!mine) {
+        if (index < 0) return false;  // only lit lights need a slot
+        mine = oldest;
+        mine->component.store(obj, std::memory_order_relaxed);
+    }
+    mine->index.store(index, std::memory_order_relaxed);
+    mine->us.store(now, std::memory_order_relaxed);
+    // Lit but not drawn as a sky light lately: another light holds its index (e.g. a flash driven outside the weather's
+    // Sets); a rebuild lets the scene pick the brighter one again, as the game's per-frame rebuild does.
+    if (index >= 0 && g_cloud.component && !DrawnAsSkyLight(obj, now, kSkyChoiceUs)) contested = true;
+    if (contested) g_contested.fetch_add(1, std::memory_order_relaxed);
+    return contested;
 }
 
 // Game thread: leave the component's field values for its proxy. False = apply them the stock way (rebuild).
@@ -346,6 +442,11 @@ bool PostCloud(const uint8_t* before, const uint8_t* obj, int32_t size)
     // changes, which rebuild it) copies the component's values as they are then.
     if (kind == LightProxy::None) {
         g_cloudNoProxy.fetch_add(1, std::memory_order_relaxed);
+        if (g_cloudPending.load(std::memory_order_acquire)) {  // its proxy was removed (e.g. dimmed to 0 by the fast path)
+            AcquireSRWLockExclusive(&g_cloudLock);
+            DropCloudFor(obj);
+            ReleaseSRWLockExclusive(&g_cloudLock);
+        }
         return true;
     }
     if (kind == LightProxy::Other) {
@@ -403,6 +504,7 @@ bool PostCloud(const uint8_t* before, const uint8_t* obj, int32_t size)
         }
     }
     if (ok) {
+        e->component = obj;
         for (int i = 0; i < g_cloud.numFields; ++i) {
             const CloudField& f = g_cloud.fields[i];
             memcpy(e->values + f.slot, obj + f.comp, f.size);
@@ -421,15 +523,19 @@ void ForgetCloud(const uint8_t* obj, int32_t size)
     const int32_t off = g_cloud.sceneProxy.load(std::memory_order_relaxed);
     if (off < 0 || off + 8 > size) return;
     void* proxy = *reinterpret_cast<void* const*>(obj + off);
-    if (!proxy || !IsCloudVtable(*static_cast<void* const*>(proxy))) return;
-    g_cloudRebuilt.fetch_add(1, std::memory_order_relaxed);
+    const bool directional = proxy && IsCloudVtable(*static_cast<void* const*>(proxy));
+    if (!directional && g_cloudPending.load(std::memory_order_acquire) == 0) return;
     AcquireSRWLockExclusive(&g_cloudLock);
-    for (CloudEntry& c : g_cloudEntries)
-        if (c.pending && c.proxy == proxy) {
-            c.pending = false;
-            g_cloudPending.fetch_sub(1, std::memory_order_relaxed);
-        }
-    g_cloudRebuilding[g_cloudRebuildingNext++ % kCloudRebuilding] = {proxy, NowUs()};
+    DropCloudFor(obj);  // also with no proxy now: what waited for an earlier one is owed to nobody
+    if (directional) {
+        g_cloudRebuilt.fetch_add(1, std::memory_order_relaxed);
+        for (CloudEntry& c : g_cloudEntries)
+            if (c.pending && c.proxy == proxy) {
+                c.pending = false;
+                g_cloudPending.fetch_sub(1, std::memory_order_relaxed);
+            }
+        g_cloudRebuilding[g_cloudRebuildingNext++ % kCloudRebuilding] = {proxy, NowUs()};
+    }
     ReleaseSRWLockExclusive(&g_cloudLock);
 }
 
@@ -444,11 +550,18 @@ bool BeingRebuilt(const void* proxy, uint64_t now)  // under g_cloudLock
 void SetAtmosphereHook(void* proxy, const void* transmittance, const void* sunDisc)
 {
     g_cloud.original(proxy, transmittance, sunDisc);
-    if (g_cloud.component) NoteSkyLight(*reinterpret_cast<void* const*>(static_cast<uint8_t*>(proxy) + g_cloud.component), NowUs());
+    const void* component =
+        g_cloud.component ? *reinterpret_cast<void* const*>(static_cast<uint8_t*>(proxy) + g_cloud.component) : nullptr;
+    if (component) NoteSkyLight(component, NowUs());
     if (g_cloudPending.load(std::memory_order_acquire) == 0) return;
     AcquireSRWLockExclusive(&g_cloudLock);
     for (CloudEntry& c : g_cloudEntries)
         if (c.pending && c.proxy == proxy) {
+            if (component && c.component != component) {  // left for another light's proxy that lived at this address
+                c.pending = false;
+                g_cloudPending.fetch_sub(1, std::memory_order_relaxed);
+                continue;
+            }
             auto* p = static_cast<uint8_t*>(proxy);
             for (int i = 0; i < g_cloud.numFields; ++i) {
                 const CloudField& f = g_cloud.fields[i];
@@ -650,6 +763,16 @@ bool FindLightCloudPath(const GameModule& game)
     if (g_cloud.numFields < 2) {
         Log("[atm] cloud path: the cloud fields' names not confirmed by the property tables: off");
         return false;
+    }
+    {
+        static const char* const kIndexName[] = {"AtmosphereSunLightIndex"};
+        std::vector<uint32_t> offs[1];
+        PropertyOffsets(game, kIndexName, 1, offs);
+        if (offs[0].size() == 1 && offs[0][0] >= kClassPrivate + 8 && offs[0][0] < static_cast<uint32_t>(kMaxObjectSize))
+            g_cloud.sunIndex = static_cast<int32_t>(offs[0][0]);
+        Log("[atm] sky light choice: AtmosphereSunLightIndex %s0x%X (two lit directional lights at one index: rebuilt "
+            "every frame as in the game)", g_cloud.sunIndex < 0 ? "not found, all at index 0; " : "at ",
+            g_cloud.sunIndex < 0 ? 0u : static_cast<unsigned>(g_cloud.sunIndex));
     }
     g_cloud.ready = true;
     Log("[atm] cloud path: component 0x%X/0x%X -> proxy 0x%X/0x%X, SetAtmosphereRelatedProperties exe+0x%X in slot +0x%X of "
@@ -898,9 +1021,12 @@ void SetHook(void* accessor, void** entry, const void* value)
     original(accessor, entry, value);
     last.accessor = accessor;
     last.object = object;
-    // "unchanged" means PostSet has nothing left to do: no change, or the light fast path applied it.
-    last.unchanged = size && (memcmp(last.snapshot.data(), object, size) == 0 ||
-                              TryLightFastPath(last.snapshot.data(), object, size));
+    // "unchanged" means PostSet has nothing left to do: no change, or the light fast path applied it. A light that
+    // competes with another lit one for the sky (same atmosphere index) is rebuilt as in the game.
+    const bool contested = size && g_light.ready && g_cloud.ready && IsLightComponent(object) &&
+                           SkyChoiceContested(static_cast<const uint8_t*>(object), size);
+    last.unchanged = size && !contested &&
+                     (memcmp(last.snapshot.data(), object, size) == 0 || TryLightFastPath(last.snapshot.data(), object, size));
     if (!size) g_unsized.fetch_add(1, std::memory_order_relaxed);
 }
 
@@ -1025,6 +1151,8 @@ bool AtmosphereCloudTestPost(const uint8_t* before, const uint8_t* component, in
     return g_cloud.hooked && PostCloud(before, component, size);
 }
 void AtmosphereCloudTestForget(const uint8_t* component, int32_t size) { ForgetCloud(component, size); }
+bool AtmosphereSkyChoiceTest(const uint8_t* component, int32_t size) { return g_cloud.ready && SkyChoiceContested(component, size); }
+int32_t AtmosphereSunIndexOffset() { return g_cloud.sunIndex; }
 void AtmosphereCloudTestAge(uint64_t us)  // self-test: make what waits look older
 {
     AcquireSRWLockExclusive(&g_cloudLock);
@@ -1078,6 +1206,12 @@ void LogAtmosphereStats()
     lastRebuilt = rebuilt;
     lastDuring = during;
     lastNotSky = notSky;
+    static uint64_t lastContested = 0;
+    if (const uint64_t contested = g_contested.load(); contested != lastContested) {
+        Log("[atm] sky light choice: %llu Sets on lit directional lights sharing an atmosphere index went the game's way "
+            "(rebuilt, so the brightest one lights the sky)", contested - lastContested);
+        lastContested = contested;
+    }
 }
 
 }  // namespace opf

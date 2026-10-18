@@ -34,6 +34,8 @@ std::wstring Directory(const std::wstring& path)
 }
 
 std::wstring g_iniPath;
+std::atomic<bool> g_frozenClothHooked{false};  // FrozenClothStretchFix installed at startup
+std::atomic<bool> g_fadeInHooked{false};       // NpcFadeInNoRebuild installed at startup
 std::atomic<bool> g_collisionHooked{false};  // PrepareCollisionBehindLoadingScreen found and its fade-to-game hook installed at startup
 std::atomic<bool> g_displayHooked{false};    // DisplayModeCache installed
 std::atomic<int> g_displayRetries{0};        // DisplayModeCache: the import slot was not filled yet at startup: tries left
@@ -56,7 +58,7 @@ std::atomic<bool> g_gpuSceneHooked{false};   // GpuSceneKeepCapacity installed
 std::atomic<bool> g_allocTrimHooked{false};  // CommandAllocatorTrim installed
 
 // Re-reads the ini every second so AtmosphereDirtyFilter, AtmosphereLightFastPath, AtmosphereLightCloudPath, RdgParallelTranslate,
-// RdgSubmitBatch, ClothConfigCache, PrepareCollisionBehindLoadingScreen, NameLookupCrashGuard, TrapCrashGuard,
+// RdgSubmitBatch, ClothConfigCache, FrozenClothStretchFix, NpcFadeInNoRebuild, PrepareCollisionBehindLoadingScreen, NameLookupCrashGuard, TrapCrashGuard,
 // FrameGenCrashGuard, FrameGenCameraInfo, DisplayModeCache,
 // MenuScreenshotFilter, RestoreFsrAfterAltTab, LumenKeepArrayCapacity, UploadMemoryKeep, PhysicsTreeTimeSlicing (with its
 // hidden PhysicsSliceIterations, PhysicsSliceCopyKB, PhysicsSliceAdaptive), PhysicsFlushParallel (hidden PhysicsFlushMinChanges), InstanceClearReserve and
@@ -123,6 +125,8 @@ DWORD WINAPI MonitorThread(LPVOID)
         SetRdgSubmitBatch(RdgParallelTranslateActive() ? cfg.rdgSubmitBatch : 0, cfg.rdgSubmitMaxAgeUs);
         CheckRdgSubmitBatching();
         SetClothConfigCacheEnabled(cfg.clothConfigCache);
+        if (g_frozenClothHooked) SetFrozenClothStretchFix(cfg.frozenClothStretchFix);
+        if (g_fadeInHooked) SetNpcFadeInNoRebuild(cfg.npcFadeInNoRebuild);
         if (g_collisionHooked) SetCollisionPrepareEnabled(cfg.prepareCollisionBehindLoadingScreen);
         SetEditorIdLookupGuardEnabled(cfg.editorIdLookupGuard);
         SetTrapTargetGuardEnabled(cfg.trapCrashGuard);
@@ -180,6 +184,8 @@ DWORD WINAPI MonitorThread(LPVOID)
             LogRdgSubmitStats();
             LogFrameFenceStats();
             LogClothConfigStats();
+            if (g_frozenClothHooked) LogFrozenClothStats();
+            if (g_fadeInHooked) LogNpcFadeInStats();
             LogCollisionPrepareStats();
             LogEditorIdLookupGuardStats();
             LogTrapTargetGuardStats();
@@ -290,6 +296,16 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
     // Installed only if enabled at startup; afterwards the ini switches it on and off live.
     if (cfg.clothConfigCache) ApplyClothConfigFix(beforeGameCode);
     else Log("[cloth] disabled in OblivionPerfFix.ini");
+    // FrozenClothStretchFix (a game bug fix) and NpcFadeInNoRebuild: one call / one function entry each, written only
+    // before game code runs, and only if enabled at startup; afterwards the ini switches them on and off live.
+    if (cfg.frozenClothStretchFix) {
+        g_frozenClothHooked = InstallFrozenClothStretchFix(beforeGameCode);
+        if (g_frozenClothHooked) SetFrozenClothStretchFix(true);
+    } else Log("[frozencloth] disabled in OblivionPerfFix.ini (takes a restart to switch on)");
+    if (cfg.npcFadeInNoRebuild) {
+        g_fadeInHooked = InstallNpcFadeInNoRebuild(beforeGameCode);
+        if (g_fadeInHooked) SetNpcFadeInNoRebuild(true);
+    } else Log("[fadein] disabled in OblivionPerfFix.ini (takes a restart to switch on)");
     // PrepareCollisionBehindLoadingScreen runs from the fade-to-game hook (two vtable slots), installed only if the fix is enabled at startup and its
     // game code is found; afterwards the ini switches it on and off live.
     if (cfg.prepareCollisionBehindLoadingScreen) {
@@ -499,7 +515,7 @@ struct OBSEPluginVersionData {
 extern "C" {
 __declspec(dllexport) OBSEPluginVersionData OBSEPlugin_Version = {
     OBSEPluginVersionData::kVersion,
-    0x010000,  // plugin version 1.0.0
+    0x010100,  // plugin version 1.1.0
     "OblivionPerfFix",
     "OblivionPerfFix",
     // Addresses come from byte-pattern scans and we use no OBSE game structures,

@@ -20,6 +20,8 @@ Config LoadConfig(const wchar_t* iniPath)
     c.rdgSubmitBatch = get(L"Fixes", L"RdgSubmitBatch", c.rdgSubmitBatch);
     c.rdgSubmitMaxAgeUs = get(L"Fixes", L"RdgSubmitMaxAgeUs", c.rdgSubmitMaxAgeUs);
     c.clothConfigCache = get(L"Fixes", L"ClothConfigCache", c.clothConfigCache) != 0;
+    c.frozenClothStretchFix = get(L"Fixes", L"FrozenClothStretchFix", c.frozenClothStretchFix) != 0;
+    c.npcFadeInNoRebuild = get(L"Fixes", L"NpcFadeInNoRebuild", c.npcFadeInNoRebuild) != 0;
     c.prepareCollisionBehindLoadingScreen =
         get(L"Fixes", L"PrepareCollisionBehindLoadingScreen", c.prepareCollisionBehindLoadingScreen) != 0;
     c.editorIdLookupGuard = get(L"Fixes", L"NameLookupCrashGuard", c.editorIdLookupGuard) != 0;

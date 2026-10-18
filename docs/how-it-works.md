@@ -89,6 +89,12 @@ Ultra with Shadows High. Individual measurements below state any changes to thos
 **Weather changes.** When the weather itself changes (rain clearing up, a storm coming in), the blend moves more of the sun's settings every frame for half a minute or so: how wide the sun's disc is and how soft its shadows are, how much it lights water and shiny surfaces, how dark its light shafts get behind clouds, and how much it glows (bloom). Unreal has no dimmer switch for these either, and the renderer also reads all of them from the sun's render-side copy every frame, so the fix hands them over at the same moment as the cloud values: twelve settings in all, each one only where the game's own code shows that plain copy, under the name the game itself gives it. The sun and moon get this; any other light, such as the thunderstorm's lightning light, is rebuilt as before, because the renderer only makes that per-frame call for the sun and moon (the DLL checks that the renderer drew the light as a sun or moon in the last quarter of a second).
 
 *Effect.* A rain-to-clear change below Echo Mine (480p, 60 fps cap, three runs each, taken in turn): during the blend, the render thread's time per frame 6.9-7.9 -> 5.5-6.4 ms, and the sun is no longer rebuilt at all (without the fix: about 270 rebuilds every 5 seconds). The DLL's check held for every change: before each one, the sun the renderer draws had exactly the values the game had given it.
+
+**Which light lights the sky (1.1.0, issue #1).** The sky, the sun's disc and the clouds are lit by one chosen light (per "atmosphere slot"). Unreal chooses it only when a light is added to the scene: the brightest one for that slot. The game rebuilds every weather light every frame, so in the stock game the choice is made again every frame. The sun and the thunderstorm's lightning light share a slot. With the fixes above, a lightning flash took the slot when it began and kept it while it faded, so the sky and the cloud layer went dark until the lightning light was fully off: the clouds flickered in and out through a storm. Now, while two lit lights share a slot (or a lit sun has not been drawn as the sky's light for a tenth of a second), their updates go the game's way and they are rebuilt every frame, so the brightest one is chosen again every frame, exactly as in the game. That happens only during flashes; the rest of the time nothing changes.
+
+*Checked:* lightning made by hand at Hircine's Shrine (cloudy noon, the lightning light switched on bright, then dimmed, then off): with 1.1.0 as first built the clouds disappeared while it was dim (screen brightness 75 -> 22-27); with this change, and in the stock game, they stay (73/70 vs 73/70). During normal play the new check never triggered.
+
+*A second, rarer case:* cloud values left for the sun or moon are now dropped when that light loses its render-side copy, and only ever written into the copy of the light they were left for, so a copy made later at the same memory address cannot get old values.
 ---
 
 <a id="rdgparalleltranslate"></a>
@@ -679,6 +685,31 @@ within the run-to-run noise. No change on the Brotch walk.
 
 ## Travelling: characters and cells
 
+<a id="npcfadeinnorebuild"></a>
+
+### Characters fade in without being rebuilt every frame (`NpcFadeInNoRebuild`)
+
+[Evidence](research.md#npcfadeinnorebuild).
+
+**The problem.** Every character the game spawns (arriving in a town, stepping out of a door, a guard on patrol coming into range) fades in over about 1.25 seconds with a screen-door "dither" pattern. The remaster stores the fade amount on every piece of the character (body, head, clothes, armour, weapons) and, whenever it changes, tells the engine that piece's whole drawing setup is out of date. The engine then throws that setup away and builds a new one, including a fresh ray tracing copy of the animated mesh. During a fade the amount changes every frame, so every piece of every fading character was rebuilt every frame. On Anvil's docks, where dozens of characters appear when you step outside, that came to about 160 pieces rebuilt some 50 times each and more than a gigabyte of extra video memory for a few seconds; on a 16 GB card it went over the budget Windows gives the game. Unreal then shuffled memory in and out every frame and the game froze for 2-3 seconds.
+
+*Analogy:* repainting a whole wall every time you want it one shade lighter, instead of turning the dimmer.
+
+**What we did.** When the fade amount changes on a piece that is already drawn and has nothing else pending, the DLL writes the new amount into the copy the renderer reads and asks the engine to re-send that piece's per-object data to the graphics card: the route the engine uses for other per-object values a material can read. Anything else (the piece isn't drawn yet, it is already being rebuilt for another reason, the fade switches on or off) goes the game's way, as before.
+
+**Why the image can't change.** The graphics card receives the same fade amount in the same frame; only the needless rebuild is skipped. Held side by side at every fade amount from none to fully invisible, with the fix on and off, the pictures are the same, and a memory trace shows the renderer's copy follows the game's value every frame.
+
+**Effect** (Anvil docks, 4K, FSR Performance, frame generation; four runs off/on/on/off):
+
+| | Off | On |
+|---|---|---|
+| Game video memory at a dock exit (peak) | 12.9-13.1 GB | 11.2-11.5 GB |
+| Seconds over the video memory budget per exit | 2.0-2.75 | 0 |
+| Frame rate in the seconds after stepping out | 18.5 / 46.3 fps | 52.3 / 66.9 fps |
+| Walking the docks | 78.1 fps | 95.4 fps |
+
+---
+
 <a id="npccreationpacing"></a>
 
 ### Far-away characters created a piece per frame (`NpcCreationPacing`)
@@ -1216,6 +1247,22 @@ Either way the game runs at native resolution without frame generation until you
 | the same with `RestoreFsrAfterAltTab` | 87.8 / 43.7 (FSR and frame generation back at once) |
 | pause menu open after the alt-tab (FSR off, as the game ships) | 60 / 60 |
 | pause menu closed, with the fix | 82.6 / 39.8 (frame generation back) |
+
+<a id="frozenclothstretchfix"></a>
+
+### Frozen cloth keeps its shape (`FrozenClothStretchFix`)
+
+[Evidence](research.md#frozenclothstretchfix).
+
+**The problem.** A game bug, also without the DLL: now and then a character's robe, tabard or cape is stretched into a long flat strip that reaches back to where the character stood earlier. Cloth that is out of sight or not needed is "frozen": it isn't simulated, it just keeps its shape relative to the body. When such a character is moved and its cloth then switches level of detail (a simpler or finer version of the same cloth), the engine runs one zero-length update that moves the frozen cloth along with the body. That update treats the move like ordinary motion and lets the cloth lag behind by its usual inertia (half the distance for a robe), and with no simulation running afterwards nothing pulls it back. A grey robe moved 10 metres was left 5 metres behind.
+
+*Analogy:* carrying a coat on its hanger across the room, but only the hanger arrives; the coat stays stretched between the two places.
+
+**What we did.** For exactly that update, and only when the cloth is frozen, the DLL first sets the engine's own "teleport" request for the cloth. The engine then moves it all the way with the body, as it already does when a character is teleported. A pending reset still wins, and the engine clears the request itself.
+
+**Why the image can't change.** Only the broken case changes: in tests the same robe stays within its normal drape (under 3 cm) instead of 5 metres off. Cloth that is simulating is not touched. Cloth that was already stretched before the fix straightens out when the game next rebuilds it.
+
+---
 
 ## Memory safety and diagnostics
 
