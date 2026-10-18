@@ -1,6 +1,6 @@
 # Builds the fix DLL on every push and pull request. For a version tag (v1.0.0-beta) it also packages the release zip,
 # attests where it was built (gh attestation verify) and creates a DRAFT release: a maintainer reviews and publishes it.
-# Publishing it starts nexus.yml (the upload to Nexus Mods).
+# Then virustotal.yml scans the zips and adds the results to the draft. Publishing it starts nexus.yml (Nexus Mods).
 name: Build
 
 on:
@@ -123,3 +123,14 @@ jobs:
           if ('${{ steps.pkg.outputs.version }}' -match '-(rc|test)') { $ghArgs += '--prerelease' } else { $ghArgs += '--latest' }
           gh @ghArgs
           if ($LASTEXITCODE) { throw "gh release create failed ($LASTEXITCODE)" }
+
+  # Uploads the draft's zips to VirusTotal and writes the results into its notes (virustotal.yml; needs VT_API_KEY).
+  virustotal:
+    needs: build
+    if: github.ref_type == 'tag'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/virustotal.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets: inherit

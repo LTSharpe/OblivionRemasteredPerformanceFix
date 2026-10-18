@@ -1,0 +1,72 @@
+# Uploads a release's zips to VirusTotal and writes the results (detections and links) into the release notes, so the
+# draft a maintainer reviews already carries them. Called by build.yml after it creates the draft; can also be run by
+# hand for an existing release (Actions > VirusTotal > Run workflow, enter the tag). Needs the repository secret
+# VT_API_KEY (a free VirusTotal account's API key: 4 requests a minute, which this workflow respects); without it the
+# workflow only warns. Uploads go to VirusTotal's public corpus, as with the website's upload form.
+name: VirusTotal
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.1.0-beta)'
+        required: true
+
+permissions:
+  contents: write   # read the draft's assets, edit its notes
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+      VT_API_KEY: ${{ secrets.VT_API_KEY }}
+    steps:
+      - name: Scan the release's zips and add the results to its notes
+        shell: pwsh
+        run: |
+          if (-not $env:VT_API_KEY) { "::warning::VT_API_KEY is not set: no VirusTotal scan"; exit 0 }
+          gh release download $env:TAG --repo $env:GITHUB_REPOSITORY --pattern 'OblivionPerfFix-*.zip' --dir assets
+          if ($LASTEXITCODE) { throw "could not download the assets of $env:TAG" }
+          $headers = @{ 'x-apikey' = $env:VT_API_KEY }
+          $api = 'https://www.virustotal.com/api/v3'
+          # Free API: 4 requests a minute. One request, then at least 16 s before the next.
+          function Invoke-Vt([scriptblock]$call) { $r = & $call; Start-Sleep -Seconds 16; $r }
+          $items = foreach ($f in Get-ChildItem assets -Filter *.zip | Sort-Object Name) {
+            $sha = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower()
+            $up = Invoke-Vt { Invoke-RestMethod -Uri "$api/files" -Method Post -Headers $headers -Form @{ file = $f } }
+            [pscustomobject]@{ Name = $f.Name; Sha = $sha; Analysis = $up.data.id; Stats = $null }
+          }
+          # Wait for each analysis (usually 1-3 minutes), at most ~15 minutes in all.
+          $deadline = (Get-Date).AddMinutes(15)
+          while (($items | Where-Object { -not $_.Stats }) -and (Get-Date) -lt $deadline) {
+            foreach ($i in $items | Where-Object { -not $_.Stats }) {
+              $a = Invoke-Vt { Invoke-RestMethod -Uri "$api/analyses/$($i.Analysis)" -Headers $headers }
+              if ($a.data.attributes.status -eq 'completed') { $i.Stats = $a.data.attributes.stats }
+            }
+          }
+          $flagged = $false
+          $lines = foreach ($i in $items) {
+            $link = "https://www.virustotal.com/gui/file/$($i.Sha)"
+            if ($i.Stats) {
+              $bad = [int]$i.Stats.malicious + [int]$i.Stats.suspicious
+              $total = $bad + [int]$i.Stats.undetected + [int]$i.Stats.harmless
+              if ($bad) { $flagged = $true }
+              "- [$($i.Name)]($link): $bad of $total engines flag it"
+            } else { "- [$($i.Name)]($link): analysis still running (see the link)" }
+          }
+          if ($flagged) { "::warning::VirusTotal: at least one engine flags a release file; check the links before publishing" }
+          # Replace an earlier VirusTotal section, keep everything else.
+          $body = gh release view $env:TAG --repo $env:GITHUB_REPOSITORY --json body --jq .body
+          $body = (($body -join "`n") -replace '(?s)\n*### VirusTotal\n.*?(?=\n### |\z)', '').TrimEnd()
+          $section = @('', '### VirusTotal', 'Each zip was uploaded by the release build:') + $lines
+          ($body + "`n" + ($section -join "`n") + "`n") | Set-Content notes.md -Encoding utf8
+          gh release edit $env:TAG --repo $env:GITHUB_REPOSITORY --notes-file notes.md
+          if ($LASTEXITCODE) { throw 'could not update the release notes' }
+          $lines
