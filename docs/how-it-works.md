@@ -90,7 +90,7 @@ Ultra with Shadows High. Individual measurements below state any changes to thos
 
 *Effect.* A rain-to-clear change below Echo Mine (480p, 60 fps cap, three runs each, taken in turn): during the blend, the render thread's time per frame 6.9-7.9 -> 5.5-6.4 ms, and the sun is no longer rebuilt at all (without the fix: about 270 rebuilds every 5 seconds). The DLL's check held for every change: before each one, the sun the renderer draws had exactly the values the game had given it.
 
-**Which light lights the sky (1.1.0, issue #1).** The sky, the sun's disc and the clouds are lit by one chosen light (per "atmosphere slot"). Unreal chooses it only when a light is added to the scene: the brightest one for that slot. The game rebuilds every weather light every frame, so in the stock game the choice is made again every frame. The sun and the thunderstorm's lightning light share a slot. With the fixes above, a lightning flash took the slot when it began and kept it while it faded, so the sky and the cloud layer went dark until the lightning light was fully off: the clouds flickered in and out through a storm. Now, while two lit lights share a slot (or a lit sun has not been drawn as the sky's light for a tenth of a second), their updates go the game's way and they are rebuilt every frame, so the brightest one is chosen again every frame, exactly as in the game. That happens only during flashes; the rest of the time nothing changes.
+**Which light lights the sky (1.1.0, issue #1: a bug in our fix as shipped in 1.0.0-beta, not in the game).** The sky, the sun's disc and the clouds are lit by one chosen light (per "atmosphere slot"). Unreal chooses it only when a light is added to the scene: the brightest one for that slot. The game rebuilds every weather light every frame, so in the stock game the choice is made again every frame. The sun and the thunderstorm's lightning light share a slot. With the fixes above as they were in 1.0.0-beta, a lightning flash took the slot when it began and kept it while it faded, so the sky and the cloud layer went dark until the lightning light was fully off: the clouds flickered in and out through a storm. Now, while two lit lights share a slot (or a lit sun has not been drawn as the sky's light for a tenth of a second), their updates go the game's way and they are rebuilt every frame, so the brightest one is chosen again every frame, exactly as in the game. That happens only during flashes; the rest of the time nothing changes.
 
 *Checked:* lightning made by hand at Hircine's Shrine (cloudy noon, the lightning light switched on bright, then dimmed, then off): with 1.1.0 as first built the clouds disappeared while it was dim (screen brightness 75 -> 22-27); with this change, and in the stock game, they stay (73/70 vs 73/70). During normal play the new check never triggered.
 
@@ -1124,6 +1124,9 @@ many frame generation calls reached AMD's library with the camera attached.
 different is not measured yet; nothing changes for the frames the game renders itself. With the game's own FSR 3.1.0 DLL this has no effect.
 
 ## Crash and bug fixes
+
+Bugs in the game itself, its engine or AMD's library: they also happen without OblivionPerfFix. (Bugs in our own
+fixes are fixed in the fix's own section and marked "our bug" in the changelog.)
 
 <a id="namelookupcrashguard"></a>
 

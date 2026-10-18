@@ -6,9 +6,12 @@ Downloads, checksums and build attestations: https://github.com/LTSharpe/Oblivio
      refuses to publish a tag that has no section here, and uses the section as the release notes. Put changes that
      are not released yet under "## Unreleased" and rename it when tagging. -->
 
+Bug fixes say whose bug it was: **game bug** = also happens without OblivionPerfFix (in the game, its engine or a
+driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
+
 ## 1.1.0-beta
 For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Thanks to everyone who reported results on
-NVIDIA, Intel, Linux and Mac.
+NVIDIA, Linux and Mac.
 
 - **Characters fading in no longer use extra video memory** (`NpcFadeInNoRebuild`): each character that appears fades in
   over about a second, and the game rebuilt every piece of it for the graphics card on every frame of that fade. Where
@@ -16,12 +19,13 @@ NVIDIA, Intel, Linux and Mac.
   freeze the game for 2-3 seconds. Now only the fade value is sent. Anvil docks at 4K: video memory peak at a dock exit
   13.0 -> 11.3 GB, no freeze, about three times the frame rate in the seconds after stepping out, +22 % fps walking the
   docks. The fade looks the same.
-- **Bug fix: stretched robes and capes** (`FrozenClothStretchFix`): a game bug could leave a character's robe, tabard or
-  cape stretched into a long strip back to where they had stood. Frozen cloth now moves fully with its wearer when it
+- **Game bug fixed: stretched robes and capes** (`FrozenClothStretchFix`; happens without OblivionPerfFix too): a
+  character's robe, tabard or cape could be left stretched into a long strip back to where they had stood. Frozen cloth now moves fully with its wearer when it
   changes detail level.
-- **Bug fix: clouds vanishing after lightning** (issue #1, thanks to the reporter's video and log from the Great Forest):
+- **Our bug fixed: clouds vanishing after lightning** (caused by 1.0.0-beta, not by the game; issue #1, thanks to the
+  reporter's video and log from the Great Forest):
   after a lightning flash the sky and the cloud layer could go dark for a while and come back, flickering in and out
-  through a storm. The fix had stopped the game from choosing again, every frame, which light lights the sky, so the
+  through a storm. Our fix had stopped the game from choosing again, every frame, which light lights the sky, so the
   fading lightning light kept that role. While two lights compete for the sky, the fix now leaves them to the game as
   before. A rare case where old cloud values could reach a newly made sun or moon is fixed too.
 - **New download for OBSE64 users:** `OblivionPerfFix-1.1.0-beta-OBSE.zip` puts the fix into `OBSE\Plugins`, ready to
@@ -46,8 +50,8 @@ experimentally.
 - **Menus:** menu opens about 0.15-0.3 s quicker at 4K.
 - **Frame generation:** +22-29% rendered fps with FSR frame generation on; AMD's ML frame generation (FSR 3.1.4 file,
   Radeon RX 9000) gets the camera data it needs and AMD's recommended pacing.
-- **Crash fixes:** the game's name table and trap code, Unreal Engine's video-memory tidying (UE-217692), AMD's frame
-  generation library; FSR and frame generation come back after an alt-tab.
+- **Game bugs fixed (crashes and more):** the game's name table and trap code, Unreal Engine's video-memory tidying
+  (UE-217692), AMD's frame generation library; FSR and frame generation come back after an alt-tab.
 - **Safety:** memory kept on purpose is handed back when Windows runs short; spare GPU command memory is given back when
   video memory gets tight; parallel translation stays off on graphics cards under 9.5 GB; a GPU crash writes a report
   into the log.

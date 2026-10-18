@@ -170,7 +170,7 @@ loading itself is unchanged (arrival 2.7-3.1 s after the door is used, both).
 
 **Weather transitions.** During a rain-to-clear blend below Echo Mine (480p, 60 fps cap, three runs each, taken in turn), handing over the sun's additional render-side fields reduced render-thread time from 6.9-7.9 to 5.5-6.4 ms. About 270 rebuilds every five seconds became none; before every update, the rendered sun held the expected previous values. The twelve-field path is limited to recently rendered sun and moon lights; other lights rebuild as before.
 
-**The sky's light choice (1.1.0, issue #1 "Flickering Cloud Layer").**
+**The sky's light choice (1.1.0, issue #1 "Flickering Cloud Layer"; a bug in OblivionPerfFix 1.0.0-beta, not in the game).**
 - **Found:** the game has three directional lights, all `bAtmosphereSunLight`: the sun (`DirectionalLight`, index 0),
   `Thunder` on the same actor (index 0, `bAffectsWorld` 0 at rest) and `DirectionalLight_Moon` (index 1).
   `FScene::AtmosphereLights[i]` (sky, sun disc, cloud lighting) is chosen in `ProcessAtmosphereLightAddition` only when a
@@ -932,6 +932,8 @@ spread over a few frames, about five more gaps over 25 ms in a two-minute flight
 **Verification.** The self-test checks the call site and view offsets, valid and invalid camera matrices, the off switch, the injected call and a pass-through export counter. Every frame is checked before camera data is attached; the log counts calls that reached AMD's library. `FrameGenCameraInfo=1` is on by default and acts with AMD's FSR 3.1.4 DLL; the game's own FSR 3.1.0 DLL ignores the data. See [the README](../README.md#optional-amd-ml-frame-generation-radeon-rx-9000). No generated-image quality difference or frame-rate gain has been measured; the frames rendered by the game itself are unchanged.
 
 ## Crash and bug fixes
+
+Game bugs (they also happen without OblivionPerfFix). Bugs in our own fixes are documented in the fix's section.
 
 <a id="namelookupcrashguard"></a>
 
