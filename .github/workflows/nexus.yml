@@ -1,14 +1,19 @@
 # Uploads a published release's zips to Nexus Mods (mod 5709) as new versions of the existing files, so everyone who
 # tracks the mod is notified and Vortex / Mod Organizer 2 show the update. Runs only when a maintainer publishes a
 # GitHub release (the draft that build.yml creates). The API key is the secret NEXUSMODS_API_KEY of the environment
-# "nexus" (limited to v* tags); without it this workflow only warns. Manual re-run: Actions > Nexus upload > Run
-# workflow, from the release tag.
+# "nexus"; without it this workflow only warns. Manual run for a published release: Actions > Nexus upload > Run
+# workflow (enter the tag). The Nexus v3 API addresses files by internal IDs; the workflow looks them up from the
+# numbers in the files' download links (game-scoped IDs: 23930 Steam, 23931 Game Pass; variable NEXUS_FILE_ID_OBSE).
 name: Nexus upload
 
 on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Published release tag to upload (e.g. v1.1.0-beta)'
+        required: true
 
 permissions:
   contents: read
@@ -18,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: nexus
     env:
-      TAG: ${{ github.event.release.tag_name || github.ref_name }}
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Check the API key is set
@@ -51,13 +56,28 @@ jobs:
             echo 'EOF_CHANGELOG'
           } >> "$GITHUB_OUTPUT"
 
+      - name: Look up the Nexus IDs
+        id: ids
+        if: steps.key.outputs.ok == '1'
+        env:
+          KEY: ${{ secrets.NEXUSMODS_API_KEY }}
+          OBSE_SCOPED: ${{ vars.NEXUS_FILE_ID_OBSE }}
+        run: |
+          api=https://api.nexusmods.com/v3/games/oblivionremastered
+          file_of() { curl -sSf -H "apikey: $KEY" "$api/mod-file-versions/$1" | jq -er .data.file.id; }
+          echo "mod=$(curl -sSf -H "apikey: $KEY" "$api/mods/5709" | jq -er .data.id)" >> "$GITHUB_OUTPUT"
+          echo "steam=$(file_of 23930)" >> "$GITHUB_OUTPUT"
+          echo "gamepass=$(file_of 23931)" >> "$GITHUB_OUTPUT"
+          if [ -n "$OBSE_SCOPED" ]; then echo "obse=$(file_of "$OBSE_SCOPED")" >> "$GITHUB_OUTPUT"; fi
+          cat "$GITHUB_OUTPUT"
+
       - name: Steam
         if: steps.key.outputs.ok == '1'
         uses: Nexus-Mods/upload-action@98532f7670c27cbecc78fae03fa3e278147827e2  # v1.0.0-beta.11
         with:
           api_key: ${{ secrets.NEXUSMODS_API_KEY }}
-          mod_id: '5709'
-          file_id: '23930'
+          mod_id: ${{ steps.ids.outputs.mod }}
+          file_id: ${{ steps.ids.outputs.steam }}
           filename: OblivionPerfFix-${{ steps.files.outputs.version }}.zip
           display_name: OblivionPerfFix ${{ steps.files.outputs.version }}
           version: ${{ steps.files.outputs.version }}
@@ -70,20 +90,20 @@ jobs:
         uses: Nexus-Mods/upload-action@98532f7670c27cbecc78fae03fa3e278147827e2  # v1.0.0-beta.11
         with:
           api_key: ${{ secrets.NEXUSMODS_API_KEY }}
-          file_id: '23931'
+          file_id: ${{ steps.ids.outputs.gamepass }}
           filename: OblivionPerfFix-${{ steps.files.outputs.version }}-GamePass.zip
           display_name: OblivionPerfFix ${{ steps.files.outputs.version }} GamePass
           version: ${{ steps.files.outputs.version }}
           archive_existing_version: 'true'
 
       # The OBSE64 zip needs its own Nexus file entry first (one manual upload); then set the repository variable
-      # NEXUS_FILE_ID_OBSE to that file's ID and later versions go up here.
+      # NEXUS_FILE_ID_OBSE to the number in that file's download link and later versions go up here.
       - name: OBSE64 route
-        if: steps.key.outputs.ok == '1' && steps.files.outputs.obse == '1' && vars.NEXUS_FILE_ID_OBSE != ''
+        if: steps.key.outputs.ok == '1' && steps.files.outputs.obse == '1' && steps.ids.outputs.obse != ''
         uses: Nexus-Mods/upload-action@98532f7670c27cbecc78fae03fa3e278147827e2  # v1.0.0-beta.11
         with:
           api_key: ${{ secrets.NEXUSMODS_API_KEY }}
-          file_id: ${{ vars.NEXUS_FILE_ID_OBSE }}
+          file_id: ${{ steps.ids.outputs.obse }}
           filename: OblivionPerfFix-${{ steps.files.outputs.version }}-OBSE.zip
           display_name: OblivionPerfFix ${{ steps.files.outputs.version }} OBSE64
           version: ${{ steps.files.outputs.version }}
