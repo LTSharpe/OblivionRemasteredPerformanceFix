@@ -502,7 +502,9 @@ static void BulkInsertSelfTest()
     {
         alignas(16) static uint8_t evo[0x400];
         static int32_t cvar = 1;
-        auto runSwap = [&](bool on, int queued, int cv) {
+        // helperExpected: "FlushAsync" lasts until the helper has started (up to 2 s), as the game's does for many
+        // milliseconds; a fixed 5 ms window failed when a freshly created helper thread was scheduled later than that.
+        auto runSwap = [&](bool on, int queued, int cv, bool helperExpected) {
             memset(evo, 0, sizeof evo);
             *reinterpret_cast<int32_t*>(evo + 0x368) = queued;
             cvar = cv;
@@ -512,19 +514,20 @@ static void BulkInsertSelfTest()
             BulkParallelTestSetup(reinterpret_cast<void*>(&FakeFlushInternal), 0x368, &cvar, on);
             BulkFlushAsyncBegin(evo);
             g_asyncRunning = true;
+            if (helperExpected) for (int i = 0; i < 2000 && g_fiCalls.load() == 0; ++i) Sleep(1);
             Sleep(5);  // "FlushAsync"
             g_asyncRunning = false;
             BulkFlushAsyncEnd();
             BulkTestFlushInternal(evo);  // the step's own call afterwards (skipped when the queue is empty)
         };
-        runSwap(true, 2000, 1);
+        runSwap(true, 2000, 1, true);
         const bool ran = g_fiCalls == 1 && g_fiThread != GetCurrentThreadId() && g_fiOverlap.load() &&
                          *reinterpret_cast<int32_t*>(evo + 0x368) == 0;
-        runSwap(true, 500, 0);
+        runSwap(true, 500, 0, false);
         const bool cvarOff = g_fiCalls == 1 && g_fiThread == GetCurrentThreadId();
-        runSwap(false, 500, 1);
+        runSwap(false, 500, 1, false);
         const bool off = g_fiCalls == 1 && g_fiThread == GetCurrentThreadId();
-        runSwap(true, 10, 1);
+        runSwap(true, 10, 1, false);
         const bool fewOps = g_fiCalls == 1 && g_fiThread == GetCurrentThreadId();
         Check(ran, "PhysicsInternalFlushParallel: FlushInternal runs once, on the helper, while FlushAsync runs; the step's own call finds an empty queue");
         Check(cvarOff && off && fewOps, "PhysicsInternalFlushParallel: not when the game drops the queue (switch 0), when off, or for a small queue");
