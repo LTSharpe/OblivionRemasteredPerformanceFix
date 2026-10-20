@@ -776,6 +776,33 @@ the next one 7.2 -> 4.2 ms of animation teardown; light crossings unchanged. Abo
 the helpers with no fallback and no crash. It shortens the worst crossings by ~5-7 ms; it does not remove them (the rest
 of the row change is other unloading and loading). `AnimTeardownParallel=1` is on by default.
 
+<a id="npcperceptionparallel"></a>
+
+### Line-of-sight checks on helper threads (`NpcPerceptionParallel`)
+
+[Evidence](research.md#npcperceptionparallel).
+
+**The problem.** A few times a second, every character works out which other characters in range it can see. For
+each candidate it builds a collision query that ignores both characters and everything attached to them, then casts a
+ray from its eyes to the other's body, and if that is blocked, one to a second spot and one to a third. In a crowd of
+40 that is 20 pairs per round and 150 rounds a second, each pair 18-22 microseconds, all one after another on the game
+thread while everything else waits: ~1.3 ms of every frame at 47 fps here, about 4 ms on a slower CPU.
+
+*Analogy:* a watchman who checks every window of the square himself, one at a time, while four colleagues stand idle.
+
+**What we did.** When a round has gathered its candidates, the fix runs the round's own checks over the list (same
+class, not itself, has a body, in its field of view, within range) and tests the resulting pairs at once on four helper
+threads and the game thread, with the game's own pair-test function. The round then runs exactly as before, and each
+time it asks for a pair the answer is handed over instead of computed again; the results go into the character's maps
+and to the old engine in the round's order. Any pair the fix did not prepare (a character without a root component) is
+tested by the game's call as before. `2` only counts and times the game's own calls.
+
+**Why the game can't change.** The pair test only reads: the two characters' transforms and sockets, the physics
+scene (a ray cast, which the engine itself runs from worker threads), and the collision settings. It runs in the timer
+tick, after the tick groups have finished and while the old engine waits at its sync point, so nothing it reads moves
+between the early test and the moment the round would have called it. All tests of a round complete before the round's
+loop starts. The two character functions the checks use (field of view, eye position) read transforms only.
+
 <a id="cellbufferpacedevict"></a>
 
 ### Old cells unloaded over a few frames (`CellBufferPacedEvict`)

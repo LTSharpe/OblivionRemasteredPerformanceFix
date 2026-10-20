@@ -11,7 +11,7 @@
 #include <string_view>
 #include <vector>
 
-#define OPF_VERSION "1.1.0"
+#define OPF_VERSION "1.2.0"
 
 namespace opf {
 

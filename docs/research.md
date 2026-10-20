@@ -714,6 +714,30 @@ the next one 7.2 -> 4.2 ms of animation teardown; light crossings unchanged. Abo
 the helpers with no fallback and no crash. It shortens the worst crossings by ~5-7 ms; it does not remove them (the rest
 of the row change is other unloading and loading). `AnimTeardownParallel=1` is on by default.
 
+<a id="npcperceptionparallel"></a>
+
+### Line-of-sight checks on helper threads (`NpcPerceptionParallel`)
+
+[Explanation](how-it-works.md#npcperceptionparallel).
+
+- **Found (2026-10-19, i7-12700 / RX 9070, `actors-crowd` at 480p):** a stack profile of the game thread (200 Hz,
+  dbghelp) put 10 % of its wall time under the characters' perception round (`exe+0x485FA60`, a timer delegate of each
+  character), 8.5 % of it in the per-pair line-of-sight test (`exe+0x485A170`: collision params with the attached
+  actors of both as ignored, then up to three `UWorld::LineTraceSingleByChannel` -> Chaos ray casts). The fix's counting
+  mode measured 9,351 rounds a minute, 56 candidates and 20.5 pair tests per round, 18.6 us per test: ~1.3 ms per frame.
+- **Change:** the gather call of the round is redirected (with `self`, which the loop keeps in `rdi`) to a hook that
+  replays the loop's checks and tests the pairs on helper threads with the game's function; the pair-test call is
+  redirected to a hook that returns the prepared result for that pair. The round, its maps and its old-engine messages
+  are the game's.
+- **Verified:** self-test with 64 fake candidates (results identical and in order, helpers take part, fallbacks); in the
+  crowd 184,393 pair tests in a minute, every one prepared in advance (79 % on helpers), a round 107 us instead of ~440.
+- **Measured (2026-10-19, 480p `small`, off/on alternated, `-Session auto`):** `actors-crowd` 2 rounds, medians:
+  44.4 -> 46.8 fps (+5.5 %), 1 % low 36.9 -> 40.7 (+10 %), game thread 19.82 -> 18.05 ms (-9 %), render and GPU
+  unchanged. `actors-battle` 5 rounds, medians: 32.5 -> 34.5 fps (+6 %), game thread 26.96 -> 25.07 ms (-7 %), within
+  that scene's run-to-run spread (fights differ; two runs on each side were cut short by the game's own "Havok picks
+  used this frame" dialog, once with the fix off and once on). For scale on this PC, the vanilla game -> the 1.1.0 fixes
+  gave the crowd 36.8 -> 44.4 fps. `NpcPerceptionParallel=1` is on by default.
+
 <a id="cellbufferpacedevict"></a>
 
 ### Old cells unloaded over a few frames (`CellBufferPacedEvict`)

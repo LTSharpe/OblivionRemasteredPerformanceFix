@@ -9,6 +9,15 @@ Downloads, checksums and build attestations: https://github.com/LTSharpe/Oblivio
 Bug fixes say whose bug it was: **game bug** = also happens without OblivionPerfFix (in the game, its engine or a
 driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 
+## Unreleased
+- **Crowds: each character's line-of-sight checks run on helper threads** (`NpcPerceptionParallel`): a few times a
+  second every character tests which others in range it can see, with one to three physics ray casts per pair, one pair
+  after another on the game thread (in a crowd of 40: 20 pairs a round, 150 rounds a second). The checks of one round
+  are independent, so they now run on helper threads with the game's own code as soon as the round has its candidates,
+  and the round gets each result as it asks for that pair: same results, same order, same messages to the old engine.
+  40-soldier crowd at 480p (i7-12700): 44.4 -> 46.8 fps (+5.5 %), 1 % lows +10 %, game thread 19.8 -> 18.1 ms; the
+  battle scene +4-6 % fps over five rounds.
+
 ## 1.1.0-beta
 For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Thanks to everyone who reported results on
 NVIDIA, Linux and Mac.
