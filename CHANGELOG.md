@@ -9,6 +9,13 @@ Downloads, checksums and build attestations: https://github.com/LTSharpe/Oblivio
 Bug fixes say whose bug it was: **game bug** = also happens without OblivionPerfFix (in the game, its engine or a
 driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 
+## Unreleased
+- Benchmark: the `chapel-door` scene (cheydinhal, full, transitions) never entered the chapel ("no arrival detected",
+  90 s arrival in issue #2's report and on two more PCs): from `chapel-square`'s heading the Activate ray met the
+  porch column. The scene now starts from its own `chapel-door` spot, the same place turned to face the door.
+- Benchmark mod: `flytest doors [radius]` lists the door refs around the player with the heading to each, for
+  placing door scenes.
+
 ## 1.1.0-beta
 For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Thanks to everyone who reported results on
 NVIDIA, Linux and Mac.
