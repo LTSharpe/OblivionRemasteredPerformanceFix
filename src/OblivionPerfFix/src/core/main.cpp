@@ -169,6 +169,7 @@ DWORD WINAPI MonitorThread(LPVOID)
         SetOsPageCache(cfg.osPageCache, cfg.osPageCacheMB, cfg.osPageCacheTrimSeconds, relief.osCache);  // OsPageCache: no-op unless installed
         SetPsoPrecompileFast(cfg.psoPrecompileFast);  // PsoPrecompileFast: no-op unless installed at start-up
         SetAnimTeardownParallel(ParallelHelpersAllowed(cfg) ? cfg.animTeardownParallel : 0);    // AnimTeardownParallel: no-op unless installed at start-up
+        SetNpcPerceptionParallel(ParallelHelpersAllowed(cfg) ? cfg.npcPerceptionParallel : 0, cfg.npcPerceptionMinPairs);  // NpcPerceptionParallel: no-op unless installed
         SetCellBufferPacedEvict(cfg.cellBufferPacedEvict);    // CellBufferPacedEvict: no-op unless installed at start-up
         SetPhysicsPushParallel(ParallelHelpersAllowed(cfg) ? cfg.physicsPushParallel : 0, cfg.physicsPushMin);  // PhysicsPushParallel: no-op unless installed
         if (g_navmeshFound) SetNavmeshBuildNoBusyWait(cfg.navmeshBuildNoBusyWait);
@@ -200,6 +201,7 @@ DWORD WINAPI MonitorThread(LPVOID)
             LogOsPageCacheStats();
             LogPsoPrecompileStats();
             LogAnimTeardownParallelStats();
+            LogNpcPerceptionStats();
             LogCellBufferPacedEvictStats();
             LogFocusRestoreStats();
             LogStreamChurnStats();
@@ -445,6 +447,11 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
         if (InstallAnimTeardownParallel(beforeGameCode)) SetAnimTeardownParallel(ParallelHelpersAllowed(cfg) ? cfg.animTeardownParallel : 0);
     } else if (cfg.animTeardownParallel)
         Log("[anim] AnimTeardownParallel kept off: %u usable logical processors (needs %d, ParallelMinProcessors)", UsableLogicalProcessors(), cfg.parallelMinProcessors);
+    // NpcPerceptionParallel: two calls redirected, only if not 0 at startup; afterwards the ini switches it live.
+    if (cfg.npcPerceptionParallel && ParallelHelpersAllowed(cfg)) {
+        if (InstallNpcPerceptionParallel(beforeGameCode)) SetNpcPerceptionParallel(cfg.npcPerceptionParallel, cfg.npcPerceptionMinPairs);
+    } else if (cfg.npcPerceptionParallel)
+        Log("[perception] NpcPerceptionParallel kept off: %u usable logical processors (needs %d, ParallelMinProcessors)", UsableLogicalProcessors(), cfg.parallelMinProcessors);
     // BulkIndexInsert (and 31b): DirtyTreeQuickInsert's three call sites (installed here also when DirtyTreeQuickInsert is off) and entry detours, only if
     // either key is on at startup; afterwards the ini switches both live.
     // PhysicsQueueShrinkOnce rides on the same catch-up detour (installed with it when its key is on at startup).

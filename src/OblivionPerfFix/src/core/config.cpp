@@ -64,6 +64,8 @@ Config LoadConfig(const wchar_t* iniPath)
     c.osPageCacheTrimSeconds = get(L"Fixes", L"OsPageCacheTrimSeconds", c.osPageCacheTrimSeconds);
     c.psoPrecompileFast = get(L"Fixes", L"PsoPrecompileFast", c.psoPrecompileFast) != 0;
     c.animTeardownParallel = get(L"Fixes", L"AnimTeardownParallel", c.animTeardownParallel);
+    c.npcPerceptionParallel = get(L"Fixes", L"NpcPerceptionParallel", c.npcPerceptionParallel);
+    c.npcPerceptionMinPairs = get(L"Fixes", L"NpcPerceptionMinPairs", c.npcPerceptionMinPairs);
     c.cellBufferPacedEvict = get(L"Fixes", L"CellBufferPacedEvict", c.cellBufferPacedEvict);
     c.physicsPushParallel = get(L"Fixes", L"PhysicsPushParallel", c.physicsPushParallel);
     c.physicsPushMin = get(L"Fixes", L"PhysicsPushMin", c.physicsPushMin);

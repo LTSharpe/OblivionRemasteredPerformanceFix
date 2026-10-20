@@ -127,6 +127,8 @@ struct Config {
     int osPageCacheMB = 64;              // not in the shipped ini: OsPageCache's cap (MB, 4-1024)
     int osPageCacheTrimSeconds = 5;      // not in the shipped ini: OsPageCache releases blocks unused this long (s)
     int animTeardownParallel = 1;        // AnimTeardownParallel: dying NPC animation data's interpolators
+    int npcPerceptionParallel = 1;       // NpcPerceptionParallel: a perception round's line-of-sight tests on helper threads (2 = count only)
+    int npcPerceptionMinPairs = 4;       // not in the shipped ini: rounds with fewer pairs to test run as the game does them
                                          // destroyed on helper threads, joined before the actor's clean-up goes on (start-up
                                          // install when not 0, then live): 0 off, 1 on
     int cellBufferPacedEvict = 1;        // CellBufferPacedEvict: spare exterior cell buffer slots
@@ -563,6 +565,19 @@ uint64_t AnimTeardownParallelTestAnimData(uint64_t ad);
 struct AnimTeardownCounts { uint64_t actors, arrays, blocks, byHelper, byOwner, fallback, inlined; };
 AnimTeardownCounts AnimTeardownParallelTestCounts();
 bool AnimTeardownParallelTestKeyTables(uint8_t* table);  // KeyTablesOk on a given 18-slot table (after Find)
+// npc_perception.cpp (NpcPerceptionParallel: a perception round's pair line-of-sight tests on helper threads, results used in the game's order)
+bool FindNpcPerceptionParallel();                        // locate and verify everything (no patching)
+bool InstallNpcPerceptionParallel(bool beforeGameCode);  // start-up only (two calls redirected)
+void SetNpcPerceptionParallel(int mode, int minPairs);   // live: 0 off, 1 on, 2 count only
+void LogNpcPerceptionStats();
+struct NpcPerceptionInfoOut { uint8_t* gatherSite; uint8_t* pairSite; void* gather; void* pair; void* classGetter; void* world; void* settings; const float* scale; int helpers; };
+bool NpcPerceptionInfo(NpcPerceptionInfoOut* out);
+struct NpcPerceptionTest { void* gather; void* pair; void* classGetter; void* world; void* settings; const float* scale; };  // self-test fakes
+bool NpcPerceptionTestSetup(const NpcPerceptionTest& t, int helpers);
+void NpcPerceptionTestGather(void* world, void* cls, void* arr, void* self);   // the redirected calls, as the stubs reach them
+uint8_t NpcPerceptionTestPair(void* self, void* other, uint8_t* state, int maxRays, uint8_t flag);
+struct NpcPerceptionCounts { uint64_t rounds, pairs, hits, misses, byHelper, byOwner, skipped; };
+NpcPerceptionCounts NpcPerceptionTestCounts();
 // cell_buffer.cpp (CellBufferPacedEvict CellBufferPacedEvict, lab prototype): spare exterior cell buffer slots, overflow evicted one
 // cell per OT frame after a crossing
 bool FindCellBufferPacedEvict();                          // locate and verify everything (no patching)

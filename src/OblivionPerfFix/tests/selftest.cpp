@@ -646,6 +646,92 @@ void Reset()
 }
 }  // namespace pfl
 
+// ---- fakes for the perception test (npc_perception.cpp, NpcPerceptionParallel) ----
+namespace npp {
+DWORD g_mainThread = GetCurrentThreadId();
+constexpr int kActors = 64;
+alignas(16) uint8_t g_class[0x40];
+void* g_hierarchy[4];
+alignas(16) uint8_t g_actors[kActors][0x800];
+alignas(16) uint8_t g_roots[kActors][0x300];
+alignas(16) uint8_t g_pawns[kActors][0x130];
+void* g_vtable[0xAB0 / 8];
+alignas(16) uint8_t g_settings[0x500];
+float g_scale = 1.0f;
+void* g_list[kActors];
+opf::NpcPerceptionCounts g_last{};
+std::atomic<uint32_t> g_pairCalls{0}, g_offThread{0};
+uint8_t FakeFilter(void* self, void* other) { (void)self; return *(static_cast<uint8_t*>(other) + 0x20); }
+void FakeGather(void* world, void* cls, void* arr)
+{
+    (void)world; (void)cls;
+    auto* a = static_cast<void**>(arr);
+    a[0] = g_list; *reinterpret_cast<int32_t*>(a + 1) = kActors; *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(a) + 12) = kActors;
+}
+void* FakeClass() { return g_class; }
+void* FakeWorld(void* self) { (void)self; return g_settings; }
+uint8_t* FakeSettings() { return g_settings; }
+int Index(void* actor) { return static_cast<int>((static_cast<uint8_t*>(actor) - &g_actors[0][0]) / 0x800); }
+uint8_t FakePair(void* self, void* other, uint8_t* state, int maxRays, uint8_t flag)
+{
+    (void)self;
+    g_pairCalls.fetch_add(1);
+    if (GetCurrentThreadId() != g_mainThread) g_offThread.fetch_add(1);
+    const int i = Index(other);
+    for (volatile int k = 0; k < 20000; ++k) {}  // ~20 us: lets the helpers take their share
+    *state = static_cast<uint8_t>(i % 3);
+    return static_cast<uint8_t>(maxRays == 3 && flag == 1 ? (i % 2) : 7);
+}
+// the actor at index i: in range unless far, filtered out unless pass, rootless when noRoot
+void Setup()
+{
+    memset(g_class, 0, sizeof g_class);
+    *reinterpret_cast<void**>(g_class + 0x30) = g_hierarchy;
+    *reinterpret_cast<int32_t*>(g_class + 0x38) = 1;
+    g_hierarchy[1] = g_class + 0x30;
+    for (auto& v : g_vtable) v = nullptr;
+    g_vtable[0xA90 / 8] = reinterpret_cast<void*>(&FakeFilter);
+    memset(g_settings, 0, sizeof g_settings);
+    *reinterpret_cast<float*>(g_settings + 0x4E8) = 1000.0f;
+    *reinterpret_cast<float*>(g_settings + 0x4EC) = 1.0f;
+    for (int i = 0; i < kActors; ++i) {
+        memset(g_actors[i], 0, 0x800); memset(g_roots[i], 0, 0x300); memset(g_pawns[i], 0, 0x130);
+        *reinterpret_cast<void**>(g_actors[i]) = g_vtable;
+        *reinterpret_cast<void**>(g_actors[i] + 0x10) = g_class;
+        *reinterpret_cast<void**>(g_actors[i] + 0x7B8) = g_pawns[i];
+        *reinterpret_cast<void**>(g_pawns[i] + 0x120) = g_pawns[i];
+        const bool isFar = i % 10 == 9, pass = i % 7 != 6, noRoot = i == 5;
+        *(g_actors[i] + 0x20) = pass ? 1 : 0;
+        *reinterpret_cast<void**>(g_actors[i] + 0x1A0) = noRoot ? nullptr : g_roots[i];
+        double* loc = reinterpret_cast<double*>(g_roots[i] + 0x280);
+        loc[0] = isFar ? 10000.0 : 10.0 * i; loc[1] = 0.0; loc[2] = 100.0;  // self at the origin: the rootless one's zero vector is in range
+        g_list[i] = g_actors[i];
+    }
+    g_list[3] = nullptr;  // a null entry, as the game's arrays can have
+    g_pairCalls.store(0); g_offThread.store(0);
+}
+// the loop as the game runs it (its own checks), consuming through the redirected pair test
+int Loop(void* self, uint8_t* outState, uint8_t* outSeen)
+{
+    int n = 0;
+    for (int i = 0; i < kActors; ++i) {
+        uint8_t* const other = static_cast<uint8_t*>(g_list[i]);
+        if (!other || other == self) continue;
+        if (!FakeFilter(self, other)) continue;
+        uint8_t* const root = *reinterpret_cast<uint8_t**>(other + 0x1A0);
+        double o[3] = {0, 0, 0};
+        if (root) memcpy(o, root + 0x280, sizeof o);
+        const double* sl = reinterpret_cast<double*>(*reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(self) + 0x1A0) + 0x280);
+        const double d = (o[0] - sl[0]) * (o[0] - sl[0]) + (o[1] - sl[1]) * (o[1] - sl[1]) + (o[2] - sl[2]) * (o[2] - sl[2]);
+        if (!(d < 1000.0 * 1000.0)) continue;
+        uint8_t st = 3;
+        const uint8_t seen = opf::NpcPerceptionTestPair(self, other, &st, 3, 1);
+        outState[i] = st; outSeen[i] = seen; ++n;
+    }
+    return n;
+}
+}  // namespace npp
+
 // ---- fakes for the instance clear test (instance_clear.cpp, InstanceClearReserve) ----
 namespace icr {
 alignas(16) uint8_t g_component[0x900];
@@ -3222,6 +3308,62 @@ int wmain(int argc, wchar_t** argv)
             PhysicsStepTestCall(pfl::g_evolution, 0);
             Check(pfl::g_copySeen == 100000, "adaptive copy off: the step leaves it alone");
             pfl::g_copyVarForFake = nullptr;
+        }
+    }
+
+    // NpcPerceptionParallel: the perception round's gather and pair-test calls (exe+0x485FB16 and exe+0x485FCDC, build 19115871),
+    // then the hooks against fakes: the pairs the loop will test are tested in advance on helper threads and the loop gets
+    // the same results, in its order; untested pairs and the off switch fall back to the game's call.
+    if (Installed(FindNpcPerceptionParallel(), "perception: the round's gather and pair test found")) {
+        NpcPerceptionInfoOut pi{};
+        NpcPerceptionInfo(&pi);
+        Check(pi.gatherSite == game.base + 0x485FB16 && pi.pairSite == game.base + 0x485FCDC,
+              "perception: calls at exe+0x485FB16 (gather) and exe+0x485FCDC (pair test)");
+        Check(pi.gather == game.base + 0x31A9020 && pi.pair == game.base + 0x485A170 && pi.classGetter == game.base + 0x46B6FA0 &&
+                  pi.world == game.base + 0x2DC0350 && pi.settings == game.base + 0x4711300,
+              "perception: gather exe+0x31A9020, pair test exe+0x485A170, class exe+0x46B6FA0, world exe+0x2DC0350, settings exe+0x4711300");
+        Check(pi.scale == reinterpret_cast<const float*>(game.base + 0x7D76B50), "perception: range scale at exe+0x7D76B50");
+        npp::Setup();
+        NpcPerceptionTest t{reinterpret_cast<void*>(&npp::FakeGather), reinterpret_cast<void*>(&npp::FakePair), reinterpret_cast<void*>(&npp::FakeClass),
+                            reinterpret_cast<void*>(&npp::FakeWorld), reinterpret_cast<void*>(&npp::FakeSettings), &npp::g_scale};
+        if (Installed(NpcPerceptionTestSetup(t, 3), "perception: helpers started")) {
+            uint8_t* const self = npp::g_actors[0];
+            uint8_t expState[npp::kActors] = {}, expSeen[npp::kActors] = {};
+            for (int i = 0; i < npp::kActors; ++i) { expState[i] = static_cast<uint8_t>(i % 3); expSeen[i] = static_cast<uint8_t>(i % 2); }
+            uint8_t st[npp::kActors] = {}, sn[npp::kActors] = {};
+            void* arr[2] = {};
+            NpcPerceptionTestGather(nullptr, npp::g_class, arr, self);
+            const int n = npp::Loop(self, st, sn);
+            bool same = true;
+            for (int i = 1; i < npp::kActors; ++i) {
+                if (!npp::g_list[i] || i % 7 == 6 || i % 10 == 9) continue;
+                if (st[i] != expState[i] || sn[i] != expSeen[i]) same = false;
+            }
+            auto c = NpcPerceptionTestCounts();
+            // 64 actors: minus self, the null entry, 6 far, 9 filtered -> the loop tests 47, one of them rootless
+            Check(n == 47 && same, "perception: the loop gets the game's results for its 47 pairs");
+            Check(c.rounds == 1 && c.pairs == 46 && c.hits == 46 && c.misses == 1 && c.byHelper + c.byOwner == 46 && npp::g_pairCalls.load() == 47,
+                  "perception: 46 pairs tested in advance and used, the rootless one by the game's call");
+            Check(c.byHelper > 0, "perception: helper threads took part");
+            printf("      (perception: %llu by helpers, %llu by the owner, %u off the main thread)\n", static_cast<unsigned long long>(c.byHelper),
+                   static_cast<unsigned long long>(c.byOwner), npp::g_offThread.load());
+            // a second round: new results, the old ones not reused
+            npp::g_pairCalls.store(0);
+            NpcPerceptionTestGather(nullptr, npp::g_class, arr, self);
+            npp::Loop(self, st, sn);
+            c = NpcPerceptionTestCounts();
+            Check(c.rounds == 2 && c.hits == 92 && npp::g_pairCalls.load() == 47, "perception: the second round is tested again");
+            // other arguments than the loop's: the game's call
+            uint8_t s2 = 3;
+            const uint8_t r2 = NpcPerceptionTestPair(self, npp::g_actors[1], &s2, 1, 1);
+            Check(r2 == 7 && NpcPerceptionTestCounts().misses == 2, "perception: a pair test with other arguments is the game's");
+            // off: nothing prepared, every pair by the game's call
+            SetNpcPerceptionParallel(0, 4);
+            npp::g_pairCalls.store(0); npp::g_offThread.store(0);
+            NpcPerceptionTestGather(nullptr, npp::g_class, arr, self);
+            npp::Loop(self, st, sn);
+            Check(npp::g_pairCalls.load() == 47 && npp::g_offThread.load() == 0 && NpcPerceptionTestCounts().rounds == 2, "perception off: the game's calls only");
+            SetNpcPerceptionParallel(1, 4);
         }
     }
 
