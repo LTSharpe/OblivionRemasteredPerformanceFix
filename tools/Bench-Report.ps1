@@ -97,6 +97,8 @@ if (-not $Base -and -not $Test) {
             $out = & powershell -NoProfile -ExecutionPolicy Bypass -Command "& '$runner' $argLine" 2>&1 | ForEach-Object { "$_" }
             $verdict = $out | Where-Object { $_ -like 'BENCH-RESULT*' } | Select-Object -Last 1
             Write-Host "   $verdict"
+            # the runner's step lines, kept with the run: they explain a warning such as "no arrival detected"
+            if ("$verdict" -match ' dir=(\S+)' -and (Test-Path -LiteralPath $Matches[1])) { $out | Set-Content (Join-Path $Matches[1] 'runner.log') -Encoding utf8 }
             if ($verdict -notmatch '^BENCH-RESULT (ok|partial)') { throw "benchmark run $lbl failed: $verdict (see its report.md)" }
             if ($side -eq 'stock') { $Base += $lbl } else { $Test += $lbl }
         }
@@ -151,7 +153,16 @@ function Cell($b, $t, [string]$fmt = 'F1', [switch]$LowerIsBetter) {
 
 # ---------------------------------------------------------------- report
 $first = $testRuns[0].R
-$fixVersion = ($first.sessions[0].perfFixLog | Where-Object { $_ -match 'OblivionPerfFix (\S+) loaded' } | Select-Object -First 1) -replace '.*OblivionPerfFix (\S+) loaded.*', '$1'
+# The version from the fix's log as a run recorded it (any fix run, any session); else from the log the installed fix
+# wrote last (next to the DLL: Win64 as version.dll, OBSE\Plugins as an OBSE64 plugin); else "unknown" rather than blank.
+$loadedLine = 'OblivionPerfFix (\S+) loaded'
+$fixVersion = @($testRuns | ForEach-Object { $_.R.sessions } | ForEach-Object { $_.perfFixLog } | Where-Object { $_ -match $loadedLine } | Select-Object -First 1)
+if (-not $fixVersion) {
+    $win64 = (Get-OblivionGame).Win64
+    $fixVersion = @('OblivionPerfFix.log', 'OBSE\Plugins\OblivionPerfFix.log' | ForEach-Object { Join-Path $win64 $_ } | Where-Object { Test-Path -LiteralPath $_ } |
+        ForEach-Object { Get-Content -LiteralPath $_ -TotalCount 5 } | Where-Object { $_ -match $loadedLine } | Select-Object -First 1)
+}
+$fixVersion = if ($fixVersion) { "$fixVersion" -replace ".*$loadedLine.*", '$1' } else { 'unknown (no OblivionPerfFix.log found)' }
 $cs = Get-CimInstance Win32_ComputerSystem
 $os = Get-CimInstance Win32_OperatingSystem
 $md = New-Object System.Collections.Generic.List[string]
