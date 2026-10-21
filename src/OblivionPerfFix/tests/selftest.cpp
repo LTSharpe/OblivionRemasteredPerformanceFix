@@ -2118,6 +2118,58 @@ int wmain(int argc, wchar_t** argv)
         }
     }
 
+    // HavokPickWarningGuard: the old engine's "Havok picks" warning box (a modal MessageBoxA on the OblivionThread) held back.
+    {
+        Check(ApplyHavokPickWarningGuard(), "pick warning guard installed");
+        HavokPickGuardInfo pg{};
+        Check(HavokPickWarningGuardInfo(&pg), "pick warning guard info");
+        if (Installed(pg.slot != nullptr && pg.hook != nullptr, "HavokPickWarningGuard (pick warning box)")) {
+            Check(pg.slot == reinterpret_cast<void**>(game.base + 0x8FB7CC8), "warning handler pointer at exe+0x8FB7CC8");
+            Check(pg.original == game.base + 0x691B460, "the game's handler (MessageBoxA) at exe+0x691B460");
+            Check(pg.callReturn == game.base + 0x65E10F5, "the pick warning's call returns to exe+0x65E10F5");
+            Check(pg.picks == reinterpret_cast<const uint32_t*>(game.base + 0x941F9A8) &&
+                      pg.max == reinterpret_cast<const uint32_t*>(game.base + 0x8FAAB98),
+                  "pick counter at exe+0x941F9A8, iMaxPicks at exe+0x8FAAB98");
+            Check(*pg.max == 40, "iMaxPicks default 40");
+            Check(*pg.slot == pg.hook, "handler pointer points at the guard");
+            Check(ApplyHavokPickWarningGuard(), "second installation finds the guard in place");
+
+            // The wrapper with the game's handler replaced by a fake: held back only from the pick warning's call site.
+            static int boxes = 0;
+            static const char* lastText = nullptr;
+            static uint64_t lastA3 = 0;
+            struct Fakes {
+                static uint64_t Handler(const char*, const char* text, uint64_t a3)
+                {
+                    ++boxes;
+                    lastText = text;
+                    lastA3 = a3;
+                    return 7;
+                }
+            };
+            using HandlerFn = uint64_t (*)(const char*, const char*, uint64_t);
+            const auto hook = reinterpret_cast<HandlerFn>(*pg.slot);
+            HavokPickWarningGuardTestFunctions(reinterpret_cast<void*>(&Fakes::Handler), pg.callReturn);
+            Check(hook("WARNING", "42 Havok picks (6 path, 36 LOS, 0 ViewCaster) used this frame.", 0) == 0 && boxes == 0,
+                  "from the pick warning: held back, returns 0 like the game's handler");
+            HavokPickWarningGuardTestFunctions(nullptr, game.base + 0x699EA03);  // another caller of the handler
+            Check(hook("WARNING", "something else", 5) == 7 && boxes == 1 && lastText && strcmp(lastText, "something else") == 0 &&
+                      lastA3 == 5,
+                  "another caller: the game's handler, same arguments and result");
+            SetHavokPickWarningGuardEnabled(false);
+            HavokPickWarningGuardTestFunctions(nullptr, pg.callReturn);
+            Check(hook("WARNING", "41 Havok picks (0 path, 41 LOS, 0 ViewCaster) used this frame.", 0) == 7 && boxes == 2,
+                  "switched off: the box as in the stock game");
+            SetHavokPickWarningGuardEnabled(true);
+            Check(hook("WARNING", "43 Havok picks (1 path, 42 LOS, 0 ViewCaster) used this frame.", 0) == 0 && boxes == 2,
+                  "switched on again: held back");
+            HavokPickWarningGuardInfo(&pg);
+            Check(pg.heldBack == 2 && pg.forwarded == 2, "held back and forwarded counted");
+            LogHavokPickWarningGuardStats();
+            HavokPickWarningGuardTestFunctions(nullptr, nullptr);
+        }
+    }
+
     // DisplayModeCache: GetMonitorsInfo's display mode lists (graphics settings page).
     {
         Check(ApplyDisplayModeCache(false) == 1, "display mode lists: GetMonitorsInfo found, import slot hooked");

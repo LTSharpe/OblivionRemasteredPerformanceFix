@@ -1456,6 +1456,22 @@ with exactly the recorded crash; with the guard it carried on, and the log count
 
 ---
 
+<a id="havokpickwarningguard"></a>
+
+### The game no longer stops behind a "Havok picks" box (`HavokPickWarningGuard`)
+
+[Evidence](research.md#havokpickwarningguard).
+
+**The problem.** A freeze in the game's own code, not a slowdown. The old engine counts the "picks" it asks its physics for every frame: the short rays and shape casts that path finding, line of sight and the view caster use. It allows 40 a frame (the `iMaxPicks` setting; any more are skipped that frame, with "nothing hit"). At the end of its physics update, when the count went past 40, it formats a leftover debug message, "42 Havok picks (6 path, 36 LOS, 0 ViewCaster) used this frame.", and shows it as a Windows message box on its own thread. That thread waits for the box to be closed, the main thread waits for that thread at its next frame, and the whole game stands still, often behind its own full-screen window, until someone finds the box. It happens in fights with many characters; our battle benchmark lost 2 of 10 runs to it.
+
+*Analogy:* a kitchen whose head cook stops the whole service to walk out and tell the manager "we skipped a few orders this minute", and waits by the manager's door until told "noted".
+
+**What we did.** The engine reaches its message box through one pointer, which the DLL points at a small wrapper. A call that comes from the pick warning (the one place that formats this text; found by its code and checked) is counted and written to the log instead of shown. Any other message the engine sends through that pointer still shows as before. The count itself, its reset after the message and the limit of 40 are the game's code and stay exactly as they are.
+
+**Why the image can't change.** Nothing you see: the limit on picks is applied where it always was, so the engine skips the same checks it skipped before, with or without the box. The only difference is that the game keeps running instead of standing still behind a box.
+
+---
+
 <a id="viewrenameguard"></a>
 
 ### Views kept up to date when the graphics card's memory is tidied (`ViewRenameGuard`)

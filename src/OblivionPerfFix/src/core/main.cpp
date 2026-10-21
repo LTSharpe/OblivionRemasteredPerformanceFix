@@ -65,7 +65,7 @@ std::atomic<bool> g_saveBytesHooked{false};  // SaveBytesBulk / SaveThumbnailAsy
 std::atomic<bool> g_saveRefIdHooked{false};  // SaveRefIdIndex installed
 
 // Re-reads the ini every second so AtmosphereDirtyFilter, AtmosphereLightFastPath, AtmosphereLightCloudPath, RdgParallelTranslate,
-// RdgSubmitBatch, ClothConfigCache, FrozenClothStretchFix, NpcFadeInNoRebuild, PrepareCollisionBehindLoadingScreen, NameLookupCrashGuard, TrapCrashGuard,
+// RdgSubmitBatch, ClothConfigCache, FrozenClothStretchFix, NpcFadeInNoRebuild, PrepareCollisionBehindLoadingScreen, NameLookupCrashGuard, TrapCrashGuard, HavokPickWarningGuard,
 // FrameGenCrashGuard, FrameGenCameraInfo, DisplayModeCache,
 // MenuScreenshotFilter, RestoreFsrAfterAltTab, LumenKeepArrayCapacity, UploadMemoryKeep, PhysicsTreeTimeSlicing (with its
 // hidden PhysicsSliceIterations, PhysicsSliceCopyKB, PhysicsSliceAdaptive), PhysicsFlushParallel (hidden PhysicsFlushMinChanges), InstanceClearReserve and
@@ -137,6 +137,7 @@ DWORD WINAPI MonitorThread(LPVOID)
         if (g_collisionHooked) SetCollisionPrepareEnabled(cfg.prepareCollisionBehindLoadingScreen);
         SetEditorIdLookupGuardEnabled(cfg.editorIdLookupGuard);
         SetTrapTargetGuardEnabled(cfg.trapCrashGuard);
+        SetHavokPickWarningGuardEnabled(cfg.havokPickWarningGuard);
         SetFrameGenCrashGuardEnabled(cfg.frameGenCrashGuard);
         SetObjectReplaceGuardMode(cfg.objectReplaceGuard);
         SetTaskWaitGuardMode(cfg.taskWaitDeadlockGuard);  // no-op unless installed at start-up
@@ -225,6 +226,7 @@ DWORD WINAPI MonitorThread(LPVOID)
             if (g_navLinkHooked) LogNavLinkFastStats();
             LogEditorIdLookupGuardStats();
             LogTrapTargetGuardStats();
+            LogHavokPickWarningGuardStats();
             LogFrameGenCrashGuardStats();
             LogObjectReplaceGuardStats();
             LogTaskWaitGuardStats();
@@ -373,6 +375,9 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
     // TrapCrashGuard (a crash guard, not a speed-up): installed only if enabled at startup; afterwards the ini switches it live.
     if (cfg.trapCrashGuard) ApplyTrapTargetGuard();
     else Log("[trap] disabled in OblivionPerfFix.ini (takes a restart to switch on)");
+    // HavokPickWarningGuard (a freeze guard, not a speed-up): installed only if enabled at startup; afterwards the ini switches it live.
+    if (cfg.havokPickWarningGuard) ApplyHavokPickWarningGuard();
+    else Log("[picks] disabled in OblivionPerfFix.ini (takes a restart to switch on)");
     // FrameGenCrashGuard (a crash guard in AMD's FidelityFX library, not a speed-up): installed when the game loads the library, if
     // enabled at startup; afterwards the ini switches it live.
     if (cfg.frameGenCrashGuard) WatchFrameGenLibrary(beforeGameCode);
