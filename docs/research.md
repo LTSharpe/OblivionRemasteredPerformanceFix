@@ -978,6 +978,39 @@ Game bugs (they also happen without OblivionPerfFix). Bugs in our own fixes are 
 
 - **Results:** self-test with the real vtables and the crash's freed header; installed live (Kvatch plane runs).
 
+<a id="havokpickwarningguard"></a>
+
+### The game no longer stops behind a "Havok picks" box (`HavokPickWarningGuard`)
+
+[Explanation](how-it-works.md#havokpickwarningguard).
+
+- **Found (2026-10-20, actors-battle runs lost to a dialog):** the old engine's pick function (`exe+0x65E1B60`) counts
+  picks per frame by kind (path / LOS / view caster / other, from `pick+0x48 & 0x3f`) and drops any pick past the
+  setting `iMaxPicks:HAVOK` (setting object `exe+0x8FABF50`, default 40, copied to `exe+0x8FAAB98` at Havok init by
+  `exe+0x66A8D60`; 31 path picks is a second limit): result cleared, fraction 1.0, no cast. The Havok world's update
+  (`exe+0x65E1030`, OblivionThread) then, unless the counting is off (`exe+0x941F986`, set from the frame loop), checks
+  `picks > iMaxPicks`, formats `"%d Havok picks (%d path, %d LOS, %d ViewCaster) used this frame."` (`exe+0x861BBB0`,
+  or the variant with `(Other type = %d)`) and calls the handler pointer at `exe+0x8FB7CC8` -> `exe+0x691B460` =
+  `MessageBoxA(NULL, "WARNING", text, MB_TOPMOST)`; afterwards it zeroes the counters. The box blocks the
+  OblivionThread; the game thread then blocks in the pairing session at its next OnWorldPreActorTick, so the game
+  freezes until the box is closed (the benchmark's dialog watcher restarts the game). The shipped `ObvData\Oblivion.ini` sets
+  its default (`iMaxPicks=40` under `[HAVOK]`); raising it would change which casts the engine skips, i.e. gameplay, so it stays.
+
+- **The change:** the handler pointer (in `.data`; its value checked to be the MessageBoxA function above, the call
+  site checked by pattern: counters, cap, the two format strings, `"WARNING"`) points at a wrapper. A call whose
+  return address is the pick warning's call site (`exe+0x65E10F5`) is counted and logged (the text three times, then
+  counts with the stats) and returns 0 as the handler does; every other caller (`exe+0x699E850`, `exe+0x6A23240`) gets
+  the game's handler with the same arguments. The counter reset after the call and the cap in the pick function are
+  untouched: the engine skips the same picks as before, with or without the box.
+
+- **Results:** self-test with the real pointer and call site (held back from the call site, forwarded from another
+  caller, switch off = the box). Live (2026-10-20): actors-crowd with `iMaxPicks=2` put first under `[HAVOK]` in
+  `ObvData\Oblivion.ini` for the run only, so the warning fires as soon as the crowd paths: the log shows the held-back
+  messages ("20 Havok picks (20 path, 0 LOS, 0 ViewCaster) used this frame.", then 10 a frame) from the first second
+  of the scene, and the run went through at 42.1 fps with 0 restarts, where the stock box would have stopped the game
+  on its first frame. Without the forced setting the box is rare (2 of 10 actors-battle runs); the guard costs nothing
+  per frame (one pointer, no code on the frame path).
+
 <a id="viewrenameguard"></a>
 
 ### Views kept up to date when the graphics card's memory is tidied (`ViewRenameGuard`)
