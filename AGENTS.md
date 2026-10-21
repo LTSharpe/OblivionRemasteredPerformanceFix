@@ -91,6 +91,7 @@ words in `docs/how-it-works.md`, both in this order. All on by default except th
 | framegen | `FrameGenCameraInfo` | `[fgcam]` | `framegen/framegen_camera.cpp` | links AMD's camera desc (0x2000A) to each frame-generation prepare call, as AMD's newer UE plugin does; read only by ML frame generation |
 | guards | `NameLookupCrashGuard` | `[edid]` | `guards/name_lookup_guard.cpp` | name-table lookups skip entries whose string memory was freed (game bug) |
 | guards | `TrapCrashGuard` | `[trap]` | `guards/trap_guard.cpp` | traps drop actor entries that no longer exist, with the game's own removal (game bug) |
+| guards | `HavokPickWarningGuard` | `[picks]` | `guards/havok_pick_warning.cpp` | the old engine's "Havok picks" warning box (a modal message box on its thread that stops the game) is logged instead of shown; the pick cap stays (game bug) |
 | guards | `ViewRenameGuard` | `[view]` | `render/view_rename_guard.cpp` | UE-217692: view creation and pool defragmentation serialised; a stale view repaired on the spot |
 | guards | `FrameGenCrashGuard` | `[fg]` | `framegen/framegen_guard.cpp` | AMD FidelityFX 3.1.0/3.1.4: the 8-slot command-list pool waits for a free slot instead of reading a null one |
 | guards | `RestoreFsrAfterAltTab` | `[focus]` | `menus/focus_restore.cpp` | FSR back on after a focus loss once no menu holds the world (game bug) |

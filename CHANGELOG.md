@@ -9,6 +9,15 @@ Downloads, checksums and build attestations: https://github.com/LTSharpe/Oblivio
 Bug fixes say whose bug it was: **game bug** = also happens without OblivionPerfFix (in the game, its engine or a
 driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 
+## Unreleased
+- **Game bug fixed: the game stopping in big fights behind a "Havok picks" box** (`HavokPickWarningGuard`; happens
+  without OblivionPerfFix too): in fights with many characters the game's old engine can pop up a leftover debug
+  message, "42 Havok picks (6 path, 36 LOS, 0 ViewCaster) used this frame.", on its own thread. The whole game then
+  stands still, often behind its own window, until someone finds and closes the box (our battle benchmark lost 2 of
+  10 runs to it). The box only reports that the engine skipped some sight and path checks that frame, which it does
+  with or without the box, so the message now goes to the log instead and the game keeps running. Nothing else
+  changes: the engine's limit on those checks (`iMaxPicks` in Oblivion.ini) is left alone.
+
 ## 1.1.0-beta
 For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Thanks to everyone who reported results on
 NVIDIA, Linux and Mac.
