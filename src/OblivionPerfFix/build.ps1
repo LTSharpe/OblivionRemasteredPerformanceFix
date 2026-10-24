@@ -73,13 +73,19 @@ $defs = ''
 $sources = Get-Sources @()
 # Link exactly the objects of this build (a folder used for another build may hold others).
 $objs = (@('proxy_stubs.obj') + @($sources | ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_) + '.obj' }) |
-    ForEach-Object { "`"$obj\$_`"" }) -join ' '
+    ForEach-Object { "`"$obj\$_`"" })
+# The source and object lists go to cl and link in response files: on the command line they pass cmd's 8,191-character
+# limit in a long checkout path (CI's D:\a\<repo>\<repo>\...).
+$srcRsp = Join-Path $obj 'sources.rsp'
+$objRsp = Join-Path $obj 'objects.rsp'
+[IO.File]::WriteAllLines($srcRsp, [string[]]$sources)
+[IO.File]::WriteAllLines($objRsp, [string[]]$objs)
 $cmd = @(
     "call `"$vcvars`" >nul",
     "cd /d `"$PSScriptRoot`"",
     "ml64 /nologo /c /Fo`"$obj\proxy_stubs.obj`" src\core\proxy_stubs.asm",
-    "cl /nologo /MP /std:c++20 $opt /EHsc /W4 /WX /permissive- /Zi /DUNICODE /D_UNICODE $defs /Isrc\core /c $($sources -join ' ') /Fo`"$obj\\`" /Fd`"$obj\\`"",
-    "link /nologo /DLL $ltcg /DEF:OblivionPerfFix.def /OUT:`"$out\OblivionPerfFix.dll`" /PDB:`"$out\OblivionPerfFix.pdb`" /DEBUG /OPT:REF /OPT:ICF $objs kernel32.lib"
+    "cl /nologo /MP /std:c++20 $opt /EHsc /W4 /WX /permissive- /Zi /DUNICODE /D_UNICODE $defs /Isrc\core /c `"@$srcRsp`" /Fo`"$obj\\`" /Fd`"$obj\\`"",
+    "link /nologo /DLL $ltcg /DEF:OblivionPerfFix.def /OUT:`"$out\OblivionPerfFix.dll`" /PDB:`"$out\OblivionPerfFix.pdb`" /DEBUG /OPT:REF /OPT:ICF `"@$objRsp`" kernel32.lib"
 ) -join ' && '
 cmd /c $cmd
 if ($LASTEXITCODE) { throw "build failed ($LASTEXITCODE)" }
@@ -97,8 +103,9 @@ if ($SelfTest) {
     New-Item -ItemType Directory -Force $test | Out-Null
     # The DLL's entry points (DllMain, the version.dll forwarders) are not part of the test; everything else is.
     $skip = @('src\core\main.cpp', 'src\core\proxy.cpp')
-    $testSources = 'tests\selftest.cpp ' + ((Get-Sources $skip) -join ' ')
-    cmd /c "call `"$vcvars`" >nul && cd /d `"$PSScriptRoot`" && cl /nologo /MP /std:c++20 /O2 /MT /EHsc /W4 /WX /permissive- /DUNICODE /D_UNICODE $defs /Isrc\core $testSources /Fo`"$test\\`" /Fe`"$test\selftest.exe`" /link /DYNAMICBASE"
+    $testRsp = Join-Path $test 'sources.rsp'
+    [IO.File]::WriteAllLines($testRsp, [string[]](@('tests\selftest.cpp') + (Get-Sources $skip)))
+    cmd /c "call `"$vcvars`" >nul && cd /d `"$PSScriptRoot`" && cl /nologo /MP /std:c++20 /O2 /MT /EHsc /W4 /WX /permissive- /DUNICODE /D_UNICODE $defs /Isrc\core `"@$testRsp`" /Fo`"$test\\`" /Fe`"$test\selftest.exe`" /link /DYNAMICBASE"
     if ($LASTEXITCODE) { throw "selftest build failed ($LASTEXITCODE)" }
     Push-Location $test
     try {
