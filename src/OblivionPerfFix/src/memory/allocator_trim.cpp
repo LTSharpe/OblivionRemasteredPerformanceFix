@@ -53,6 +53,7 @@
 #include <d3d12.h>
 
 #include <atomic>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -163,6 +164,7 @@ std::atomic<void*> g_device{nullptr};
 std::atomic<ULONGLONG> g_deviceSinceMs{0};
 std::atomic<int> g_bucketIndex{0};
 std::atomic<bool> g_enabled{false};
+std::atomic<bool> g_failed{false};  // an exception in a trim pass: off until the game restarts (the ini cannot switch it on)
 std::atomic<int> g_windowSeconds{20};
 std::atomic<int> g_pressure{0};   // 1: VRAM over budget (MemoryRelief): short window, small margin
 std::atomic<bool> g_tight{false};   // video memory within AllocatorTrimHeadroomMB of the budget (always true when that is 0)
@@ -336,13 +338,46 @@ int64_t WindowPeak(const QueueStats& s, int seconds)
     return peak;
 }
 
+
 struct TrimResult {
     int popped = 0, real = 0, swapped = 0;
     double releaseMs = 0, longestOneMs = 0;
 };
 
+// Which popped wrappers give up their D3D12 allocator. Most recently used first (the pool is a stack): the first keepReal
+// real ones keep theirs, up to maxSwap of the rest get the stand-in. standIn[i] records every wrapper's place in the
+// give-back (1: holds the stand-in, from an earlier trim or swapped now) while all of them are still ours: once the first
+// is back in the pool the engine may take it again and its constructor rebuilds it (ObtainHook), so a wrapper is never
+// read again after it went back (the 1.1.0-beta race, 2026-10-21: the second pass re-tested wrappers the first had
+// returned, and reset and returned one the engine was using).
+int MarkStandIns(void* const* held, int n, int64_t keepReal, int maxSwap, void** toRelease, uint8_t* standIn, int* real)
+{
+    int swapped = 0;
+    for (int i = 0; i < n; ++i) {
+        void*& d3d = D3dOf(held[i]);
+        standIn[i] = d3d == &g_stub ? 1 : 0;
+        if (standIn[i]) continue;
+        if (++*real <= keepReal || swapped >= maxSwap) continue;
+        toRelease[swapped++] = d3d;
+        d3d = &g_stub;
+        standIn[i] = 1;
+    }
+    return swapped;
+}
+
+// Back into the pool, stand-ins first so that the real ones are on top (taken next), by the places decided above. The
+// engine's own release (push) resets each: a no-op for the stand-in; the real ones were reset when they came back from
+// the GPU.
+void GiveBack(void* device, void* const* held, const uint8_t* standIn, int n, ReleaseFn push)
+{
+    for (int pass = 0; pass < 2; ++pass)
+        for (int i = n - 1; i >= 0; --i)
+            if (standIn[i] == (pass == 0 ? 1 : 0)) push(device, held[i]);
+}
+
 // Monitor thread. SEH-only (no C++ objects with destructors): an exception here must not take the game down.
-int TrimQueue(void* device, int q, int64_t keepReal, int maxSwap, void** held, void** toRelease, TrimResult* r)
+int TrimQueue(void* device, int q, int64_t keepReal, int maxSwap, void** held, uint8_t* standIn, void** toRelease,
+              TrimResult* r)
 {
     __try {
         uint8_t* const pool = PoolOf(device, q);
@@ -353,21 +388,9 @@ int TrimQueue(void* device, int q, int64_t keepReal, int maxSwap, void** held, v
             held[n++] = a;
         }
         r->popped = n;
-        // Most recently used first (the pool is a stack): keep the first keepReal real ones.
-        int swapped = 0;
-        for (int i = 0; i < n; ++i) {
-            void*& d3d = D3dOf(held[i]);
-            if (d3d == &g_stub) continue;
-            if (++r->real <= keepReal || swapped >= maxSwap) continue;
-            toRelease[swapped++] = d3d;
-            d3d = &g_stub;
-        }
+        const int swapped = MarkStandIns(held, n, keepReal, maxSwap, toRelease, standIn, &r->real);
         r->swapped = swapped;
-        // Back into the pool, stand-ins first so that the real ones are on top (taken next). The engine's own release
-        // resets each (a no-op for the stand-in; the real ones were reset when they came back from the GPU).
-        for (int pass = 0; pass < 2; ++pass)
-            for (int i = n - 1; i >= 0; --i)
-                if ((D3dOf(held[i]) == &g_stub) == (pass == 0)) g.releaseOrig(device, held[i]);
+        GiveBack(device, held, standIn, n, g.releaseOrig);
         // Released a few at a time with pauses in between: the driver frees an allocator's chunks in the kernel (about
         // 1 ms each, 20 ms for a large direct one), and a long run of frees held up the game's own GPU submissions (418 in
         // one go: frames of 174, 79 and 158 ms at 1440p, 2026-10-12).
@@ -389,7 +412,17 @@ int TrimQueue(void* device, int q, int64_t keepReal, int maxSwap, void** held, v
 }
 
 void* g_held[kMaxPop];
+uint8_t g_standIn[kMaxPop];
 void* g_toRelease[kMaxPop];
+
+// An exception in a trim pass: off until the game restarts. The monitor's once-a-second ini reload calls
+// SetAllocatorTrim(1) again; before 1.1.3 that switched the trim back on a second later.
+void NoteTrimException(int q)
+{
+    g_failed = true;
+    g_enabled = false;
+    Log("[alloc] command allocator trim: exception in the trim pass (queue %d): switched off until the game restarts", q);
+}
 
 }  // namespace
 
@@ -489,9 +522,109 @@ bool InstallAllocatorTrim(bool beforeGameCode)
 
 void SetAllocatorTrim(bool enabled, int windowSeconds)
 {
+    if (g_failed.load()) enabled = false;  // switched off by an exception: stays off (logged once, then)
     if (g_enabled.exchange(enabled) != enabled)
         Log("[alloc] command allocator trim %s", enabled ? "on" : "off (pools keep their peak, as the game does)");
     g_windowSeconds = (std::max)(1, (std::min)(windowSeconds, kBuckets - 1));
+}
+
+namespace {
+// The self-test's fake pool: the push stands for the engine's release (reset + push), and after the first push the
+// "engine" takes the top wrapper out again (another thread's obtain), as in the 19:42 crash of 2026-10-21.
+struct FakeWrapper {
+    void* device;
+    int64_t queueType;
+    void* d3d;  // +0x10, as in FD3D12CommandAllocator
+};
+static_assert(offsetof(FakeWrapper, queueType) == kAllocType && offsetof(FakeWrapper, d3d) == kAllocD3d,
+              "the fake wrapper has the engine's layout");
+struct FakePool {
+    void* items[32] = {};
+    int n = 0;
+    bool obtainAfterFirst = false;
+    void* refillTo = nullptr;  // what the obtained wrapper's +0x10 holds when the trim could look again (nullptr: the
+                               // constructor has cleared it and not yet made the new allocator)
+    void* inUse = nullptr;     // the wrapper the engine took out
+    int pushes = 0;
+    const char* fail = nullptr;
+};
+FakePool g_fakePool;
+int g_fakeAllocators[16];  // stand for ID3D12CommandAllocators: only their addresses are used
+
+void FakePush(void*, void* allocator)
+{
+    FakePool& p = g_fakePool;
+    const auto* w = static_cast<FakeWrapper*>(allocator);
+    if (!p.fail && !w->d3d) p.fail = "trim: a wrapper without an allocator was reset (the access violation of 2026-10-21)";
+    if (!p.fail && allocator == p.inUse) p.fail = "trim: a wrapper the engine is using went back into the pool";
+    for (int i = 0; i < p.n && !p.fail; ++i)
+        if (p.items[i] == allocator) p.fail = "trim: a wrapper went back into the pool twice";
+    if (p.n < 32) p.items[p.n++] = allocator;
+    if (++p.pushes == 1 && p.obtainAfterFirst && p.n > 0) {
+        // ObtainHook on another thread: pops the top wrapper, sees the stand-in and runs the engine's constructor on it.
+        void* const top = p.items[--p.n];
+        p.inUse = top;
+        static_cast<FakeWrapper*>(top)->d3d = p.refillTo;
+    }
+}
+}  // namespace
+
+// Self-test of the trim's give-back and its switch-off, with fake wrappers and a fake pool (no game code runs).
+// Returns the first failure or nullptr.
+const char* AllocatorTrimSelfTest()
+{
+    const char* fail = nullptr;
+    auto expect = [&](bool ok, const char* what) { if (!ok && !fail) fail = what; };
+    // 0: nothing happens between the passes; 1: the engine takes the first stand-in back out and its constructor is
+    // still running (+0x10 null); 2: the constructor has finished (a new allocator, the wrapper is recording).
+    for (int mode = 0; mode < 3 && !fail; ++mode) {
+        constexpr int n = 10;
+        FakeWrapper w[n];
+        void* held[n];
+        uint8_t standIn[n];
+        void* toRelease[n] = {};
+        for (int i = 0; i < n; ++i) {
+            // 2 and 5 hold the stand-in from an earlier trim
+            w[i] = {nullptr, kCopyQueue, (i == 2 || i == 5) ? static_cast<void*>(&g_stub) : &g_fakeAllocators[i]};
+            held[i] = &w[i];
+        }
+        g_fakePool = FakePool{};
+        g_fakePool.obtainAfterFirst = mode > 0;
+        g_fakePool.refillTo = mode == 2 ? &g_fakeAllocators[15] : nullptr;
+        int real = 0;
+        const int swapped = MarkStandIns(held, n, 3, 4, toRelease, standIn, &real);
+        expect(swapped == 4 && real == 8, "trim: 4 of 8 real allocators released (3 kept, at most 4 a pass)");
+        expect(toRelease[0] == &g_fakeAllocators[4] && toRelease[1] == &g_fakeAllocators[6] &&
+                   toRelease[2] == &g_fakeAllocators[7] && toRelease[3] == &g_fakeAllocators[8],
+               "trim: the released ones are the next less recently used after the kept ones");
+        static const uint8_t kStandIn[n] = {0, 0, 1, 0, 1, 1, 1, 1, 1, 0};
+        expect(memcmp(standIn, kStandIn, n) == 0, "trim: every wrapper's place decided before the give-back");
+        GiveBack(nullptr, held, standIn, n, &FakePush);
+        expect(g_fakePool.fail == nullptr, g_fakePool.fail);
+        // The pool from bottom to top: the stand-ins 8 7 6 5 4 2, then the real ones 9 3 1 0 (the obtain took 8).
+        static const int kOrder[n] = {8, 7, 6, 5, 4, 2, 9, 3, 1, 0};
+        const int* const order = mode ? kOrder + 1 : kOrder;
+        const int count = mode ? n - 1 : n;
+        bool same = g_fakePool.n == count;
+        for (int i = 0; i < count && same; ++i) same = g_fakePool.items[i] == held[order[i]];
+        expect(same, mode ? "trim: an obtain between the passes: every other wrapper back once, stand-ins below"
+                          : "trim: every wrapper back once, stand-ins at the bottom, real ones on top");
+    }
+    // An exception in a trim pass switches the trim off until the game restarts: the per-second ini reload must not
+    // switch it back on.
+    const bool wasEnabled = g_enabled.load(), wasFailed = g_failed.load();
+    const int wasWindow = g_windowSeconds.load();
+    g_failed = false;
+    SetAllocatorTrim(true, 20);
+    expect(g_enabled.load(), "trim: switched on from the ini");
+    NoteTrimException(kCopyQueue);
+    expect(!g_enabled.load(), "trim: an exception switches it off");
+    SetAllocatorTrim(true, 20);
+    expect(!g_enabled.load(), "trim: after an exception the ini reload does not switch it back on");
+    g_failed = wasFailed;
+    g_enabled = wasEnabled;
+    g_windowSeconds = wasWindow;
+    return fail;
 }
 
 
@@ -552,11 +685,10 @@ void AllocatorTrimTick()
         const int64_t keepFree = (std::max<int64_t>)(0, peak + margin - s.inFlight.load());
         if (freeReal <= keepFree + (pressure ? 0 : 8)) continue;  // hysteresis: trim only a clear surplus
         TrimResult r;
-        const int ok = TrimQueue(device, q, keepFree, kMaxTrimPerTick, g_held, g_toRelease, &r);
+        const int ok = TrimQueue(device, q, keepFree, kMaxTrimPerTick, g_held, g_standIn, g_toRelease, &r);
         g_trimPasses.fetch_add(1);
         if (ok < 0) {
-            Log("[alloc] command allocator trim: exception in the trim pass (queue %d): switched off", q);
-            g_enabled = false;
+            NoteTrimException(q);
             return;
         }
         s.trimmed.fetch_add(r.swapped);
@@ -605,6 +737,7 @@ void LogAllocatorTrimStats()
 }
 
 void* AllocatorTrimTestStub() { return &g_stub; }
+
 
 bool AllocatorTrimInfo(AllocatorTrimInfoOut* out)
 {

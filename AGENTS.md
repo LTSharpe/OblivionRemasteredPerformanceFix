@@ -12,18 +12,20 @@ then open only the doc or source file you need. Plain-language overview: [README
   builds far-away, unseen characters a few frames later; `CellBufferPacedEvict` unloads the cells behind the player a few
   frames later. A fix whose code does not match switches itself off and logs why.
 - **A benchmark suite** (PowerShell, C# compiled at run time, a UE4SS Lua mod) that starts the game hidden and muted,
-  runs fixed scenes unattended and compares runs. Only needed to measure, not to use the fix.
+  runs fixed scenes unattended and compares runs. Only needed to measure, not to use the fix. The **benchmark kit** for
+  players (`kit/`, released as `OblivionPerfFix-<version>-Benchmark.zip`) runs the Imperial City flight stock vs fix on
+  screen and with sound by default (`Benchmark-Hidden.cmd`: hidden and muted).
 
 ## Layout
 | Path | What |
 |---|---|
 | `src/OblivionPerfFix/src/core/` | `main.cpp` (entry points: proxy `DllMain`, OBSE64 `OBSEPlugin_Load`; installs the fixes in order; the monitor thread that re-reads the ini every second), `common.h` (`OPF_VERSION`, `Config` with every default, the pattern API, every fix's entry points), `config.cpp` (ini reading), `log.cpp`, `mem.cpp` (pattern search, code and pointer writes), `proxy.cpp` + `proxy_stubs.asm` (`version.dll` forwarding) |
-| `src/OblivionPerfFix/src/<area>/` | one file per fix, grouped: `render`, `streaming`, `physics`, `npcs`, `loading`, `menus`, `framegen`, `guards`, `memory`, `diagnostics` (index below). The comment at the top of each file explains the problem, the patch and why the output is identical |
+| `src/OblivionPerfFix/src/<area>/` | one file per fix, grouped: `render`, `streaming`, `physics`, `npcs`, `loading`, `menus`, `saves`, `framegen`, `guards`, `memory`, `diagnostics` (index below). The comment at the top of each file explains the problem, the patch and why the output is identical |
 | `src/OblivionPerfFix/tests/` | offline self-test: maps the game exe, applies every fix to that copy, checks the result |
 | `src/OblivionPerfFix/OblivionPerfFix.ini` | the shipped ini (every switch, explained in plain words) |
 | `tools/` | benchmark scripts, `find_patterns.py`, `GamePaths.ps1`, `Setup-Bench.ps1`, `Bench-Report.ps1`, `Audit-UESource.py`, `stutter_ledger.py` |
 | `bench/`, `mods/ue4ss/OblvBench/` | benchmark profiles and scenes; the in-game mod that drives them |
-| `tools/ue4ss-build/` | how the benchmark's UE4SS build (upstream 3.0.1-1161 + a Lua memory-leak fix) is made |
+| `kit/` | the benchmark kit's double-click launchers (`Benchmark.cmd`, `Benchmark-Hidden.cmd`, `Check-GPU.cmd`), its `README.txt` and `files.txt` (what of `tools/`, `bench/`, `mods/` goes into the kit zip); entry point `tools/Bench-Kit.ps1` |
 | `docs/` | `how-it-works.md` (each fix in plain words, same groups as the source), `research.md` (evidence, rejected ideas), `porting.md` (game update), `benchmark.md` |
 | `.github/` | CI build + draft release with attestation, issue forms |
 
@@ -70,38 +72,54 @@ words in `docs/how-it-works.md`, both in this order. All on by default except th
 | render | `RdgSubmitBatch` | `[rdg]` | `render/submit_batch.cpp` | groups parallel translate's command-list submissions, same order |
 | render | `GpuSceneParallelUpload` | `[gpuscene-par]` | `render/gpuscene_upload.cpp` | `r.GPUScene.ParallelUpdate 1`: the GPU scene upload's batches on all workers (each writes its own range) |
 | render | `ClothConfigCache` | `[cloth]` | `render/cloth_config.cpp` | skips the per-frame cloth config copy when it would come out identical (deep compare, else copy) |
+| render | `WaterCaptureFsrSkip`, `WaterCaptureNoRhiFlush`, `WaterCaptureNoOcclusionWait`, `WaterCaptureFastMeshScan` | `[water]` | `render/water_info.cpp` | inside the Water plugin's water-info render (`UpdateWaterInfoRendering_RenderThread` detoured as a scope): FSR3's pre-alpha copy, the first-renderer RHI flush and the occlusion-fence wait skipped (never read there); `FEnableWaterInfoMeshesScoped` finds the same proxies from `FScene`'s packed component ids. Start-up only (version.dll route), then live |
 | streaming | `LumenKeepArrayCapacity`, `UploadMemoryKeep`, `GpuSceneKeepCapacity` | `[lumen]` `[upload]` `[gpuscene]` | `streaming/stream_churn.cpp` | Lumen's scene arrays, the D3D12 upload pools and the GPU scene buffers keep their capacity instead of shrink/regrow copies and kernel allocations |
+| streaming | `RtSceneBufferKeep` | `[rtscene]` | `streaming/rt_scene_keep.cpp` | `FRayTracingScene::Create` keeps a TLAS buffer that is big enough instead of re-creating it smaller when the scene needs less than half (grows as before; at most the session's largest size); its three buffer creations timed for the stats line |
+| streaming | `NaniteInitialRootPages` | `[nanite]` | `streaming/nanite_stream_buffers.cpp` | `r.Nanite.Streaming.NumInitialRootPages` 2048 -> 3072 at start-up (both routes; only while it holds 2048; an Engine.ini line wins): Nanite's ClusterPageData starts at its first growth step (+32 MiB) instead of being re-created mid-flight |
 | streaming | `InstanceClearReserve` | `[instances]` | `streaming/instance_clear.cpp` | clearing a big instanced mesh reserves its hide-command list once |
 | streaming | `NavmeshBuildNoBusyWait`, `BusyWaitFlagCheck` | `[navmesh]` `[busywait]` | `streaming/navmesh_wait.cpp`, `busywait_check.cpp` | navmesh tile builds never run inside another task's busy wait (the engine's flag, and the gap where a put-back task was taken unchecked) |
+| streaming | `NavLinkFast` | `[navlink]` | `streaming/nav_link_fast.cpp` | a streamed nav chunk's `dtNavMesh::addTile`: `connectExtLinks` calls that cannot make a link left out, `findConnectingPolys` run once per polygon with an edge on the facing side (per-tile cache per chunk attach); the game's code makes every link, same order. Start-up only (version.dll route), then live |
 | physics | `PhysicsTreeTimeSlicing` | `[chaos]` | `streaming/stream_churn.cpp`, `physics/physics_flush.cpp` | big physics acceleration-structure updates time-sliced like small ones, with bigger slices while a rebuild has a backlog |
 | physics | `PhysicsFlushParallel` | `[chaos]` | `physics/physics_flush.cpp` | a rebuild's catch-up fills the game-thread copy on a helper while the game's function does the physics copy |
 | physics | `ParallelStaticBodies`, `PipelinedBodyCreation` | `[bodies]` | `physics/static_bodies.cpp` | an instanced mesh's static bodies created on helper threads with the game's code, filed in the game's order, handed over in groups as they are made |
 | physics | `DirtyTreeQuickInsert`, `BulkIndexInsert`, `PhysicsInternalFlushParallel`, `PhysicsQueueShrinkOnce` | `[bodies]` `[bulk]` | `physics/bulk_insert.cpp` | the dirty-element tree: quick sibling choice, a batch filed as one subtree, two catch-ups side by side, the pending queue shrunk once (same entries; tree shape may differ, as it already does between runs) |
 | physics | `PhysicsPushParallel` | `[push]` | `physics/physics_push.cpp` | a push of new bodies created as one batch, shapes set up on helper threads, same order |
+| physics | `PhysicsDestroyBatch` | `[destroybatch]` | `physics/destroy_batch.cpp` | the step's `DestroyPendingProxies` of 256+ removed bodies: proxy deletes on one helper (all joined before the function returns), `UpdateViews` once after the loop instead of per body; same physics state |
 | npcs | `NpcFadeInNoRebuild` | `[fadein]` | `render/npc_fade_in.cpp` | a spawning character's dither fade-in value goes to the proxy and `FScene::UpdateCustomPrimitiveData` instead of recreating every primitive's render state (and skinned BLAS) every frame |
 | npcs | `NpcCreationPacing` | `[pacing]` | `npcs/npc_pacing.cpp` | far (> 4096 units), unseen actors' creation work under a per-frame budget; the old-engine -> UE command queue stays FIFO, anything 30 frames old runs at once, off during loading and menus. **Timing changes** (a few frames) |
+| npcs | `ClothRegisterLite` | `[clothreg]` | `npcs/cloth_register.cpp` | every cloth build inside one `EquipBodyPart` call made without `FClothConstraints::AddRules` (the builds the robe's Blueprint throws away); the one left at the call's end gets the recorded rules added in place (same inputs, same order: the game's constraints), else it is rebuilt in full |
+| npcs | `RigVmHashMemo`, `RigLogicMapCache` | `[rigsetup]` | `npcs/rig_setup.cpp` | `URigVM::ComputeVMHash` memoised on all its inputs (compared in full); the head rig's DNA name -> hierarchy index maps replayed from the FNames the stock code made for the same DNA content, every lookup done live on the new hierarchy |
+| npcs | `NpcBodiesOneLock` | `[npcbodies]` | `npcs/npc_bodies.cpp` | `InitArticulated`'s `InstantiatePhysicsAsset_Internal` (a character's bodies and constraints) under one hold of the scene's write lock instead of one per body; call tree pinned by hash; same bodies, same order |
 | npcs | `AnimTeardownParallel` | `[animpar]` | `npcs/anim_teardown.cpp` | at a cell-row crossing, dying NPCs' recognised animation interpolators destroyed on helper threads, joined before the NPC's clean-up goes on |
 | npcs | `CellBufferPacedEvict` | `[cellbuf]` | `npcs/cell_buffer.cpp` | the exterior cell buffer gets 2 x uGridsToLoad - 1 spare slots; overflow cells unloaded one per old-engine frame with the game's unload; the ini writer keeps the player's value. **Timing changes** (a few frames) |
 | loading | `PrepareCollisionBehindLoadingScreen` | `[collision]` `[fade]` | `loading/collision_prepare.cpp`, `fade_hook.cpp` | a new area's collision handed to physics with a zero-time step while the loading screen is still up |
-| loading | `PsoPrecompileFast` | `[pso]` | `loading/pso_precompile.cpp` | the start-up PSO precompile at UE's fast pace outside play, the game's pace in play |
+| loading | `PsoPrecompileFast` | `[pso]` | `loading/pso_precompile.cpp` | the start-up PSO precompile faster outside play (menus: a bounded render-thread budget; loading screens: UE's fast pace), the game's pace in play and once UE's queue or the driver's compile threads show a cold driver cache |
+| loading | `PsoCompileThreadPool` (on, -1) | `[psopool]` | `loading/pso_pool.cpp` | `r.pso.PrecompileThreadPoolSize` at start-up only: precompile and precache PSOs on UE's own pool, not the task workers (game bug: cold-cache loading starved; applied only with `TaskWaitDeadlockGuard=1` installed; the game's or an Engine.ini value wins) |
 | menus | `DisplayModeCache` | `[display]` | `menus/display_modes.cpp` | the Graphics page's display-mode lists from a cache re-checked against Windows each time |
 | menus | `MenuScreenshotFilter`, `ScreenshotReadbackConvert`, `ScreenshotParallel` | `[resize]` `[readback]` `[shotpar]` | `menus/image_resize.cpp`, `readback_convert.cpp`, `screenshot_parallel.cpp` | the menu screenshot's resize and colour conversion in SSE2 (identical bytes), its big copies on helper threads |
+| saves | `SaveBytesBulk`, `SaveThumbnailAsync`, `SaveRefIdIndex` | `[savestall]` `[savethumb]` `[saverefid]` | `saves/save_bytes.cpp`, `save_thumb.cpp`, `save_refid.cpp` | a save: the save list's byte arrays written in one `Serialize` inside `SaveGameToMemory` (same bytes; call sites found by an E8 scan, each hit checked: inside a .pdata function, `test al,al` after); the thumbnail's read-back as an async GPU copy delivered by a helper thread (save system's cache first, then the save's callback; same pixels); the old engine's formID -> refID lookups through a hash index (same refIDs). Each installed at start-up only when its key is on, then live |
 | framegen | `FrameGenAsyncCompute` | `[fgasync]` | `framegen/framegen_async.cpp` | `r.FidelityFX.FI.AllowAsyncWorkloads 1` at start-up (an Engine.ini line still wins) |
 | framegen | `FrameGenPacingTuning` | `[fgpace]` `[fgorder]` | `framegen/framegen_pacing.cpp` | AMD's frame-pacing tuning set B on AMD's FSR 3.1.4 / SDK 2.x libraries (nothing on the game's 3.1.0); logs each FSR context's provider |
 | framegen | `FrameGenCameraInfo` | `[fgcam]` | `framegen/framegen_camera.cpp` | links AMD's camera desc (0x2000A) to each frame-generation prepare call, as AMD's newer UE plugin does; read only by ML frame generation |
 | guards | `NameLookupCrashGuard` | `[edid]` | `guards/name_lookup_guard.cpp` | name-table lookups skip entries whose string memory was freed (game bug) |
 | guards | `TrapCrashGuard` | `[trap]` | `guards/trap_guard.cpp` | traps drop actor entries that no longer exist, with the game's own removal (game bug) |
+| guards | `ObjectReplaceCrashGuard` | `[replace]` | `guards/object_replace_guard.cpp` | `StaticAllocateObject`'s in-place re-creation: a `GUObjectArray` slot the destructor left holding the destroyed object is freed as `FreeUObjectIndex` does, instead of the `UObjectArray.cpp:234` fatal error (game bug) |
 | guards | `ViewRenameGuard` | `[view]` | `render/view_rename_guard.cpp` | UE-217692: view creation and pool defragmentation serialised; a stale view repaired on the spot |
 | guards | `FrameGenCrashGuard` | `[fg]` | `framegen/framegen_guard.cpp` | AMD FidelityFX 3.1.0/3.1.4: the 8-slot command-list pool waits for a free slot instead of reading a null one |
 | guards | `RestoreFsrAfterAltTab` | `[focus]` | `menus/focus_restore.cpp` | FSR back on after a focus loss once no menu holds the world (game bug) |
 | guards | `FrozenClothStretchFix` | `[frozencloth]` | `render/frozen_cloth_lod.cpp` | a suspended cloth's zero-time LOD update requests the engine's per-cloth teleport, so the frozen pose moves fully with its owner (game bug: stretched robes) |
+| guards | `FrameRateLimitAtStart` | `[fpscap]` | `framegen/frame_cap_start.cpp` | after frame generation's first off -> on switch (the start-up apply, no menu open), the saved `Altar.GraphicsOptions.FrameRateLimit` run through Altar's setter as the Graphics page does (game bug: the saved cap is 0 after a launch with FG on). Start-up only, both routes |
+| guards | `TaskWaitDeadlockGuard` (on) | `[taskwait]` | `guards/task_wait_guard.cpp` | a task worker waiting for tasks (UE 5.3 reserve-worker wait) is also woken by its reserve worker, not only by the trigger task that may never get a thread (game bug: cold-cache deadlock, RenderThread 120 s timeout) |
 | memory | `OsPageCache` | `[oscache]` | `memory/os_page_cache.cpp` | blocks the allocator releases to Windows kept (64 MB, exact size, 5 s) and reused |
 | memory | `MemoryRelief`, `[General] GpuCrashReport` | `[mem]` `[gpucrash]` | `memory/memory_monitor.cpp` | RAM/commit under 1 GB: the memory-keeping fixes behave as stock; DRED + memory report in the log on a GPU crash |
 | memory | `CommandAllocatorTrim` | `[alloc]` | `memory/allocator_trim.cpp` | the D3D12 copy queue's command-allocator pool shrinks to recent need when within 2 GB of the VRAM budget |
 | diagnostics | `HitchLedger` (off) | `[ledger]` | `diagnostics/hitch_ledger.cpp` | per slow game-thread frame, where its time went, to `OblivionPerfFix-ledger.csv` (`tools/stutter_ledger.py` ranks it) |
 
 `[General] StatsIntervalSeconds` writes per-fix counters to the log (default every 60 s). The log keeps the last two
-sessions as `OblivionPerfFix.1.log` / `.2.log` and stops at 8 MB per session (crash report excepted).
+sessions as `OblivionPerfFix.1.log` / `.2.log` and stops at 8 MB per session (crash report excepted). `[General] LogFile=0`
+(start-up only, default 1; `core/log.cpp`, `LogOpen(..., enabled)`) writes no log: nothing is created, renamed or deleted at
+start-up, and the first `[gpucrash]` line creates the log (rotating the old ones as usual) so a GPU crash still leaves
+its report. Lab builds ignore the key.
 
 ## Adapting it
 **A game update broke a fix** (the log says `not found` / `disabled` for a tag): follow [docs/porting.md](docs/porting.md).
@@ -110,8 +128,8 @@ comments, find the same code in the new exe, update the pattern and checks, run 
 and an image comparison. Run `python tools\find_patterns.py --save tools\pattern-baseline.tsv` on the build you tested.
 
 **Another PC:** the fix has no paths and no per-PC settings; helper-thread counts follow the logical processors the
-game may use, and the helper-heavy fixes stay off below 8 of them (hidden key `ParallelMinProcessors`). For the benchmark: `tools\Setup-Bench.ps1` (pinned
-UE4SS and PresentMon, SHA-256 checked; UE4SS is in the game folder only while a benchmark game runs), game and
+game may use, and the helper-heavy fixes stay off below 8 of them (hidden key `ParallelMinProcessors`). For the benchmark: `tools\Setup-Bench.ps1` (the
+official UE4SS experimental build >= 1181 and PresentMon, downloaded from their own projects, SHA-256 recorded; UE4SS is in the game folder only while a benchmark game runs), game and
 Documents paths from `tools\GamePaths.ps1` (override with `$env:OBLIVION_GAME_DIR` / `$env:OBLIVION_SAVED_DIR`),
 display/quality profiles in `bench/profiles.json` (`small` is the quiet default; `native` uses the monitor's
 resolution). `tools\Bench-Report.ps1` = stock vs fix, shareable report.
@@ -130,11 +148,21 @@ separate compile, so expect some patterns to differ. The benchmark is Steam-only
   `pluginVersion` (`core/main.cpp`), and add a `CHANGELOG.md` entry.
 - **Prove it.** Image comparison (`tools\Compare-Benchmark.ps1`, visual pass) for anything that could touch the picture;
   benchmark A-B-A for speed (run-to-run noise is about ±10%; trust per-thread ms more than fps).
+- **Iterate on a mini-scenario.** From a report to a fix: reproduce it as a save-free scenario, find the problem spots,
+  cut a 30-60 s scene per spot (`py -3 tools\slice_flight.py` slices timed flights; start ~9 s before the spot so its
+  cells and NPCs load during the measured part), check in one or two runs that it reproduces the problem, iterate there
+  (one game kept open, ini switches flipped live, ABBA), and confirm once on the full scenario.
+- **Identical runs.** Runs are pinned by default (weather forced and held, hour, `timescale` 1; a scene opts out with
+  `"keep"`, `-NoPin` = old behaviour) and the game starts with Unreal's `-FixedSeed` (this launch only; `-NoFixedSeed`);
+  start from a fresh world, compare only runs made the same way, certify a new mini-scenario with
+  `tools\Repro-Check.ps1 -N 3`, and say what still varies (NPC behaviour, GPU state).
 - **Licences.** No game files, and no game bytes beyond short search patterns. No Unreal Engine source text: names,
   offsets and descriptions in your own words are fine, copied engine code or comments are not
   (`python tools\Audit-UESource.py --ue <your UE checkout> src docs` checks for copied runs of text).
 - **Benchmark etiquette.** Runs keep the game window hidden and muted. Never minimise the game (it crashes); start the
   game for measurements only through `tools\Run-Benchmark.ps1`, which also restores your settings and saves afterwards.
+  Stop a run or a chain with `tools\Run-Benchmark.ps1 -Stop`, never with `Stop-Process` (run chains in-process so
+  `-Stop` reaches their later runs).
 
 ## Saving tokens
 - `tests/selftest.cpp` and the larger fix files are long: grep for the fix's `Check(` lines or its log tag instead of

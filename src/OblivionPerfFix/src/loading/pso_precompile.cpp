@@ -18,9 +18,31 @@
 // freeze (every menu, dialogue and the main menu push one) and its mode 0 (no loading freeze); before the subsystem
 // exists (start-up) counts as not in play. A game-thread timer (SetTimer without a window, dispatched by UE's message
 // pump, as in RestoreFsrAfterAltTab) checks every 250 ms while the precompile runs and hands the game's own mode back as soon as play
-// starts. Fast and Precompile requests pass unchanged, pausing and resuming are the game's, nothing else is touched. The
+// starts. Once play has been seen for 3 s in a row after the first menu (the main menu; the start-up videos before it
+// show no menu freeze), a menu opened in play (inventory, map, dialogue, pause) keeps the
+// game's pace too (PsoPrecompileFastInGameMenus=1: Fast there as before 1.1.5): the player is still using the game there,
+// and after a driver update the precompile runs for minutes, so Fast made those menus lag. Fast and Precompile requests pass unchanged, pausing and resuming are the game's, nothing else is touched. The
 // same pipelines are created, only sooner: identical results (timing only). With a cold driver cache (after a driver
 // update) the precompile takes longer; it is then fast behind menus and loading screens and at the game's pace in play.
+//
+// Since 1.1.10 (2026-10-23, worker coldstart) the faster pace is bounded, because with a cold driver shader cache (a new
+// install, a driver update) UE's Fast pace made things worse than the stock game: (1) UE's Fast gives the render thread
+// 16 ms per frame for dispatching pipelines (its batch size grows while a batch takes less), so main-menu frames ran at
+// 30+ ms even with a warm cache (p99 26-32 ms, up to 172 ms; players reported 700 -> 15 fps); now, while a menu is up (the
+// main menu, start-up), the render thread gets PsoPrecompileFastBudgetMs (default 4 ms) per frame and the batch starts small
+// (measured: p99 6 ms, the warm precompile done ~40 s after launch instead of ~18 s; stock ~120 s). Loading screens, where
+// nobody interacts, keep UE's Fast values (as the game itself uses for its own full map loads). (2) With a cold cache the driver compiles
+// every pipeline for real, the dispatched work queues up in the driver and the fetched pipelines pile up in UE (its
+// TotalActiveTasks: 9,000-12,000 instead of the warm runs' 20-200), and every loading screen waited behind that queue
+// (measured: a door 52 s instead of 6 s, a 30 s freeze, the menu with 100+ ms frames). Once the fetched-but-not-dispatched
+// queue reaches PsoPrecompileColdQueue (default 1000), or the driver's own compile threads are busy (D3D12's "D3D
+// Background Thread"s, which the AMD driver compiles on: 100-400 % of a core with a cold cache, 0 % with a warm one; at
+// least half a core for 2 s in a row, read once a second on the monitor thread), or the faster pace has run for 60 s in
+// this precompile without finishing, the fix hands the game its own pace for the rest of that precompile: a cold start
+// runs as in stock. The driver's threads are searched for once per precompile (a system-wide thread snapshot, ~50 ms of
+// the monitor thread on a busy desktop), again only if one of them exits; with none found (likely NVIDIA and Intel) the
+// search is retried every 10 s and given up after three, and the log says once which it was. PsoPrecompileColdQueue=0
+// turns the whole guard off (no queue, driver-thread or 60 s limit: the pace before 1.1.10, with the budget at 16).
 //
 // Found by byte pattern: SetBatchMode (its entry, the singleton it checks, its three cases, each storing the batch size
 // into the same static) and IsPrecompiling (the same singleton, the flag's offset). The entry's first two instructions
@@ -56,6 +78,11 @@ constexpr uint8_t kEntry[4] = {0x48, 0x83, 0xEC, 0x28};
 // movzx eax,byte [rax+bHasShaderPipelineTask] / nop / ret / ret
 constexpr const char* kIsPrecompiling = "48 8B 05 ?? ?? ?? ?? 48 85 C0 74 09 0F B6 80 ?? ?? ?? ?? 90 C3 C3";
 constexpr size_t kFlagDisp = 0x0F;
+// FShaderPipelineCache::NumPrecompilesRemaining (exe+0x26FDE70), its no-MaxPrecompileTime branch at +0xA8:
+// mov rcx,[TotalActiveTasks] / nop / mov rax,[TotalWaitingTasks] / nop / test rax,rax / cmovs eax,ebx / test rcx,rcx /
+// cmovs ecx,ebx / lea edi,[rcx+rax] / mov rsi,[rsp+40h] / movaps xmm6,[rsp+20h] / call GetNumActivePipelinePrecompileTasks
+constexpr const char* kRemaining =
+    "48 8B 0D ?? ?? ?? ?? 90 48 8B 05 ?? ?? ?? ?? 90 48 85 C0 0F 48 C3 48 85 C9 0F 48 CB 8D 3C 01 48 8B 74 24 40 0F 28 74 24 20 E8";
 
 enum Mode : int { kBackground = 0, kFast = 1, kPrecompile = 2 };
 const char* const kModeName[3] = {"Background", "Fast", "Precompile"};
@@ -64,6 +91,8 @@ const char* ModeName(int m) { return m >= 0 && m <= 2 ? kModeName[m] : "?"; }
 constexpr UINT kTimerMs = 250;
 constexpr ULONGLONG kIdleStopMs = 120000;  // no precompile seen this long after the timer started: stop (restarted by the next call)
 constexpr int kMaxEventLines = 40;
+constexpr uint32_t kGentleStartBatch = 8;     // the bounded pace's first batch (UE's Fast starts at 50 and grows from there)
+constexpr ULONGLONG kFastMaxMs = 60000;       // the faster pace at most this long per precompile (a warm start needs ~8-20 s)
 
 using SetBatchModeFn = void (*)(int mode);
 
@@ -76,13 +105,46 @@ float* g_batchTime = nullptr;
 bool g_freezeKnown = false;
 DWORD g_gameThread = 0;
 uint8_t* g_region = nullptr;
+volatile int64_t* g_active = nullptr;   // FShaderPipelineCacheTask::TotalActiveTasks: pipelines fetched, not yet dispatched
 
 std::atomic<bool> g_enabled{true};
 std::atomic<int> g_requested{-1};   // the game's last request (-1: none seen yet)
 std::atomic<int> g_applied{-1};     // what the fix last passed on (with the call, under g_applyLock)
 std::atomic<bool> g_ours{false};    // the applied mode is the fix's Fast in place of the game's Background
 SRWLOCK g_applyLock = SRWLOCK_INIT; // the game thread's timer and a render-thread request may apply at the same time
-std::atomic<int> g_inPlay{-1};      // the game thread's last look: 1 in play, 0 not, -1 not known yet
+std::atomic<int> g_inPlay{-1};      // the game thread's last look: 1 in play, 0 not, 2 a menu after play started, -1 not known yet
+std::atomic<bool> g_inGameMenus{false};  // PsoPrecompileFastInGameMenus: Fast in menus after play started too
+std::atomic<float> g_budgetMs{4.0f};    // PsoPrecompileFastBudgetMs: render-thread ms per frame at the faster pace (>= 16: UE's Fast as is)
+std::atomic<int> g_coldQueue{1000};     // PsoPrecompileColdQueue: fetched-not-dispatched pipelines that mean "the driver compiles"
+                                        // (0: no cold-cache guard at all: no queue, driver-thread or 60 s limit)
+std::atomic<bool> g_cold{false};        // this precompile goes slowly (cold driver cache): the game's own pace until it ends
+std::atomic<bool> g_loadingNow{false};  // the game thread's last look: a loading screen (the freeze subsystem's loading mode)
+std::atomic<bool> g_appliedBounded{false};  // the faster pace was applied with the bounded budget (not UE's Fast values)
+std::atomic<float> g_appliedBudget{0.0f};   // the bounded budget last applied (0: none; a change re-applies at the next check)
+std::atomic<int64_t> g_maxQueue{0};     // the largest queue seen during this precompile
+std::atomic<const char*> g_coldWhy{""}; // which guard tripped (monitor or game thread writes, the stats line reads)
+uint64_t g_fastMaxMs = kFastMaxMs;      // the faster pace's limit per precompile (the self-test shortens it)
+uint64_t g_fastAtStart = 0;             // game thread: g_fastMs when this precompile started (the limit is per precompile)
+// the driver's compile threads (monitor thread only)
+constexpr int kMaxDriverThreads = 32;
+constexpr int kDriverSearches = 3;      // empty searches per precompile before the driver-thread guard gives up
+HANDLE g_drvThreads[kMaxDriverThreads] = {};
+int g_drvCount = 0;
+ULONGLONG g_drvSearchAt = 0, g_drvLastAt = 0;   // the last search in this precompile (0: none yet), the last reading
+uint32_t g_drvRetryMs = 10000;          // searches at most this often (the self-test shortens it)
+int g_drvSearches = 0;                  // searches in this precompile
+int g_drvEmptySearches = 0;
+bool g_drvGaveUp = false;               // none found in kDriverSearches searches: no driver-thread guard for this precompile
+bool g_drvLoggedFound = false, g_drvLoggedNone = false;  // each said once per session
+double g_drvSearchMs = 0.0;             // the last search's duration
+uint64_t g_drvLastCpu = 0;
+int g_drvBusySeconds = 0;
+std::atomic<int> g_drvPeakPct{0};   // the busiest second seen during this precompile (percent of one core)
+std::atomic<bool> g_played{false};  // play has been seen for g_playMs in a row since launch (game thread writes)
+ULONGLONG g_playSince = 0;          // game thread: start of the current in-play stretch + 1 (0: not in play)
+uint32_t g_playMs = 3000;           // the main menu shows no named freeze for ~0.25 s after its arrival: not play
+bool g_menuSeen = false;            // game thread: a named freeze was seen (the main menu is the first): the start-up videos
+                                    // before it show none and must not count as play
 
 // game thread (timer)
 using SetTimerFn = UINT_PTR(WINAPI*)(HWND, UINT_PTR, UINT, TIMERPROC);
@@ -93,19 +155,20 @@ UINT_PTR g_timer = 0;
 ULONGLONG g_timerStart = 0;
 ULONGLONG g_lastCheck = 0;
 bool g_faulted = false;
-int g_eventLines = 0;
+std::atomic<int> g_eventLines{0};   // game and monitor threads
 
 // timeline (ms since the install)
 ULONGLONG g_t0 = 0;
 std::atomic<uint64_t> g_firstSeenMs{0}, g_doneMs{0}, g_fastMs{0}, g_gameModeMs{0};
 bool g_running = false;  // game thread: the precompile ran at the last check
-std::atomic<uint64_t> g_calls{0}, g_replaced{0}, g_switchesFast{0}, g_handBacks{0}, g_timerChecks{0}, g_timerTicks{0};
+std::atomic<uint64_t> g_calls{0}, g_replaced{0}, g_switchesFast{0}, g_handBacks{0}, g_timerChecks{0}, g_timerTicks{0}, g_coldMs{0};
 uint64_t g_logged = 0;
 
 void Event(const char* fmt, ...)
 {
-    if (g_eventLines >= kMaxEventLines) return;
-    if (++g_eventLines == kMaxEventLines) {
+    const int line = g_eventLines.fetch_add(1) + 1;
+    if (line > kMaxEventLines) return;
+    if (line == kMaxEventLines) {
         Log("[pso] (further events only in the statistics)");
         return;
     }
@@ -129,18 +192,42 @@ bool Precompiling()
     }
 }
 
-// 1 = in play (no named freeze, no loading freeze), 0 = not (or the freeze subsystem does not exist yet). Game thread.
-int InPlayNow()
+// 1 = in play (no named freeze, no loading freeze); 2 = a menu (named freeze, no loading freeze) after play has been seen
+// for g_playMs in a row after the first menu (the main menu): inventory, map, dialogue, pause; 0 = anything else (start-up before the freeze
+// subsystem exists, the main menu and its menus before the first play, loading screens). Game thread.
+// The main menu after quitting a game counts as a menu opened in play (2: the game's pace, as in stock). Deliberately not
+// told apart: by then the precompile has normally ended (a warm one ~40 s after launch) or, with a cold driver cache, the
+// cold-cache guard has already handed the game its pace.
+int InPlayNow(ULONGLONG now)
 {
     int32_t named = -1, mode = -1;
-    if (!ReadMenuFreeze(&named, &mode)) return 0;
-    return named == 0 && mode == 0 ? 1 : 0;
+    if (!ReadMenuFreeze(&named, &mode)) {
+        g_playSince = 0;
+        g_loadingNow = false;
+        return 0;
+    }
+    g_loadingNow = mode != 0;
+    if (named > 0) g_menuSeen = true;
+    if (named == 0 && mode == 0) {
+        if (!g_playSince) g_playSince = now + 1;
+        if (g_menuSeen && now + 1 - g_playSince >= g_playMs) g_played = true;
+        return 1;
+    }
+    g_playSince = 0;
+    return named > 0 && mode == 0 && g_played.load() ? 2 : 0;
 }
 
-// What to pass on for the game's request: Fast instead of Background while the precompile runs and nobody plays.
+// What to pass on for the game's request: Fast instead of Background while the precompile runs and nobody plays. A menu
+// opened in play keeps the game's pace unless PsoPrecompileFastInGameMenus: there the player is still interacting, and
+// with a cold driver cache (after a driver update) the precompile runs for minutes, so Fast made every inventory or
+// map opening lag (a player report after NVIDIA 621.01, 2026-10-22).
+// The faster pace with the bounded render-thread budget (menus, start-up), or UE's Fast values (loading screens, or the key at 16).
+bool Bounded() { return g_budgetMs.load() < 16.0f && !g_loadingNow.load(); }
+
 int Wanted(int requested, int inPlay, bool precompiling)
 {
-    if (g_enabled.load(std::memory_order_relaxed) && !g_faulted && precompiling && requested == kBackground && inPlay == 0)
+    const bool notPlaying = inPlay == 0 || (inPlay == 2 && g_inGameMenus.load(std::memory_order_relaxed));
+    if (g_enabled.load(std::memory_order_relaxed) && !g_faulted && !g_cold.load() && precompiling && requested == kBackground && notPlaying)
         return kFast;
     return requested;
 }
@@ -166,27 +253,74 @@ void Apply(int mode, const char* why)
     g_applied = mode;
     const bool wasOurs = g_ours.exchange(ours);
     g_orig(mode);
+    // the bounded pace: the game's SetBatchMode has just set UE's Fast values (50 per batch, 16 ms); the render thread's
+    // precompile tick adapts the batch size by one per frame towards the time (a race with that tick as in UE itself, whose
+    // SetBatchMode also runs on the game thread)
+    const float budget = g_budgetMs.load();
+    const bool bounded = ours && mode == kFast && Bounded() && g_batchTime && g_batchSize;
+    if (bounded) {
+        *g_batchTime = budget > 0.25f ? budget : 0.25f;
+        if (*g_batchSize > kGentleStartBatch) *g_batchSize = kGentleStartBatch;
+    }
+    g_appliedBounded = bounded;
+    g_appliedBudget = bounded ? budget : 0.0f;
     ReleaseSRWLockExclusive(&g_applyLock);
     if (ours && !wasOurs) {
         g_switchesFast.fetch_add(1, std::memory_order_relaxed);
-        Event("[pso] +%.1f s: shader precompile at UE's Fast pace (%s; the game asked for Background)", Now() / 1000.0, why);
+        Event("[pso] +%.1f s: shader precompile at the faster pace (%s; the game asked for Background)", Now() / 1000.0, why);
     } else if (wasOurs && !ours) {
         g_handBacks.fetch_add(1, std::memory_order_relaxed);
         Event("[pso] +%.1f s: the game's own pace (%s): %s", Now() / 1000.0, why, ModeName(mode));
     }
 }
 
+// This precompile is slow (a cold driver cache): the game's own pace until it ends (the game thread's next check applies it).
+void MarkCold(ULONGLONG now, const char* why, long long queued)
+{
+    if (g_cold.exchange(true)) return;
+    g_coldWhy = why;
+    g_coldMs = now ? now : 1;
+    Log("[pso] +%.1f s: cold-cache guard tripped, %s (%lld fetched, not yet dispatched): the game's own pace for the rest of this "
+        "precompile", now / 1000.0, why, queued);
+}
+
 // One look: the freeze state, the precompile's state and the timeline. Game thread.
 void Look(ULONGLONG now)
 {
     const bool running = Precompiling();
-    g_inPlay = InPlayNow();
+    g_inPlay = InPlayNow(now);
     // the timeline, from what the last check saw (the pace that was applied up to now)
     if (g_running && g_lastCheck) {
         const uint64_t dt = now - g_lastCheck;
         (g_ours.load() ? g_fastMs : g_gameModeMs).fetch_add(dt, std::memory_order_relaxed);
     }
-    if (running && !g_running && !g_firstSeenMs) g_firstSeenMs = now ? now : 1;
+    if (running && !g_running) {
+        if (!g_firstSeenMs) g_firstSeenMs = now ? now : 1;
+        g_fastAtStart = g_fastMs.load();   // the 60 s limit counts per precompile
+        // A later precompile (an earlier one ended) is judged afresh, unless the monitor thread has already judged this one
+        // (its verdict came after the earlier one's end). The first one keeps what the monitor thread may have seen before
+        // this thread's first look (the timer starts with the game's first SetBatchMode call, ~10 s after launch).
+        if (g_doneMs.load()) {
+            if (g_coldMs.load() <= g_doneMs.load()) {
+                g_cold = false;
+                g_coldWhy = "";
+            }
+            g_maxQueue = 0;
+            g_drvPeakPct = 0;
+        }
+    }
+    if (running) {
+        const int64_t queued = g_active ? *g_active : 0;
+        if (queued > g_maxQueue.load()) g_maxQueue = queued;
+        const int coldQueue = g_coldQueue.load();
+        if (!g_cold.load()) {
+            const char* why = nullptr;
+            if (coldQueue > 0 && queued >= coldQueue) why = "queue: pipelines queue up, the driver compiles them for real (a cold shader cache)";
+            else if (coldQueue > 0 && g_ours.load() && g_fastMs.load() - g_fastAtStart >= g_fastMaxMs)
+                why = "60 s: the faster pace has run for 60 s in this precompile without finishing";
+            if (why) MarkCold(now, why, static_cast<long long>(queued));
+        }
+    }
     if (!running && g_running) {
         g_doneMs = now;
         Event("[pso] +%.1f s: shader precompile finished (seen from +%.1f s; %.1f s at the Fast pace, %.1f s at the game's)",
@@ -212,7 +346,8 @@ bool LookGuarded()
 
 const char* Why(bool running, int inPlay)
 {
-    return !running ? "precompile not running" : inPlay == 1 ? "in play" : inPlay == 0 ? "menu, loading screen or start-up" : "not known";
+    return !running ? "precompile not running" : g_cold.load() ? "a slow precompile (cold driver cache)" : inPlay == 1 ? "in play" : inPlay == 0 ? "menu, loading screen or start-up"
+         : inPlay == 2 ? "a menu opened in play" : "not known";
 }
 
 void CALLBACK TimerProc(HWND, UINT, UINT_PTR, DWORD)
@@ -224,7 +359,10 @@ void CALLBACK TimerProc(HWND, UINT, UINT_PTR, DWORD)
     const int req = g_requested.load();
     if (req >= 0) {
         const int want = Wanted(req, g_inPlay.load(), g_running);
-        if (want != g_applied.load()) Apply(want, ok ? Why(g_running, g_inPlay.load()) : "a look faulted");
+        // also when the faster pace stays but its budget changes (a menu <-> a loading screen, the key switched)
+        const bool rebudget = want == kFast && want != req &&
+                              (Bounded() != g_appliedBounded.load() || (Bounded() && g_budgetMs.load() != g_appliedBudget.load()));
+        if (want != g_applied.load() || rebudget) Apply(want, ok ? Why(g_running, g_inPlay.load()) : "a look faulted");
     }
     if (!ok) {
         StopTimer();
@@ -245,6 +383,87 @@ void SetBatchModeHook(int mode)
     const int want = Wanted(mode, g_inPlay.load(), Precompiling());
     if (want != mode) g_replaced.fetch_add(1, std::memory_order_relaxed);
     Apply(want, Why(Precompiling(), g_inPlay.load()));
+}
+
+// The driver-thread decision: cores of CPU its compile threads used in the last second (monitor thread, or the self-test).
+void DriverBusy(double cores)
+{
+    const int pct = static_cast<int>(cores * 100.0 + 0.5);
+    if (pct > g_drvPeakPct.load()) g_drvPeakPct = pct;
+    g_drvBusySeconds = cores >= 0.5 ? g_drvBusySeconds + 1 : 0;
+    if (g_drvBusySeconds >= 2 && g_coldQueue.load() > 0)
+        MarkCold(Now(), "driver threads: the graphics driver compiles shaders on its background threads (a cold shader cache)",
+                 g_active ? static_cast<long long>(*g_active) : -1);
+}
+
+using GetThreadDescriptionFn = HRESULT(WINAPI*)(HANDLE, PWSTR*);
+
+void ForgetDriverThreads()
+{
+    for (int i = 0; i < g_drvCount; ++i) CloseHandle(g_drvThreads[i]);
+    g_drvCount = 0;
+    g_drvLastCpu = 0;
+    g_drvLastAt = 0;
+}
+
+// D3D12's background-processing threads in this process ("D3D Background Thread N"). The snapshot is system-wide (~50 ms
+// on a desktop with ~7,000 threads), so the caller paces it.
+void FindDriverThreads(ULONGLONG now)
+{
+    static const auto getDesc = reinterpret_cast<GetThreadDescriptionFn>(
+        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription"));
+    ForgetDriverThreads();
+    g_drvSearchAt = now ? now : 1;
+    ++g_drvSearches;
+    if (!getDesc) return;
+    const HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    THREADENTRY32 te{};
+    te.dwSize = sizeof te;
+    const DWORD self = GetCurrentProcessId();
+    for (BOOL ok = Thread32First(snap, &te); ok && g_drvCount < kMaxDriverThreads; ok = Thread32Next(snap, &te)) {
+        if (te.th32OwnerProcessID != self) continue;
+        const HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID);
+        if (!h) continue;
+        PWSTR name = nullptr;
+        bool keep = false;
+        if (SUCCEEDED(getDesc(h, &name)) && name) {
+            keep = wcsncmp(name, L"D3D Background Thread", 21) == 0;
+            LocalFree(name);
+        }
+        if (keep) g_drvThreads[g_drvCount++] = h;
+        else CloseHandle(h);
+    }
+    CloseHandle(snap);
+}
+
+bool AnyDriverThreadExited()
+{
+    for (int i = 0; i < g_drvCount; ++i) {
+        DWORD code = 0;
+        if (!GetExitCodeThread(g_drvThreads[i], &code) || code != STILL_ACTIVE) return true;
+    }
+    return false;
+}
+
+void ResetDriverSearch()   // a new precompile searches afresh
+{
+    g_drvSearchAt = 0;
+    g_drvSearches = 0;
+    g_drvEmptySearches = 0;
+    g_drvGaveUp = false;
+}
+
+uint64_t DriverThreadsCpu()
+{
+    uint64_t sum = 0;
+    for (int i = 0; i < g_drvCount; ++i) {
+        FILETIME c, e, k, u;
+        if (GetThreadTimes(g_drvThreads[i], &c, &e, &k, &u))
+            sum += ((static_cast<uint64_t>(k.dwHighDateTime) << 32) | k.dwLowDateTime) +
+                   ((static_cast<uint64_t>(u.dwHighDateTime) << 32) | u.dwLowDateTime);
+    }
+    return sum;   // 100 ns units
 }
 
 // jmp [rip+0]; dq target
@@ -360,6 +579,19 @@ bool InstallPsoPrecompileFast(bool beforeGameCode)
         Log("[pso] IsPrecompiling not found (%d matches, flag +0x%X): fix not installed", getters, flagOffset);
         return false;
     }
+    // TotalActiveTasks (the cold-cache guard): from NumPrecompilesRemaining; without it only the 60 s limit guards
+    volatile int64_t* active = nullptr;
+    {
+        const auto rem = FindAll(game.text, ParsePattern(kRemaining));
+        if (rem.size() == 1) {
+            auto* a = reinterpret_cast<int64_t*>(RipTarget(rem[0], 3, 7));
+            auto* w = reinterpret_cast<int64_t*>(RipTarget(rem[0] + 8, 3, 7));
+            if (inData(a) && inData(w) && w == a + 1 && (reinterpret_cast<uintptr_t>(a) & 7) == 0) active = a;
+        }
+        if (!active)
+            Log("[pso] the precompile's queue counter not found (%zu matches): the cold-cache guard has only the driver-thread "
+                "check and the %llu s limit per precompile", rem.size(), static_cast<unsigned long long>(kFastMaxMs / 1000));
+    }
     if (memcmp(fn, kEntry, sizeof kEntry) != 0) {
         Log("[pso] SetBatchMode does not start as expected (already patched?): fix not installed");
         return false;
@@ -411,6 +643,7 @@ bool InstallPsoPrecompileFast(bool beforeGameCode)
     g_batchSize = reinterpret_cast<uint32_t*>(batchSize);
     g_batchTime = batchTime;
     g_region = region;
+    g_active = active;
     g_t0 = GetTickCount64();
     if (!PatchEntry(fn, stub, beforeGameCode)) {
         Log("[pso] could not patch SetBatchMode at exe+0x%llX: fix not installed", static_cast<unsigned long long>(fn - game.base));
@@ -418,9 +651,13 @@ bool InstallPsoPrecompileFast(bool beforeGameCode)
     }
     g_fn = fn;
     Log("[pso] SetBatchMode exe+0x%llX detoured (precompile flag +0x%X, batch size/time exe+0x%llX/+0x%llX): the start-up shader "
-        "precompile runs at UE's Fast pace outside play",
+        "precompile runs faster outside play (%.1f ms of render thread per frame; %s%d%s)",
         static_cast<unsigned long long>(fn - game.base), flagOffset, static_cast<unsigned long long>(batchSize - game.base),
-        static_cast<unsigned long long>(reinterpret_cast<uint8_t*>(batchTime) - game.base));
+        static_cast<unsigned long long>(reinterpret_cast<uint8_t*>(batchTime) - game.base), g_budgetMs.load(),
+        g_coldQueue.load() > 0 ? "cold-cache guard: the game's pace once pipelines queue up to " : "PsoPrecompileColdQueue=",
+        g_coldQueue.load(),
+        g_coldQueue.load() <= 0 ? ": no cold-cache guard" : active ? ", the driver's threads are busy or after 60 s at the faster pace"
+                                                                  : " (queue counter not found), the driver's threads are busy or after 60 s");
     return true;
 }
 
@@ -429,24 +666,107 @@ void SetPsoPrecompileFast(bool enabled)
     g_enabled = enabled;   // the timer (if running) applies the change at its next check
 }
 
+void SetPsoPrecompileFastInGameMenus(bool enabled)
+{
+    g_inGameMenus = enabled;   // as above: the timer's next check
+}
+
+// Once a second from the monitor thread: while the precompile runs and is not judged slow yet, how busy the driver's
+// compile threads were since the last call.
+// The threads are searched for once per precompile, again only when one of them has exited; with none found, at most every
+// 10 s and three times.
+void PsoPrecompileWatchDriver()
+{
+    if (!g_fn) return;
+    const bool precompiling = Precompiling();
+    if (!precompiling || g_cold.load() || g_coldQueue.load() <= 0) {
+        if (g_drvCount) ForgetDriverThreads();
+        g_drvBusySeconds = 0;
+        if (!precompiling) ResetDriverSearch();
+        return;
+    }
+    const ULONGLONG now = GetTickCount64();
+    const bool due = !g_drvSearchAt || now - g_drvSearchAt >= g_drvRetryMs;
+    if (due && (g_drvCount ? AnyDriverThreadExited() : !g_drvGaveUp)) {
+        LARGE_INTEGER f, t0, t1;
+        QueryPerformanceFrequency(&f);
+        QueryPerformanceCounter(&t0);
+        FindDriverThreads(now);
+        QueryPerformanceCounter(&t1);
+        g_drvSearchAt = GetTickCount64();   // the interval counts from the search's end
+        g_drvSearchMs = f.QuadPart ? 1000.0 * static_cast<double>(t1.QuadPart - t0.QuadPart) / static_cast<double>(f.QuadPart) : 0.0;
+        if (g_drvCount) {
+            g_drvEmptySearches = 0;
+            if (!g_drvLoggedFound) {
+                g_drvLoggedFound = true;
+                Log("[pso] +%.1f s: %d driver compile thread(s) found (\"D3D Background Thread\"; one search %.1f ms): the "
+                      "driver-thread guard is active", Now() / 1000.0, g_drvCount, g_drvSearchMs);
+            }
+        } else if (++g_drvEmptySearches >= kDriverSearches) {
+            g_drvGaveUp = true;
+            if (!g_drvLoggedNone) {
+                g_drvLoggedNone = true;
+                Log("[pso] +%.1f s: no driver compile threads found (%d searches, %.1f ms each): the driver-thread guard is off "
+                      "for this precompile; the queue and 60 s limits still apply", Now() / 1000.0, g_drvSearches, g_drvSearchMs);
+            }
+        }
+    }
+    if (!g_drvCount) return;
+    const uint64_t cpu = DriverThreadsCpu();
+    if (g_drvLastAt && now > g_drvLastAt && cpu >= g_drvLastCpu)
+        DriverBusy(static_cast<double>(cpu - g_drvLastCpu) / 1e4 / static_cast<double>(now - g_drvLastAt));
+    g_drvLastCpu = cpu;
+    g_drvLastAt = now;
+}
+
+void PsoPrecompileTestDriverBusy(double cores) { DriverBusy(cores); }
+
+void SetPsoPrecompileFastBudget(float ms, int coldQueue)
+{
+    g_budgetMs = ms;            // the timer's next check (re-applies the faster pace when the budget differs)
+    g_coldQueue = coldQueue;    // the timer's next look
+}
+
+void PsoPrecompileTestTiming(uint32_t fastMaxMs, uint32_t driverRetryMs)
+{
+    g_fastMaxMs = fastMaxMs;
+    g_drvRetryMs = driverRetryMs;
+}
+
+void PsoPrecompileTestStatics(uint32_t* batchSize, float* batchTime, int64_t* active)
+{
+    g_batchSize = batchSize;
+    g_batchTime = batchTime;
+    g_active = active;
+}
+
+void PsoPrecompileTestPlayMs(uint32_t ms)
+{
+    g_playMs = ms;
+    g_played = false;
+    g_playSince = 0;
+    g_menuSeen = false;
+}
+
 void LogPsoPrecompileStats()
 {
     if (!g_fn) return;
     const uint64_t calls = g_calls.load(), replaced = g_replaced.load(), fast = g_switchesFast.load(), back = g_handBacks.load(),
                    checks = g_timerChecks.load();
-    const uint64_t sum = calls + replaced + fast + back + checks + g_doneMs.load();
+    const uint64_t sum = calls + replaced + fast + back + checks + g_doneMs.load() + g_coldMs.load();
     if (sum == g_logged) return;
     g_logged = sum;
     LARGE_INTEGER f;
     QueryPerformanceFrequency(&f);
     Log("[pso] precompile seen from +%.1f s, finished %s%.1f s; %.1f s at the Fast pace, %.1f s at the game's; game's mode requests %llu "
         "(%llu at Fast instead of Background), switches to Fast %llu, back to the game's %llu; timer checks %llu (%.1f us each); "
-        "batch now %u per frame, %.1f ms",
+        "batch now %u per frame, %.1f ms; queue max %lld, driver threads up to %d %% of a core%s%s",
         g_firstSeenMs.load() / 1000.0, g_doneMs.load() ? "at +" : "(not yet) ", g_doneMs.load() / 1000.0, g_fastMs.load() / 1000.0,
         g_gameModeMs.load() / 1000.0, static_cast<unsigned long long>(calls), static_cast<unsigned long long>(replaced),
         static_cast<unsigned long long>(fast), static_cast<unsigned long long>(back), static_cast<unsigned long long>(checks),
         checks && f.QuadPart ? 1e6 * static_cast<double>(g_timerTicks.load()) / static_cast<double>(f.QuadPart) / static_cast<double>(checks) : 0.0,
-        g_batchSize ? *g_batchSize : 0u, g_batchTime ? *g_batchTime : 0.0f);
+        g_batchSize ? *g_batchSize : 0u, g_batchTime ? *g_batchTime : 0.0f, static_cast<long long>(g_maxQueue.load()), g_drvPeakPct.load(),
+        g_cold.load() ? "; the game's pace since the cold-cache guard tripped, " : "", g_cold.load() ? g_coldWhy.load() : "");
 }
 
 bool PsoPrecompileInfo(PsoPrecompileInfoOut* out)
@@ -469,6 +789,14 @@ bool PsoPrecompileInfo(PsoPrecompileInfoOut* out)
     out->replaced = g_replaced.load();
     out->fastMs = g_fastMs.load();
     out->doneMs = g_doneMs.load();
+    out->cold = g_cold.load();
+    out->bounded = g_appliedBounded.load();
+    out->active = const_cast<int64_t*>(g_active);
+    out->coldWhy = g_coldWhy.load();
+    out->driverThreads = g_drvCount;
+    out->driverSearches = g_drvSearches;
+    out->driverGaveUp = g_drvGaveUp;
+    out->driverSearchMs = g_drvSearchMs;
     return true;
 }
 
@@ -483,6 +811,29 @@ void PsoPrecompileTestOriginal(void* fakeSetBatchMode)
     g_running = false;
     g_lastCheck = 0;
     g_faulted = false;
+    g_played = false;
+    g_playSince = 0;
+    g_playMs = 3000;
+    g_menuSeen = false;
+    g_inGameMenus = false;
+    g_cold = false;
+    g_drvBusySeconds = 0;
+    g_drvPeakPct = 0;
+    g_loadingNow = false;
+    g_appliedBounded = false;
+    g_maxQueue = 0;
+    g_coldMs = 0;
+    g_coldWhy = "";
+    g_fastMs = 0;
+    g_fastAtStart = 0;
+    g_doneMs = 0;
+    g_appliedBudget = 0.0f;
+    g_budgetMs = 4.0f;
+    g_coldQueue = 1000;
+    g_fastMaxMs = kFastMaxMs;
+    g_drvRetryMs = 10000;
+    ForgetDriverThreads();
+    ResetDriverSearch();
 }
 
 }  // namespace opf

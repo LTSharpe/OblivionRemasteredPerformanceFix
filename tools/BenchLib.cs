@@ -108,6 +108,8 @@ namespace OblvBench
         // perf counters: +0x2C AvailablePages (= Memory\Available MBytes / 4 KB), +0x50 PageReadCount (= raw
         // Memory\Pages Input/sec: pages read from disk to resolve hard faults, the paging that stalls the game).
         [DllImport("ntdll.dll")] static extern int NtQuerySystemInformation(int cls, byte[] buf, int len, out int ret);
+        [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
         const uint QUERY_LIMITED = 0x1000, THREAD_QUERY_LIMITED = 0x0800;
 
         sealed class Th
@@ -128,6 +130,7 @@ namespace OblvBench
         readonly List<double> avail = new List<double>();       // system available memory, MB (-1: unknown)
         readonly List<double> pageIns = new List<double>();     // cumulative system pages read for hard faults
         readonly List<double> hardFaults = new List<double>();  // cumulative hard page faults of the game itself
+        readonly List<bool> fgOwn = new List<bool>();           // the game owned the foreground window at this sample
         readonly byte[] spi = new byte[0x400];
         byte[] procInfo = new byte[1 << 20];
         double pageInBase; uint pageInLast; bool pageInSeen;
@@ -246,6 +249,9 @@ namespace OblvBench
                     // the game's own hard faults (SystemProcessInformation, HardFaultCount at +0x10), about once a second
                     double hf = n % 4 == 0 ? GameHardFaults() : -1;
                     hardFaults.Add(hf >= 0 ? hf : (hardFaults.Count > 0 ? hardFaults[hardFaults.Count - 1] : 0));
+                    uint fgPid = 0; IntPtr fgw = GetForegroundWindow();
+                    if (fgw != IntPtr.Zero) GetWindowThreadProcessId(fgw, out fgPid);
+                    fgOwn.Add(fgPid == (uint)pid);
                 }
                 n++;
                 next += intervalMs;
@@ -328,6 +334,20 @@ namespace OblvBench
                     if (times[i] >= t0 && times[i] <= t1 && avail[i] >= 0 && avail[i] < min) min = avail[i];
                 if (min == double.MaxValue) { double v = At(avail, 0, Pos(t1)); return v >= 0 ? v : -1; }
                 return min;
+            }
+        }
+
+        /// Share (0..1) of the samples inside [t0, t1] at which the game owned the foreground window; -1 if none.
+        /// A game that is not in front behaves differently (Oblivion Remastered turns frame generation off and lowers
+        /// its sound; Windows may throttle it), so on-screen runs record it.
+        public double ForegroundShare(double t0, double t1)
+        {
+            lock (gate)
+            {
+                int n = 0, on = 0;
+                for (int i = 0; i < times.Count && i < fgOwn.Count; i++)
+                    if (times[i] >= t0 && times[i] <= t1) { n++; if (fgOwn[i]) on++; }
+                return n == 0 ? -1 : (double)on / n;
             }
         }
 
@@ -811,6 +831,50 @@ namespace OblvBench
     /// Inside the game the DLL keeps the window off-screen, out of the taskbar and never active (see
     /// BenchHook.cpp). The hook lasts as long as this thread; the DLL pins itself in the game, so a parked
     /// game stays hidden after the run. Shared state: the mapping Local\OblvBenchHook (layout in BenchHook.cpp).
+    /// On-screen runs (-Visible): puts the game window in front with the keyboard focus, as a player's click would,
+    /// without sending any input. Windows lets only the foreground process hand the foreground on; the runner (started
+    /// from a console, maybe minutes ago) may no longer be it, so it joins the input of the current foreground
+    /// window's thread for the call (AttachThreadInput), the documented way for a cooperating process.
+    public static class Foreground
+    {
+        [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+        [DllImport("user32.dll")] static extern bool AttachThreadInput(uint a, uint b, bool attach);
+        [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+        [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr h);
+        [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
+        [DllImport("user32.dll")] static extern bool AllowSetForegroundWindow(uint pid);
+        [DllImport("user32.dll")] static extern bool PeekMessage(out MSG m, IntPtr h, uint min, uint max, uint remove);
+        [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+        [StructLayout(LayoutKind.Sequential)] struct MSG { public IntPtr hwnd; public uint message; public IntPtr w, l; public uint time; public int x, y; }
+
+        public static bool IsGame(int processId)
+        {
+            uint p = 0; IntPtr f = GetForegroundWindow();
+            if (f != IntPtr.Zero) GetWindowThreadProcessId(f, out p);
+            return p == (uint)processId;
+        }
+
+        /// "already", "direct", "attached" or "failed (...)"; never restores a minimised game (D3D12 crash risk).
+        public static string Bring(IntPtr hwnd, int processId)
+        {
+            if (hwnd == IntPtr.Zero) return "failed (no window)";
+            if (IsGame(processId)) return "already";
+            if (IsIconic(hwnd)) return "failed (the game is minimised)";
+            AllowSetForegroundWindow((uint)processId);
+            if (SetForegroundWindow(hwnd) && IsGame(processId)) return "direct";
+            MSG m; PeekMessage(out m, IntPtr.Zero, 0, 0, 0);           // this thread needs a message queue to attach
+            uint me = GetCurrentThreadId(), dummy;
+            IntPtr fg = GetForegroundWindow();
+            uint fgThread = fg != IntPtr.Zero ? GetWindowThreadProcessId(fg, out dummy) : 0;
+            bool att = fgThread != 0 && fgThread != me && AttachThreadInput(me, fgThread, true);
+            try { BringWindowToTop(hwnd); SetForegroundWindow(hwnd); }
+            finally { if (att) AttachThreadInput(me, fgThread, false); }
+            for (int i = 0; i < 10 && !IsGame(processId); i++) Thread.Sleep(50);
+            return IsGame(processId) ? "attached" : (att ? "failed (still behind)" : "failed (could not attach)");
+        }
+    }
+
     public static class GameHider
     {
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr LoadLibrary(string path);
@@ -1597,6 +1661,28 @@ namespace OblvBench
             return set;
         }
 
+        /// A crashing lab game (OblivionPerfFix crash_dump.cpp, 2026-10-21) un-mutes its own sessions for its next launch
+        /// and first writes its pid to bench-audio-released.txt next to FlagPath: that process is not muted again. Only
+        /// when the file was written after the process started (a stale file never un-mutes a later game).
+        static void Released(HashSet<uint> target)
+        {
+            if (target.Count == 0 || string.IsNullOrEmpty(FlagPath)) return;
+            try
+            {
+                string f = Path.Combine(Path.GetDirectoryName(FlagPath), "bench-audio-released.txt");
+                if (!File.Exists(f)) return;
+                DateTime written = File.GetLastWriteTime(f);
+                foreach (string line in File.ReadAllLines(f))
+                {
+                    uint pid;
+                    if (!uint.TryParse(line.Trim(), out pid) || !target.Contains(pid)) continue;
+                    try { using (Process p = Process.GetProcessById((int)pid)) if (written >= p.StartTime) { target.Remove(pid); bool first; lock (sync) first = releasedPids.Add(pid); if (first) Note("the crashing game (pid " + pid + ") restores its own audio: not muted again"); } }
+                    catch (Exception) { }
+                }
+            }
+            catch (Exception) { }
+        }
+        static readonly HashSet<uint> releasedPids = new HashSet<uint>();
         /// Keeps every audio session of these processes muted (checked every 100 ms) until Stop().
         public static void Start(string[] processNames)
         {
@@ -1626,6 +1712,7 @@ namespace OblvBench
                 {
                     string[] n; lock (sync) n = names;
                     var target = Pids(n);
+                    Released(target);
                     if (target.Count > 0)
                     {
                         var changed = new List<string>();
@@ -1967,6 +2054,10 @@ namespace OblvBench
             if (CrashReporterOpen()) { Note("crashed", "UE's crash reporter opened"); return; }
             // a message box of the game (fatal error, device lost, ...)
             string box = GameMessageBox();
+            // lab (-CpuLimit below the game's minimum spec): the game's own "Thank you for installing" box, which a player with
+            // such a CPU answers with OK, is answered the same way (IDOK) a few times instead of ending the run
+            if (box != null && AcceptBoxPrefix != null && box.StartsWith(AcceptBoxPrefix, StringComparison.Ordinal) && AcceptedBoxes < 20)
+            { AcceptedBoxes++; AnswerGameBoxOk(box); return; }
             if (box != null) { Note("dialog", "the game shows a message: " + box); return; }
             // hung window: the game's own visible UnrealWindow (Process.MainWindowHandle can be an early helper
             // window that never pumps messages: a restarted game was called "hung" while it ran fine). A window
@@ -2066,6 +2157,30 @@ namespace OblvBench
         }
 
         /// Text of a visible message box (#32770) owned by the game process, or null.
+        /// Lab: a game message box whose text starts with this is answered with OK (see the watch loop); null = none.
+        public static string AcceptBoxPrefix = null;
+        public static int AcceptedBoxes = 0;
+        public static string AcceptLog = "";
+        static void AnswerGameBoxOk(string box)
+        {
+            EnumWindows((h, l) =>
+            {
+                uint wp; GetWindowThreadProcessId(h, out wp);
+                if (wp != (uint)pid || !IsWindowVisible(h) || ClassOf(h) != "#32770") return true;
+                var buttons = new List<string>();
+                EnumChildWindows(h, (c, l2) =>
+                {
+                    if (ClassOf(c) != "Button") return true;
+                    string t = WindowText(c); buttons.Add(t);
+                    if (t.Replace("&", "").Trim().Equals("OK", StringComparison.OrdinalIgnoreCase)) PostMessage(c, 0x00F5 /* BM_CLICK */, IntPtr.Zero, IntPtr.Zero);
+                    return true;
+                }, IntPtr.Zero);
+                bool ok = PostMessage(h, 0x0111 /* WM_COMMAND */, new IntPtr(1) /* IDOK */, IntPtr.Zero);
+                if (AcceptLog.Length < 2000) AcceptLog += DateTime.Now.ToString("HH:mm:ss.fff") + " '" + box + "' buttons [" + string.Join(",", buttons.ToArray()) + "] IDOK posted " + ok + "; ";
+                return true;
+            }, IntPtr.Zero);
+        }
+
         static string GameMessageBox()
         {
             string found = null;

@@ -8,6 +8,12 @@ quicker menus, and a few crash fixes, for *The Elder Scrolls IV: Oblivion Remast
 same**: no lowered settings, no shorter view distance, ray-traced lighting stays on its highest setting. The fix changes
 *how* the engine does its work, never *what* it draws.
 
+**It works on any PC that runs the game**, not just ours: it has no per-PC settings or paths, it finds the code it
+changes in the game itself, and its helper threads adapt to your CPU. It is not tied to AMD: players report it working
+with NVIDIA and AMD graphics cards, DLSS and FSR, Intel and AMD CPUs, on Steam and Game Pass, and through OBSE64
+([Compatibility](#compatibility)). How much it gains depends on your hardware: most where the CPU is the limit
+([Results](#results)).
+
 > **Built by Claude.** The profiling, the reverse engineering, the fixes, the benchmark and these docs were done by Claude,
 > Anthropic's AI model, working in Claude Code. [LTSharpe](https://github.com/LTSharpe) set the goal and the rules (never
 > change the look), made every decision and played every build. All of the source is here for you to read.
@@ -15,19 +21,22 @@ same**: no lowered settings, no shorter view distance, ray-traced lighting stays
 > Free and open source. If it makes your game better and you'd like to say thanks, you can
 > [support the work on GitHub Sponsors](https://github.com/sponsors/LTSharpe). Entirely optional.
 
-> **Beta.** So far it has been tested on one PC (AMD Ryzen 7 5800X, AMD Radeon RX 9070 XT, Windows 11, Steam). If you try
-> it, please [tell us how it went](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/new/choose),
-> especially on NVIDIA or Intel hardware, on CPUs with fewer cores, and on the Game Pass version.
+> **Beta.** Every build is measured in depth on our test PC (AMD Ryzen 7 5800X, AMD Radeon RX 9070 XT, Windows 11,
+> Steam), and players report it working on theirs: since the first release more than 40 have reported back, on NVIDIA
+> RTX 20 to 50 series, AMD Radeon RX 7000 and 9000, Ryzen and Intel Core CPUs, the Game Pass version, a handheld, VR and
+> one Linux PC. Most say it runs better, a few reported problems ([Compatibility](#compatibility)). Please keep
+> [telling us how it went](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/new/choose), especially on
+> Intel Arc, CPUs with fewer cores, Steam Deck and Windows 10.
 
-[Results](#results) · [Check it on your PC](#check-it-on-your-pc-before--after) · [Install](#install-two-minutes) · [AMD ML frame generation](#optional-amd-ml-frame-generation-radeon-rx-9000) ·
-[What it does](#what-it-does) · [Uninstall](#uninstall) · [Is it safe?](#is-it-safe) · [Compatibility](#compatibility) ·
-[FAQ](#faq) · [Help improve it](#help-improve-it)
+[Results](#results) · [Install](#install-two-minutes) · [AMD ML frame generation](#optional-amd-ml-frame-generation-radeon-rx-9000) ·
+[What it does](#what-it-does) · [Check it on your PC](#check-it-on-your-pc-before--after) · [Graphics settings](#find-good-graphics-settings) ·
+[Uninstall](#uninstall) · [Is it safe?](#is-it-safe) · [Compatibility](#compatibility) · [FAQ](#faq) · [Help improve it](#help-improve-it)
 
 ## Results
 
-| On the test PC | Stock game | With the fix |
+| Measured on our test PC (yours will differ: see below) | Stock game | With the fix |
 |---|---|---|
-| **Flight round the Imperial City** at 4K with frame generation, frame rate capped at 60 before frame generation (the maintainer's own settings) | 72 fps, 1% low 33, 19.5 hitches of 50 ms or more per flight, worst frame 135 ms | **102 fps** (+41%), 1% low 45, **4.8 hitches**, worst frame 66 ms |
+| **Flight round the Imperial City** at 4K with frame generation, frame rate capped at 60 before frame generation | 72 fps, 1% low 33, 19.5 hitches of 50 ms or more per flight, worst frame 135 ms | **102 fps** (+41%), 1% low 45, **4.8 hitches**, worst frame 66 ms |
 | **Flight through Cheydinhal** at 4K, no frame generation | 55 fps, 1% low 26, 4-6 hitches of 50 ms or more | **63 fps**, 1% low **43**, **no hitch** |
 | **Cheydinhal streets** at 4K with frame generation (3 views) | 64 fps (1% low 50) | **91 fps** (1% low 68), +43% |
 | **Cheydinhal when the CPU is the limit** (720p, no frame generation) | 45 fps | **57 fps**, +25% |
@@ -38,50 +47,26 @@ same**: no lowered settings, no shorter view distance, ray-traced lighting stays
 
 ![Cheydinhal at 4K, average fps, stock game vs the fix](docs/images/cheydinhal-4k.png)
 
-Test PC: Ryzen 7 5800X (8 cores), Radeon RX 9070 XT (16 GB), 32 GB RAM, Windows 11, Steam build 19115871. "4K" = FSR
-Performance, hardware ray tracing, Ultra with Shadows High. Every number is the mean or median of 2-4 runs per side, each
+These numbers were measured on one PC, so that every row can be repeated exactly: Ryzen 7 5800X (8 cores), Radeon
+RX 9070 XT (16 GB), 32 GB RAM, Windows 11, Steam build 19115871. The fix itself is the same for every PC; what it gains
+on yours depends on whether your CPU or your graphics card is the limit (below). "4K" = FSR Performance, hardware ray
+tracing, Ultra with Shadows High. Every number is the mean or median of 2-4 runs per side, each
 in a freshly started game, stock and fix taken in turn, driven by this repository's benchmark (you can re-run every
 row: see [Check it on your PC](#check-it-on-your-pc-before--after)). The Imperial City row was measured with this release; the Cheydinhal
 flight with an earlier build that had about two thirds of today's fixes; the street, door and menu rows with the first
 third of them (the later fixes target travel, so those rows are unchanged or better now).
 
 - **Your gain depends on your PC.** It is largest where the CPU holds the game back: towns, crowds, travel, high frame
-  rates, frame generation (which needs a high base frame rate). If your graphics card is the limit (say native 4K in a
-  rainy forest), the frame rate stays about the same; the hitch, door and menu fixes still help.
+  rates, frame generation (which needs a high base frame rate). **Where your graphics card is the limit** (say native 4K
+  in a rainy forest) the frame-rate gain is smaller or none, **but it is still worth installing**: the hitches in towns,
+  while travelling, at doors and in menus are CPU work, and those improve on any graphics card.
+  [Check it on your PC](#check-it-on-your-pc-before--after) and [find good graphics settings](#find-good-graphics-settings).
 - **Crowds can still dip.** The game's main thread does the same work as before, and in busy places it is the limit.
 - **Some hitches remain.** Crossing into a new part of the world still costs a little, mostly the old engine's own
   loading; at normal travel speed you will rarely notice it.
 - **The image is unchanged:** screenshots with the fix on and off were compared automatically at dawn, noon, dusk and
   night, in clear weather, cloud, fog, rain and thunderstorms. The differences are the same size as between two runs
   without the fix.
-
-## Check it on your PC (before / after)
-
-Don't take our word for it: the benchmark in this repository plays the same scenes with and without the fix, by
-itself, and writes a report. Every scene starts from a new game, so your saves and characters are never touched.
-
-1. **Get the repository:** the green *Code* button > *Download ZIP*, and extract it (or `git clone` it). Install the fix
-   as below, and start the game once by hand if you never have.
-2. **Install the free [Build Tools for Visual Studio 2022](https://visualstudio.microsoft.com/visual-cpp-build-tools/)**
-   with the *Desktop development with C++* workload (the benchmark builds a small helper DLL that keeps the game window
-   hidden).
-3. **Open PowerShell in the extracted folder** and run:
-
-   ```powershell
-   Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass     # allow this folder's scripts, for this window only
-   Get-ChildItem -Recurse | Unblock-File                          # files from a ZIP are marked as downloaded
-   tools\Setup-Bench.ps1                                         # once: fetches UE4SS and PresentMon (pinned, SHA-256 checked)
-   tools\Bench-Report.ps1 -Scenario showcase -Profile own        # the Imperial City flight at YOUR settings, stock vs fix
-   ```
-
-4. **Read the result:** `captures\bench\_report\<time>\report.md` (average fps, 1% low, stutters, CPU time per engine
-   thread, stock vs fix). It has no user name, PC name or folder paths in it, so you can share it in a
-   [Benchmark result](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/new/choose) issue.
-
-The game runs hidden and muted while you keep working (add `-Watch` to see and hear it); "stock" means the DLL is loaded
-with every fix switched off, so the game's own code runs. Four game launches, about 15-20 minutes for the flight. To
-repeat our table exactly, or to run the town, door and travel scenes, see
-[docs/benchmark.md](docs/benchmark.md#reproduce-the-numbers-in-the-readme).
 
 ## Install (two minutes)
 
@@ -98,8 +83,8 @@ repeat our table exactly, or to run the town, door and travel scenes, see
 | Steam, no mod manager | the four steps above |
 | Vortex or Mod Organizer 2 | install the same zip as a mod: it has the game's folder layout. In Mod Organizer 2 the files must land in the game's folder, not in `Data` (use its Root Builder plugin, or extract by hand) |
 | OBSE64, or another mod that already uses `version.dll` (some upscaler mods do) | don't overwrite that `version.dll`: download `OblivionPerfFix-<version>-OBSE.zip` instead and extract it into the game folder. It puts `OblivionPerfFix.dll` and its ini into `OblivionRemastered\Binaries\Win64\OBSE\Plugins\`, where OBSE64 loads it. A few fixes can only be installed before the game's own code runs and stay off on this route (the log says which). If both are installed, the fix loads once |
-| Xbox / PC Game Pass (experimental) | download `OblivionPerfFix-<version>-GamePass.zip`; its files go into `OblivionRemastered\Binaries\WinGDK\` in the game's folder (usually `C:\XboxGames\The Elder Scrolls IV - Oblivion Remastered\`). Not tested yet: the log says which fixes found their code; no log at all means it didn't load. A [test report](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/new/choose) helps everyone |
-| Steam Deck / Linux (untested) | as for Steam, then add `WINEDLLOVERRIDES="version=n,b" %command%` to the game's launch options |
+| Xbox / PC Game Pass (experimental) | download `OblivionPerfFix-<version>-GamePass.zip`; its files go into `OblivionRemastered\Binaries\WinGDK\` in the game's folder (usually `C:\XboxGames\The Elder Scrolls IV - Oblivion Remastered\`). Reported working by a few players; less tested than Steam: the log says which fixes found their code, and no log at all means it didn't load. A [test report](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/new/choose) helps everyone |
+| Steam Deck / Linux (one Linux report so far; Steam Deck untested) | as for Steam, then add `WINEDLLOVERRIDES="version=n,b" %command%` to the game's launch options |
 
 **Updates:** track the mod on [Nexus Mods](https://www.nexusmods.com/oblivionremastered/mods/5709) (Vortex and Mod Organizer 2
 then show when a new version is out), or on GitHub choose *Watch > Custom > Releases*. To update, extract the new zip
@@ -173,6 +158,81 @@ frames later, and the cells behind you are unloaded a few frames later, both in 
 Every fix, its switch and its numbers, in plain words: [docs/how-it-works.md](docs/how-it-works.md). The measurements
 and the ideas we tested and rejected: [docs/research.md](docs/research.md).
 
+## Check it on your PC (before / after)
+
+Don't take our word for it: the benchmark kit plays the Imperial City flight with and without the fix, by itself, at
+your own settings, on screen and with your sound, so you can see and feel the difference, and writes a report. Every
+run starts from a new game, so your saves and characters are never touched. No programming tools needed.
+
+**Get it:** download `OblivionPerfFix-<version>-Benchmark.zip` from
+[Releases](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/releases) and extract it anywhere (your Desktop
+is fine). Start the game once by hand first if you never have. Then double-click **`Benchmark.cmd`** (if Windows asks
+whether to run a downloaded file, choose *Run*). Its window says at each step what it is doing, with the same numbers
+as below. About 20 minutes in all (times from a Ryzen 7 5800X / RX 9070 XT at 4K):
+
+1. **Benchmark tools** (first time only, under a minute): it downloads two free measuring tools from their own GitHub
+   projects into the kit's `third_party\` folder: [PresentMon](https://github.com/GameTechDev/PresentMon) (Intel; frame
+   times; 0.9 MB, SHA-256 checked) and the official [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) experimental build
+   1181 or newer (runs the benchmark's small in-game script; 8.3 MB; its SHA-256 is checked against GitHub's and written
+   into the report). UE4SS is put into the game folder only while a benchmark game runs, and taken out again after.
+2. **The fix:** it checks that this version of the fix is installed. If another version or none is, it says so and
+   **asks before installing**; the files it replaces are backed up in the kit's `backup\<time>\` folder, and your
+   `OblivionPerfFix.ini` settings are kept.
+3. **The flights:** the game opens by itself four times, in turn **without the fix** (stock), **with the fix**, without,
+   with. Each time:
+   - the game opens on screen, in your own window mode and resolution, with your sound;
+   - it **waits at the main menu while it prepares its shaders**: the game looks idle, this is normal (about 2 minutes
+     without the fix, under half a minute with it, since the fix speeds this up too);
+   - it starts a new game and flies over the Imperial City (about 2 minutes), then closes.
+   So about 5 minutes per stock run and 4 per fix run.
+   **While it runs, don't touch the mouse or keyboard and don't switch windows.** A game that is not in front turns
+   frame generation off and gets less time from Windows, so the report marks such a run "not comparable". (Mouse look
+   and movement keys are ignored during the flights, but Esc or Tab still open the game's menus.) To stop early, press
+   Ctrl+C or close the kit's window: the game then closes by itself (within about a minute), your settings are put
+   back and UE4SS is taken out of the game folder.
+4. **The report** opens at the end (`captures\bench\_report\<time>\report.md` in the kit's folder): average fps, 1% low,
+   worst frame and hitches during the flight, stock vs fix, plus your settings and frame cap. It has no user name, PC
+   name or folder paths in it, so you can share it in a
+   [Benchmark result](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/new/choose) issue (paste
+   `report.md`, attach the `result-*.json` files from the same folder).
+
+**Nothing permanent changes:** after every run your game settings are put back as they were and UE4SS is taken out of
+the game folder; your saves are never used. The only lasting change is the fix itself if you let it install (step 2).
+To undo that, copy the files from the kit's `backup\<time>\` folder back into the game's
+`OblivionRemastered\Binaries\Win64\` folder (or uninstall the fix as [below](#uninstall)). To remove the kit, delete its
+folder.
+
+**Want to use the PC meanwhile?** Double-click **`Benchmark-Hidden.cmd`** instead: the same runs, hidden and muted.
+
+"Stock" means the DLL is loaded with every fix switched off, so the game's own code runs, except the fix for the
+game's frame-cap bug (`FrameRateLimitAtStart`: with frame generation on, the game forgets the frame-rate limit you saved
+until you open the Graphics page), so both sides run at your saved frame-rate cap. Differences under about 5% are noise; `Benchmark.cmd -Rounds 3` (from a command prompt in the kit's folder) gives steadier numbers, `Benchmark.cmd -Rounds 1` is a quick look (about 8 minutes).
+
+Also in the kit: **`Check-GPU.cmd`**: is your graphics card or your CPU the limit? See [below](#find-good-graphics-settings).
+
+To repeat our table exactly, or to run the town, door and travel scenes, use the full benchmark in this repository:
+[docs/benchmark.md](docs/benchmark.md#reproduce-the-numbers-in-the-readme).
+
+### Find good graphics settings
+
+Where the graphics card is the limit, the fix can't raise the frame rate much, but your settings can. A good place to
+judge them is **the small pond by Fort Doublecross, north-east of Leyawiin, in the rain**: willows, grass, water and
+rain, and little for the CPU to do, so it shows what your graphics card can carry.
+
+- **Measured:** double-click `Check-GPU.cmd` in the benchmark kit. It plays 30 seconds at that pond in the rain at
+  your settings (on screen, about 3-4 minutes with the game start; `Check-GPU.cmd -Hidden` from a command prompt keeps it
+  hidden and muted) and prints the frame rate, how busy the
+  graphics card and the game's main thread are, and a verdict: "your graphics card is the limit here" (with what to
+  lower) or "your CPU is the limit here". Change settings in the game as usual, quit, and run it again. The check
+  changes no settings itself.
+- **By hand:** go there in your own game when it rains and watch the frame rate while you change settings.
+- **What to lower first:** the upscaler's quality mode (Quality -> Balanced -> Performance renders fewer pixels: usually
+  the biggest saving), then hardware ray tracing, then Global Illumination and Reflections. On
+  the test PC at 4K, Foliage and View Distance cost the graphics card little.
+- **Why:** frame generation needs a good base frame rate (aim for about 50-60 rendered fps there before you switch it
+  on), and towns are where the CPU is the limit instead: settings that only cost the graphics card won't help there,
+  the fix does.
+
 ## Uninstall
 
 Delete `version.dll`, `OblivionPerfFix.ini` and the `OblivionPerfFix*.log` files from
@@ -194,23 +254,35 @@ That's all: the fix changes nothing on disk, and your saves don't depend on it.
   PC. Each release lists its SHA-256 checksums and carries a build attestation you can verify:
   `gh attestation verify OblivionPerfFix-<version>.zip --repo LTSharpe/OblivionRemasteredPerformanceFix`.
 - **Antivirus warnings:** a DLL named `version.dll` that loads into a game is a common technique for mods, and also for
-  malware, so some scanners flag it on reflex. Each release links its VirusTotal scan, and all of the source is here to
+  malware, so some scanners flag it on reflex. Each release links its VirusTotal scan (the benchmark kit's too: it holds a
+  small DLL that keeps the benchmark's game window hidden), and all of the source is here to
   read (heavily commented C++, one file per fix, grouped by area).
 
 ## Compatibility
 
+The maintainer tests every build on one PC (Ryzen 7 5800X, Radeon RX 9070 XT, Windows 11, Steam). The rest of this
+table is what players reported after the first releases (GitHub issues, Nexus Mods and video comments, October 2026),
+with the count where we have one. Thin rows say **please report**: a
+[test report](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/new/choose) helps everyone.
+
 | | Status |
 |---|---|
-| Steam version, game build 19115871 | tested |
-| AMD Ryzen 7 5800X (8 cores / 16 threads), Radeon RX 9070 XT, Windows 11 | tested |
+| Steam version, game build 19115871 | tested; works for most of the 40+ players who reported |
+| NVIDIA GeForce RTX 20, 30, 40 and 50 series (driver 617.x), DLSS and DLSS frame generation | works: about 25 reports, from RTX 2070 Super to RTX 5090. Higher frame rates where the CPU is the limit, far fewer hitches in the Imperial City flight (for example 24 -> 2 hitches per flight on an RTX 4080, [#14](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/14)). Problem reports on two cards with 6-8 GB, causes not found yet: hitches on a PC short of RAM ([#16](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/16)), a GPU hang with DLSS ([#17](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/17)) |
+| AMD Radeon RX 7000 and 9000 series | works: a handful of reports (RX 7800 XT, 7900 XT, 9060 XT, 9070, 9070 XT), for example 95 -> 104 fps and 11 -> 3 hitches in the flight on an RX 7900 XT ([#10](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/10)). Older Radeon cards: **please report** |
+| Intel Arc graphics, XeSS | no report yet: **please report**. The fixes are in the game and the engine, not in the driver |
+| CPUs | reported working on AMD Ryzen 3000, 5000, 7000 and 9000 (X3D models included) and Intel Core 9th, 13th and 14th generation; all of them with 12 or more logical processors |
 | CPUs with fewer threads | should work. Helper threads scale with the cores Windows gives the game. Below 8 logical processors (for example 4 cores without SMT, or 6 cores / 6 threads) the fixes that lean most on helper threads stay off and the log says so: we could only test with 16 (and with the game limited to 6 of them, where they were not slower than with them off). To try them anyway, add `ParallelMinProcessors=6` under `[Fixes]` in `OblivionPerfFix.ini`. **Please report** |
-| CPUs with AVX-512 (Ryzen 7000/9000, Intel 11th gen), older CPUs without AVX2 | the game uses separate code paths there; each is covered by the self-test (the AVX-512 one byte for byte under Intel's CPU emulator). **Please report** |
-| NVIDIA and Intel Arc graphics cards, DLSS, XeSS | should work: the fixes are in the game and the engine, not in the driver. The frame generation fixes only act when you use FSR frame generation; `FrameGenAsyncCompute` was measured on an AMD card only, so if FSR frame generation looks or paces worse on another card, set it to 0 and tell us. **Please report** |
-| Graphics cards with 8 GB | work; the parallel translation that costs video memory switches itself off on cards under 9.5 GB (the game itself is over its video-memory budget there at 1080p/1440p High) |
-| Windows 10 | should work (nothing in the fix needs Windows 11), untested |
-| Steam Deck / Proton | untested |
-| Xbox / PC Game Pass version | experimental, untested |
-| UE4SS, OBSE64 | compatible (OBSE64 can also load the fix) |
+| CPUs with AVX-512, older CPUs without AVX2 | the game uses separate code paths there, each covered by the self-test (the AVX-512 one byte for byte under Intel's CPU emulator). Ryzen 7000 and 9000 (AVX-512) are reported working; Intel CPUs with AVX-512 and CPUs without AVX2: **please report** |
+| Graphics cards with 8 GB or less | the parallel translation that costs video memory switches itself off on cards under 9.5 GB (the game itself is over its video-memory budget there at 1080p/1440p High). See the two problem reports in the NVIDIA row |
+| Frame generation | FSR frame generation and DLSS frame generation (2x to 4x) reported fine. `FrameGenAsyncCompute` was measured on an AMD card only: if FSR frame generation looks or paces worse on another card, set it to 0 and tell us |
+| Xbox / PC Game Pass version | works in three reports (for example [#4](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/4), and [#13](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/13): 92 -> 112 fps on an RTX 5080); one crash report without a log. Still less tested than Steam |
+| Handhelds | ROG Xbox Ally X: works (a few reports, stutter much reduced). Legion Go: one report of stutter at start-up. Steam Deck: untested, **please report** |
+| Linux (Proton) | one report: works on CachyOS with the Windows files. Mac: no report |
+| Windows 10 | should work (nothing in the fix needs Windows 11); no report yet |
+| VR (UEVR) | works ([#12](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/12)), with the `version.dll` and the OBSE64 route |
+| UE4SS, OBSE64 | compatible; the OBSE64 route works in several reports |
+| Large mod lists, other performance mods | large Mod Organizer 2 lists reported fine; SCSKiller reported to combine well; Engine.ini tweak packs: unclear (two reports of problems with one installed, causes not found) |
 | Other mods that install a `version.dll` | conflict: use the OBSE64 route above |
 
 ## FAQ
@@ -220,23 +292,42 @@ on and off match within the noise between two identical runs. Physics and AI are
 far-away characters you can't see are built a few frames later, and the cells you left behind are unloaded a few frames
 later (about a tenth of a second).
 
+**Does it only work on the maintainer's PC, or on my hardware?** It works on any PC that runs the game. Nothing in it is
+set up for one PC: it finds its code in the game itself, has no paths or per-PC settings, and sizes its helper threads
+to your CPU. Players report it working on NVIDIA RTX 20 to 50 series and AMD Radeon RX 7000 and 9000 cards, on Intel
+and AMD CPUs, with DLSS and FSR, on Steam and Game Pass and through OBSE64 (the list, and what is less tested, is under
+[Compatibility](#compatibility)). Only the README's numbers come from one PC; your gain depends on your hardware
+([Check it on your PC](#check-it-on-your-pc-before--after)).
+
 **Will it break when the game updates?** It shouldn't break the game: anything it can't find exactly, it leaves alone and
 logs. A fix that switched itself off needs a new release to come back.
 
-**I don't see a difference.** Then your graphics card is probably the limit where you are. The fix helps most where the
-CPU is the limit: towns, crowds, travel, lower resolutions, upscaling, high frame rates, frame generation.
+**I don't see a difference.** Then your graphics card is probably the limit where you are: the frame rate then
+depends on your graphics settings, and the fix can add little to it. The fix helps most where the CPU is the limit:
+towns, crowds, travel, lower resolutions, upscaling, high frame rates, frame generation. Keep it installed anyway: the
+hitches in towns, while travelling, at doors and in menus are CPU work and improve on any graphics card.
+`Check-GPU.cmd` in the [benchmark kit](#check-it-on-your-pc-before--after) tells you which one is the limit.
+
+**Which graphics settings should I use?** Your choice: the fix changes none. To find settings your graphics card can
+carry, test them at the pond by Fort Doublecross in the rain, by hand or with `Check-GPU.cmd`; what to lower first is in
+[Find good graphics settings](#find-good-graphics-settings).
 
 **Does it use more video memory?** A little: about 0.5-1 GB more than the stock game, almost all of it for translating
 on all cores (`RdgParallelTranslate`), which is why that one is off on 8 GB cards. `CommandAllocatorTrim` gives back
 about 0.4 GB that the game (stock too) keeps after every load, once memory gets tight. If you play on an 8 GB card at
 low settings and the `[mem]` line in the log shows plenty of room, you can try `RdgParallelTranslate=1`. Being over the
 budget does not crash the game: Windows moves the extra video memory to system RAM, which costs speed.
+Two smaller ones: `NaniteInitialRootPages` reserves about 32 MB more for Nanite's root pages from the start (the stock
+game grows that buffer during play and can stall for a moment while it does), and `RtSceneBufferKeep` keeps the ray-tracing
+scene buffer at the largest size the session needed instead of shrinking and regrowing it.
 
 **The first minute feels slower than later.** For a while after every start the game compiles graphics pipelines in the
 background. The fix runs that at full speed while you are in the main menu and loading screens; if you start playing
 straight away, the rest of it runs at the game's slower pace during your first minutes.
 
 **Can I see what it did?** Yes: `OblivionPerfFix.log` lists every fix, and every 60 seconds how much work it saved.
+To write no log, set `LogFile=0` under `[General]` in the ini (needs a restart; if the game then crashes with a
+GPU error, the log is still created, holding only that crash report; logs from earlier sessions are left alone).
 
 **Can I switch a fix off?** Yes, each one has its switch in `OblivionPerfFix.ini` (1 = on, 0 = off). Most can be switched
 while the game runs; the file says which.
@@ -258,12 +349,10 @@ game update.
   too: it says where each slow frame's time went.
 - **Tried it on your PC?** A [test report](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/new/choose)
   (hardware, did it load, how it felt) helps us get out of beta.
-- **Want to measure?** The [benchmark suite](docs/benchmark.md) plays a fixed set of scenes by itself, each from a new
-  game (no save needed); one command (`tools\Bench-Report.ps1`) compares the game with and without the fix and writes a
-  report you can share. It runs hidden and muted so you can keep working; add `-Watch` to see and hear it at your own
-  settings. Two cinematic flights are included, round the **Imperial City** and through **Cheydinhal**
-  (`-Scenario showcase`, `-Scenario cheydinhal-show`). It needs the modding tool UE4SS, but only for its own games: it
-  takes UE4SS out of the game folder again when it closes the game, and never touches your saves.
+- **Want to measure?** Run the [benchmark kit](#check-it-on-your-pc-before--after) (`Benchmark.cmd`) and share its
+  report. The full [benchmark suite](docs/benchmark.md) in this repository plays many more scenes (towns, doors,
+  travel, crowds, a Cheydinhal flight), each from a new game, hidden and muted. It needs the modding tool UE4SS, but only
+  for its own games: it takes UE4SS out of the game folder again when it closes the game, and never touches your saves.
 - **Build it yourself:** `src\OblivionPerfFix\build.ps1` with the free Visual Studio 2022 Build Tools. `-SelfTest`
   checks every patch site against your installed game without running it. Developers start with
   [AGENTS.md](AGENTS.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
@@ -275,8 +364,6 @@ see [LICENSE](LICENSE).
 
 Not affiliated with or endorsed by Bethesda Softworks, ZeniMax, Virtuos, Epic Games or AMD. *The Elder Scrolls*,
 *Oblivion*, *Unreal Engine* and *FSR* are trademarks of their owners. The fix contains no game files and no engine source
-code. The benchmark suite (not the fix) uses [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) and
-[PresentMon](https://github.com/GameTechDev/PresentMon), which its setup script downloads separately. Its UE4SS is
-upstream 3.0.1-1161 with a one-line memory-leak fix ([#1446](https://github.com/UE4SS-RE/RE-UE4SS/issues/1446), offered
-upstream as [PR #1452](https://github.com/UE4SS-RE/RE-UE4SS/pull/1452)), published as the `bench-tools-v1` release;
-the recipe is in [tools/ue4ss-build](tools/ue4ss-build/README.md).
+code. The benchmark (not the fix) uses [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) and
+[PresentMon](https://github.com/GameTechDev/PresentMon), which it downloads from their own projects; neither is in
+our downloads.

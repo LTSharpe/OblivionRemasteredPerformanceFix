@@ -362,6 +362,9 @@ end
 --   camlook   seconds ahead along the path the spectator camera aims at (0 = max(800 units, one second))
 --   camtau    seconds in which the spectator camera's turning settles     camsmooth  cascaded smoothing stages (1 or more:
 --             2 = no sudden change in turn rate either)
+--   cameye    spectator camera height above the path points in Oblivion units during the timed flight (0 = the eye height
+--             measured from the game's camera when the camera went on, 75-146 UE units depending on its state; set it for
+--             runs that must render the same view, e.g. 55 = a standing player's eye over a path at the capsule centre)
 -- Waypoints are x,y,z or x,y,z,pitch or x,y,z,pitch,speed (all the same): a pitch per waypoint is the camera's pitch
 -- there, a speed the flight's speed there (both spline-interpolated); with speeds the timetable follows them (no easing).
 
@@ -369,7 +372,7 @@ local MOVE_FALLING, MOVE_FLYING = 3, 5
 local function Mode(m) return tonumber(m.MovementMode) or -1 end
 local FLY_DEFAULTS = { drive = "vel", mode = "flying", tau = 0.25, cap = 2.5, lift = 1, hold = 1.0, liftspeed = 1200,
                        collision = 0, brake = 0, prog = 2.0, ease = 1.5, easeout = 1.5, turn = 60, holdyaw = -1, holdpitch = 999,
-                       fadein = 0, fadeout = 0, stay = 0, clip = 0, camlook = 0, camtau = 0.55, camsmooth = 1 }
+                       fadein = 0, fadeout = 0, stay = 0, clip = 0, camlook = 0, camtau = 0.55, camsmooth = 1, cameye = 0 }
 
 -- ---------------------------------------------------------------- screen fade
 -- The camera manager's fade: black over the 3D view (menus and loading screens stay on top), to hide set-up
@@ -470,6 +473,12 @@ local function FlightOn(pawn, m, o)
         saved = { gravity = m.GravityScale, brake = m.BrakingDecelerationFlying, maxfly = m.MaxFlySpeed }
         local ok, c = pcall(function() return pawn:GetActorEnableCollision() end)
         saved.collision = not ok or c ~= false
+        -- a player's mouse or keys (on-screen kit runs) must not steer the flight: the controller ignores look and move
+        -- input until FlightOff. The flight itself is unaffected: it sets the control rotation directly and drives the
+        -- pawn by velocity, LaunchCharacter or AddMovementInput(bForce = true), none of which checks these flags
+        -- (UE 5.3 PlayerController.cpp AddYawInput/AddPitchInput, PawnMovementComponent Internal_AddMovementInput).
+        local pc = PC()
+        if pc then saved.input = pcall(function() pc:SetIgnoreLookInput(true); pc:SetIgnoreMoveInput(true) end) end
     end
     if o.collision == 0 then pawn:SetActorEnableCollision(false) end
     m.GravityScale = 0.0
@@ -483,6 +492,10 @@ local function FlightOff()
     if not saved then return "" end
     local s = saved
     saved = nil
+    if s.input then
+        local pc = PC()
+        if pc then pcall(function() pc:ResetIgnoreLookInput(); pc:ResetIgnoreMoveInput() end) end
+    end
     local pawn = Pawn()
     if not pawn then return " restore=nopawn" end
     local errs = {}
@@ -998,8 +1011,8 @@ end
 
 local function GameCamera() return Obj("VAltarCameraActor") end
 
--- Moves the spectator camera actor. K2_TeleportTo has no 'Out' parameter: UE4SS up to at least 3.0.1-1161 never
--- releases the registry reference it takes for each 'Out' table (upstream issue #1446), so calling
+-- Moves the spectator camera actor. K2_TeleportTo has no 'Out' parameter: UE4SS builds before 3.0.1-1181 never
+-- release the registry reference they take for each 'Out' table (upstream issue #1446, fixed by PR #1452), so calling
 -- K2_SetActorLocationAndRotation(..., {}, true) every frame pinned one FHitResult table per frame (~1 GB/h).
 -- For a CameraActor both do the same: its root is a plain SceneComponent, so UE 5.3 AActor::TeleportTo sets the world
 -- location and rotation directly with ETeleportType::TeleportPhysics and no sweep (Actor.cpp), as the old call did.
@@ -1085,7 +1098,7 @@ local function CamFrame(now)
     local tx, ty, tz, tyaw, tpitch, posTau, rotTau, stages
     local f = fly
     if f and f.kind == "path" and (f.phase == "run" or f.phase == "stay") and f.camAt then
-        tx, ty, tz = f.camAt[1] * S, -f.camAt[2] * S, f.camAt[3] * S + cam.eyeZ
+        tx, ty, tz = f.camAt[1] * S, -f.camAt[2] * S, f.camAt[3] * S + ((tonumber(f.o.cameye) or 0) > 0 and f.o.cameye * S or cam.eyeZ)
         local ah = f.camAhead
         tyaw = math.deg(math.atan(ah[1] - f.camAt[1], ah[2] - f.camAt[2])) - 90 + (f.lookOffset or 0)
         tpitch = f.camAt[4] or f.pitch
@@ -1330,6 +1343,53 @@ function V.quit()
     return "quitting"
 end
 
+-- "cond [radius]": the conditions the scene actually has, for repeatable runs (2026-10-20, benchrepro):
+-- hour = the time of day (ATMSubsystem), wx = the weather presets the atmosphere tool has active with their blend
+-- alpha (ATMSubsystem.ActiveEvents: "Clear:1.00", during a change "Rain:1.00,Clear:0.30"; fw switches within a frame),
+-- npcs = characters within radius (game units, default 3000) of the player, near = the three nearest as name@x,y
+-- ("cond 0": no character scan, only hour and weather). One-off reads, no hooks.
+function V.cond(rest)
+    local radius = (tonumber(rest) or 3000) * S
+    local out = {}
+    local atm = Obj("ATMSubsystem")
+    if atm then
+        pcall(function() out[#out + 1] = string.format("hour=%.3f", atm:GetTime()) end)
+        local wx = {}
+        pcall(function()
+            atm.ActiveEvents:ForEach(function(_, v)
+                local inst = v:get()
+                if inst and inst:IsValid() then
+                    local n, a = "?", -1
+                    pcall(function() n = inst.PresetBase:GetFName():ToString():gsub("^ATMP_Weather_", "") end)
+                    pcall(function() a = inst.CachedAlpha end)
+                    wx[#wx + 1] = string.format("%s:%.2f", n, a)
+                end
+            end)
+        end)
+        out[#out + 1] = "wx=" .. (#wx > 0 and table.concat(wx, ",") or "none")
+    end
+    local pawn = radius > 0 and Pawn() or nil
+    if pawn then
+        local p = pawn:K2_GetActorLocation()
+        local near = {}
+        for _, ch in ipairs(FindAllOf("Character") or {}) do
+            if ch:IsValid() and ch:GetAddress() ~= pawn:GetAddress() then
+                pcall(function()
+                    local l = ch:K2_GetActorLocation()
+                    local d = Dist3(l.X, l.Y, l.Z, p.X, p.Y, p.Z)
+                    if d < radius then near[#near + 1] = { d = d, n = ch:GetFName():ToString():gsub("_C_%d+$", ""), x = l.X / S, y = -l.Y / S } end
+                end)
+            end
+        end
+        table.sort(near, function(a, b) return a.d < b.d end)
+        out[#out + 1] = "npcs=" .. #near
+        local t = {}
+        for i = 1, math.min(3, #near) do t[#t + 1] = string.format("%s@%.0f,%.0f", near[i].n, near[i].x, near[i].y) end
+        if #t > 0 then out[#out + 1] = "near=" .. table.concat(t, ";") end
+    end
+    return table.concat(out, " ")
+end
+
 local pingFrames, pingAt = 0, os.clock()
 function V.ping()
     local now = os.clock()
@@ -1404,6 +1464,57 @@ function V.look(rest)
     local h, p = rest:match("^(%S+)%s*(%S*)$")
     PC():SetControlRotation({ Pitch = tonumber(p) or 0.0, Yaw = (tonumber(h) - 90) % 360, Roll = 0.0 })
     return "ok"
+end
+
+-- "aim [maxdist] [pattern] [front]" (2026-10-20, faces scenario): turn the camera to the head of the nearest other
+-- character within maxdist game units (default 400) of the camera whose name contains `pattern` (e.g. Kewan for
+-- BP_Kewan_C_...), e.g. one a scene spawned with placeatme (which places by the old engine's heading, not the
+-- camera's). Head = the mesh's "head" socket when it is within 2 m above the actor, else the actor's location + 70 cm.
+-- "front": instead move the player to 150 cm in front of that character (old engine setpos), so that a following
+-- "aim" sees its face. One-off call, no hooks.
+function V.aim(rest)
+    local maxd, pattern, front = 400, nil, false
+    for tok in rest:gmatch("%S+") do
+        if tonumber(tok) then maxd = tonumber(tok) elseif tok == "front" then front = true else pattern = tok end
+    end
+    maxd = maxd * S
+    local pc, pawn = PC(), Pawn()
+    if not pc then error("no player controller") end
+    local c = pc.PlayerCameraManager:GetCameraLocation()
+    local best, bd = nil, maxd
+    for _, ch in ipairs(FindAllOf("Character") or {}) do
+        if ch:IsValid() and not (pawn and ch:GetAddress() == pawn:GetAddress()) then
+            local ok, d = pcall(function()
+                if pattern and not ch:GetFName():ToString():find(pattern, 1, true) then return nil end
+                local l = ch:K2_GetActorLocation()
+                return Dist3(l.X, l.Y, l.Z, c.X, c.Y, c.Z)
+            end)
+            if ok and d and d < bd then best, bd = ch, d end
+        end
+    end
+    if not best then return "aim=none" end
+    local l = best:K2_GetActorLocation()
+    if front then
+        local f = best:GetActorForwardVector()
+        local x, y = l.X + 150 * f.X, l.Y + 150 * f.Y
+        Obv("player.setpos x " .. string.format("%.1f", x / S)); Obv("player.setpos y " .. string.format("%.1f", -y / S))
+        Obv("player.setpos z " .. string.format("%.1f", l.Z / S))
+        lastPos = nil
+        return string.format("aim=%s front at=%.0f,%.0f,%.0f", best:GetFName():ToString(), x / S, -y / S, l.Z / S)
+    end
+    local hx, hy, hz, src = l.X, l.Y, l.Z + 70, "actor"
+    pcall(function()
+        local m = best.Mesh
+        if m and m:IsValid() then
+            local s = m:GetSocketLocation(FName("head"))
+            if s.Z > l.Z and s.Z < l.Z + 200 then hx, hy, hz, src = s.X, s.Y, s.Z, "head" end
+        end
+    end)
+    local dx, dy, dz = hx - c.X, hy - c.Y, hz - c.Z
+    local yaw = math.deg(math.atan(dy, dx))
+    local pitch = math.deg(math.atan(dz, math.sqrt(dx * dx + dy * dy)))
+    pc:SetControlRotation({ Pitch = pitch, Yaw = yaw % 360, Roll = 0.0 })
+    return string.format("aim=%s dist=%.0f heading=%.1f pitch=%.1f at=%s", best:GetFName():ToString(), bd / S, (yaw + 90) % 360, pitch, src)
 end
 
 -- The game's gameplay input mapping (2026-10-06, drift): in a long hidden session the game was found with only

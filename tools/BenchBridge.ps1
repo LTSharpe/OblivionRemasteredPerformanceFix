@@ -19,6 +19,8 @@ $script:BenchLogFile = Join-Path $script:BenchRun 'bench.log'
 $script:BenchLockFile = Join-Path $script:BenchRun 'game.lock'
 $script:BenchHeartbeatFile = Join-Path $script:BenchRun 'bench-heartbeat.txt'   # rewritten every second by the mod's frame loop
 $script:BenchStatusFile = Join-Path $script:BenchRun 'bench-status.json'       # what the runner is doing (tools\Bench-Status.ps1)
+$script:BenchLaunchFile = Join-Path $script:BenchRun 'bench-launch.json'       # the launch a runner asked Steam for, and its game (tools\Runner-Guard.ps1)
+$script:BenchStopFile = Join-Path $script:BenchRun 'bench-stop.json'           # Run-Benchmark.ps1 -Stop: which runner process should stop after its scene
 $script:BenchDeadline = $null                                                         # [datetime]: Assert-GameOk throws DEADLINE after it
 $script:BenchId = [int]((Get-Date).TimeOfDay.TotalSeconds) * 100
 $script:GameProcessName = 'OblivionRemastered-Win64-Shipping'
@@ -206,9 +208,19 @@ $script:BenchMutedFile = Join-Path $script:BenchRun 'bench-audio-muted.txt'   # 
    Steam's launch dialog or the game takes the keyboard focus from the PC user (2026-10-06: typing interrupted during
    a launch). The request goes through a process that Windows' WMI service creates, which has no such right;
    Start-Process only if WMI fails. #>
-function Start-SteamLaunch {
+function Start-SteamLaunch([string[]]$GameArgs = @()) {
     $cmd = (Get-ItemProperty 'Registry::HKEY_CLASSES_ROOT\steam\Shell\Open\Command' -ErrorAction SilentlyContinue).'(default)'
     $url = "steam://rungameid/$($script:SteamAppId)"
+    # Arguments for this launch only (e.g. -FixedSeed): `steam.exe -applaunch <app> <args>` hands them to the running
+    # Steam, which adds them to the player's own launch options for this one start; nothing in Steam's config changes.
+    if ($GameArgs.Count -and $cmd -match '^\s*"([^"]+steam\.exe)"') {
+        $line = '"{0}" -applaunch {1} {2}' -f $Matches[1], $script:SteamAppId, ($GameArgs -join ' ')
+        try {
+            $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $line } -ErrorAction Stop
+            if ($r.ReturnValue -eq 0) { return }
+            Write-Warning "launch with arguments through WMI failed (code $($r.ReturnValue)): launching without them"
+        } catch { Write-Warning "launch with arguments through WMI failed ($_): launching without them" }
+    }
     if ($cmd -match '%1') {
         try {
             $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = ($cmd -replace '%1', $url) } -ErrorAction Stop
@@ -260,8 +272,40 @@ function Start-CrashGuard([int]$GamePid) {
     Set-Content $script:CrashGuardPidFile "$($proc.Id) $GamePid" -Encoding ascii
 }
 
+function Set-BenchLaunch([hashtable]$Values) {
+    try { [IO.File]::WriteAllText($script:BenchLaunchFile, ($Values | ConvertTo-Json -Compress)) } catch { Write-Warning "could not write $($script:BenchLaunchFile): $_" }
+}
+
+$script:RunnerGuardPidFile = Join-Path $script:BenchRun 'runner-guard.pid'   # "<guard pid> <runner pid>"
+
+<# Starts tools\Runner-Guard.ps1 hidden for this process (once): if this runner dies while it holds game.lock (killed,
+   or its PowerShell ended), the guard hides and mutes its game, also one Steam is still starting, and closes it
+   cleanly (Run-Benchmark.ps1 -Close). A normal end unlocks first, and the guard then just exits. #>
+function Start-RunnerGuard([switch]$Audible, [switch]$Visible) {
+    if (Test-Path $script:RunnerGuardPidFile) {
+        $p = ([IO.File]::ReadAllText($script:RunnerGuardPidFile)).Trim() -split '\s+'
+        if ($p.Count -ge 2 -and [int]$p[1] -eq $PID) {
+            $g = Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$p[0])" -ErrorAction SilentlyContinue
+            if ($g -and $g.CommandLine -match 'Runner-Guard') { return }
+        }
+    }
+    $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$(Join-Path $PSScriptRoot 'Runner-Guard.ps1')`"", '-RunnerPid', $PID)
+    if ($Audible) { $a += '-Audible' }
+    if ($Visible) { $a += '-Visible' }
+    $proc = Start-Process powershell -PassThru -WindowStyle Hidden -ArgumentList $a
+    Set-Content $script:RunnerGuardPidFile "$($proc.Id) $PID" -Encoding ascii
+}
+
 function Stop-Unobtrusive {
     [OblvBench.GameAudio]::Stop(); [OblvBench.WindowKeeper]::Stop(); [OblvBench.GameHider]::Stop()
+}
+
+<# On-screen runs (-Visible): the game window to the front with the keyboard focus (BenchLib Foreground.Bring: no input
+   is sent; a minimised game is left alone). Returns "foreground: already|direct|attached|failed (...)". #>
+function Set-GameForeground {
+    $p = Get-Game
+    if (-not $p) { return 'foreground: no game' }
+    "foreground: $([OblvBench.Foreground]::Bring([OblvBench.GameWatch]::FindGameWindow($p.Id), $p.Id))"
 }
 
 <# Watch mode (-Visible): the hook DLL goes into the game as well, with "show" set, so its window is left alone (it comes
@@ -383,8 +427,128 @@ function Get-SteamLaunchProblem([datetime]$Since) {
     $null
 }
 
+# ---------------------------------------------------------------- crash evidence (2026-10-20, worker npcpromo)
+
+if (-not ('OblvBench.ProcessFreeze' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices;
+namespace OblvBench {
+    public static class ProcessFreeze {
+        [DllImport("ntdll.dll")] static extern int NtSuspendProcess(IntPtr h);
+        [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(int access, bool inherit, int pid);
+        [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+        // freezes every thread of the process (PROCESS_SUSPEND_RESUME); true on success
+        public static bool Suspend(int pid) {
+            IntPtr h = OpenProcess(0x0800, false, pid);
+            if (h == IntPtr.Zero) return false;
+            try { return NtSuspendProcess(h) >= 0; } finally { CloseHandle(h); }
+        }
+    }
+}
+'@
+}
+
+$script:FixLogName = 'OblivionPerfFix.log'
+
+<# The last $Bytes of a file another process is writing (shared read), as text; '' if it cannot be read. #>
+function Read-FileTail([string]$path, [int]$Bytes = 1MB) {
+    try {
+        $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite, Delete')
+        try {
+            $n = [int][Math]::Min($fs.Length, $Bytes)
+            $fs.Seek(-$n, 'End') | Out-Null
+            $buf = New-Object byte[] $n
+            $got = $fs.Read($buf, 0, $n)
+            [Text.Encoding]::UTF8.GetString($buf, 0, $got)
+        } finally { $fs.Dispose() }
+    } catch { '' }
+}
+
+<# Copies a file another process may hold open (shared read); $true on success. #>
+function Copy-SharedFile([string]$from, [string]$to) {
+    try {
+        $src = [IO.File]::Open($from, 'Open', 'Read', 'ReadWrite, Delete')
+        try { $dst = [IO.File]::Create($to); try { $src.CopyTo($dst) } finally { $dst.Dispose() } } finally { $src.Dispose() }
+        $true
+    } catch { $false }
+}
+
+<# Is the lab DLL writing its crash dumps right now? (FullCrashDump: the crashed game waits in UE's crash handling while
+   OblivionPerfFix-dumpwriter.exe writes the full dump; the memory snapshot before the writer starts took ~20 s at 4K on
+   2026-10-20.) A reason string while it is, $null when not (no lab dump, finished, or the game gone with no writer left). #>
+function Get-LabCrashDumpState {
+    if (Get-Process OblivionPerfFix-dumpwriter -ErrorAction SilentlyContinue) { return 'the lab dump writer is running' }
+    if (-not (Get-Game)) { return $null }
+    $tail = Read-FileTail (Join-Path $script:GameWin64 $script:FixLogName) 1MB
+    $i = $tail.LastIndexOf('[crash] UE is reporting a crash')
+    if ($i -lt 0) { return $null }
+    if ($tail.Substring($i) -match 'UE goes on with the crash|full memory dump (written|FAILED|skipped)') { return $null }
+    'the game is writing its crash dumps (the DLL log has the crash, not yet the end of its dump)'
+}
+
+<# Waits (at most $MaxSec) until the lab DLL's crash dumps are written, so the game is not ended under them. Returns a
+   note ('' when there was nothing to wait for). #>
+# 1800 s: the lab DLL now writes a complete full dump at every crash, from the game itself when no snapshot can be taken
+# (minutes at 4K; 542.7 s for 23.3 GB on 2026-10-21), and the game must not be ended under it (2026-10-21, worker crashfull)
+function Wait-LabCrashDump([int]$MaxSec = 1800) {
+    $why = Get-LabCrashDumpState
+    if (-not $why) { return '' }
+    Write-Host "waiting for the lab crash dump ($why; at most $MaxSec s)"
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($why -and $sw.Elapsed.TotalSeconds -lt $MaxSec) { Start-Sleep -Milliseconds 500; $why = Get-LabCrashDumpState }
+    if ($why) { 'lab crash dump: still not finished after {0:F0} s ({1}); ending the game anyway' -f $sw.Elapsed.TotalSeconds, $why }
+    else { 'lab crash dump: waited {0:F0} s for it' -f $sw.Elapsed.TotalSeconds }
+}
+
+<# Keeps the DLL log of the previous game before a new one overwrites it: <runtime>\fixlogs\OblivionPerfFix-<its last
+   write time>.log (shared read; the newest 6 are kept). Returns the copy's path or $null. #>
+function Save-PreviousFixLog {
+    $log = Join-Path $script:GameWin64 $script:FixLogName
+    if (-not (Test-Path -LiteralPath $log)) { return $null }
+    $item = Get-Item -LiteralPath $log
+    if ($item.Length -eq 0) { return $null }
+    $dir = Join-Path $script:BenchRun 'fixlogs'
+    New-Item -ItemType Directory -Force $dir | Out-Null
+    $to = Join-Path $dir ('OblivionPerfFix-{0:yyyyMMdd-HHmmss}.log' -f $item.LastWriteTime)
+    if ((Test-Path -LiteralPath $to) -and (Get-Item -LiteralPath $to).Length -eq $item.Length) { return $to }
+    if (-not (Copy-SharedFile $log $to)) { return $null }
+    Get-ChildItem $dir -Filter 'OblivionPerfFix-*.log' | Sort-Object Name -Descending | Select-Object -Skip 6 |
+        ForEach-Object { Remove-Item -LiteralPath $_.FullName -ErrorAction SilentlyContinue }
+    $to
+}
+
+<# Ends a game that does not answer (hung, crashed) without a sound: it is frozen first (no new audio), and only when its
+   audio session's meter then reads silence for 200 ms is it un-muted (Windows would keep the mute for the next launch);
+   otherwise it ends muted (the flag file stays: the next benchmark game's close or Repair-GameMute un-mutes). Waits for
+   the lab crash dump first. Returns notes. #>
+function Stop-GameQuietly($p) {
+    $notes = New-Object System.Collections.Generic.List[string]
+    $w = Wait-LabCrashDump
+    if ($w) { $notes.Add($w) }
+    $p.Refresh()
+    if ($p.HasExited) { $notes.Add('the game had ended by itself'); return $notes }
+    $frozen = [OblvBench.ProcessFreeze]::Suspend($p.Id)
+    $quiet = 0
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    while ($frozen -and $sw.ElapsedMilliseconds -lt 3000 -and $quiet -lt 4) {
+        $peak = try { [OblvBench.GameAudio]::Peak([string[]]@($script:GameProcessName)) } catch { 1 }
+        if ($peak -lt 0.0001) { $quiet++ } else { $quiet = 0 }
+        Start-Sleep -Milliseconds 50
+    }
+    if ($quiet -ge 4) {
+        $n = Set-GameUnmuted
+        $notes.Add("froze the game, its audio read silence: un-muted ($n session(s)) and ended it")
+    } else {
+        [OblvBench.GameAudio]::Stop()
+        $notes.Add("ended the game muted ($(if ($frozen) { 'its audio did not read silence after freezing it' } else { 'could not freeze it' })); the next benchmark game un-mutes it")
+    }
+    Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+    $p.WaitForExit(20000) | Out-Null
+    $notes
+}
+
 function Start-Game {
-    param([int]$TimeoutSec = 240, [switch]$Unobtrusive, [switch]$Audible)
+    param([int]$TimeoutSec = 240, [switch]$Unobtrusive, [switch]$Audible, [string[]]$GameArgs = @(), [uint64]$CpuMask = 0)
     if (Get-Game) { throw 'The game is already running.' }
     # Steam refuses a launch while the previous instance (launcher stub, crash reporter) is still around
     $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -393,13 +557,21 @@ function Start-Game {
     Set-Content $script:BenchCmdFile '' -NoNewline -Encoding ascii
     Set-Content $script:BenchLogFile '' -NoNewline -Encoding ascii
     if (Test-Path $script:BenchHeartbeatFile) { Remove-Item -LiteralPath $script:BenchHeartbeatFile -ErrorAction SilentlyContinue }
+    $kept = Save-PreviousFixLog            # the new game overwrites the DLL log: keep the last one
+    if ($kept) { Write-Host "previous DLL log kept: $kept" }
     Enable-BenchUE4SS                      # only for this game: taken out again once it has closed
     if ($Unobtrusive) { Start-Unobtrusive -Audible:$Audible } else { Start-ShownHook }
     $launchedAt = Get-Date
-    Start-SteamLaunch
+    # for tools\Runner-Guard.ps1: if this process dies now, the game Steam is about to start is this runner's
+    Set-BenchLaunch @{ runnerPid = $PID; launchAt = $launchedAt.ToString('o') }
+    if ($CpuMask) {                        # lab (-CpuLimit): the stub and the game join a Job object limited to these processors
+        if (-not ('OblvBench.CpuLimitJob' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'CpuLimitJob.cs') }
+        Write-Host ([OblvBench.CpuLimitJob]::Arm($CpuMask, [string[]]@($script:GameProcesses | ForEach-Object { "$_.exe" }), ($TimeoutSec + 30) * 1000))
+    }
+    Start-SteamLaunch -GameArgs $GameArgs
     $sw = [Diagnostics.Stopwatch]::StartNew(); $asked = 1; $checked = 0
     while (-not ($p = Get-Game)) {
-        if ($sw.Elapsed.TotalSeconds -gt 60 * $asked -and $asked -lt 2) { Start-SteamLaunch; $asked++ }   # Steam sometimes drops the first request
+        if ($sw.Elapsed.TotalSeconds -gt 60 * $asked -and $asked -lt 2) { Start-SteamLaunch -GameArgs $GameArgs; $asked++ }   # Steam sometimes drops the first request
         if ($sw.Elapsed.TotalSeconds -gt $checked + 10) {   # a known Steam reason ends the wait early
             $checked = $sw.Elapsed.TotalSeconds
             $why = Get-SteamLaunchProblem $launchedAt
@@ -411,6 +583,13 @@ function Start-Game {
         }
         if ($script:BenchDeadline) { Assert-GameOk }
         Start-Sleep -Milliseconds 500
+    }
+    Set-BenchLaunch @{ runnerPid = $PID; launchAt = $launchedAt.ToString('o'); gamePid = $p.Id }
+    if ($CpuMask) {
+        Start-Sleep -Milliseconds 200     # the stub's child, if the stub got there first, is in the job already
+        [OblvBench.CpuLimitJob]::Disarm()
+        $script:CpuLimitReport = [OblvBench.CpuLimitJob]::Report($p.Id)
+        Write-Host "CPU limit: $($script:CpuLimitReport)"
     }
     Watch-Game $p                          # from here on a crash or hang during start-up ends the wait at once
     if ($Unobtrusive) { Start-CrashGuard $p.Id }   # its crash UI stays off the screen for as long as it runs
@@ -429,15 +608,17 @@ function Stop-Game {
     [OblvBench.GameWatch]::Stop()          # quitting is not a crash
     $p = Get-Game
     if (-not $p) { return }
+    $w = Wait-LabCrashDump                 # a crashed lab game may still be writing its dumps: never end it under them
+    if ($w) { Write-Host $w }
     if ((Test-Path $script:BenchMutedFile) -or [OblvBench.GameAudio]::Running) {
         # Windows would remember the mute, so un-mute while the game still runs, but silence it first: a game
         # parked at the main menu plays the main theme, and the PC user heard it for the seconds the quit took.
         if (Set-GameSilent) { Set-GameUnmuted | Out-Null }
         else {
-            # could not silence it (mod not answering): un-mute and end it at once rather than let it play for seconds
-            Write-Host 'Could not silence the game before un-muting it; ending it.'
-            Set-GameUnmuted | Out-Null
-            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            # could not silence it (mod not answering: hung or crashed): never un-mute it as it is (2026-10-20: a hung
+            # game was un-muted before it was ended); freeze it first, un-mute only once its audio reads silence
+            Write-Host 'Could not silence the game; ending it quietly.'
+            foreach ($n in (Stop-GameQuietly $p)) { Write-Host $n }
         }
     }
     if (-not $p.HasExited) { Send-Bench 'quit' -TimeoutMs 3000 -NoThrow | Out-Null }

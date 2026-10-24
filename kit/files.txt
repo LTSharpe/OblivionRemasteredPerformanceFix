@@ -1,0 +1,29 @@
+# What goes into the benchmark kit (OblivionPerfFix-<version>-Benchmark.zip), as paths in this repository: files or
+# folders. The release workflow's Package step (.github/workflows/build.yml) copies them with the same paths, builds the
+# window-hook DLL into tools/benchhook/build/ first, and adds kit/*.cmd and kit/README.txt at the top, LICENSE.txt,
+# VERSION.txt and this release's fix in fix/. Whole-line comments only.
+# Entry point and setup
+tools/Bench-Kit.ps1
+tools/Setup-Bench.ps1
+tools/Bench-Report.ps1
+tools/GamePaths.ps1
+tools/Find-VCVars.ps1
+# The runner and what it starts
+tools/Run-Benchmark.ps1
+tools/BenchLib.cs
+tools/BenchBridge.ps1
+tools/Bench-Status.ps1
+tools/Bench-Idle.ps1
+tools/Crash-Guard.ps1
+tools/Runner-Guard.ps1
+tools/Install-UE4SS.ps1
+tools/Diagnose-PresentMon.ps1
+tools/Compare-Benchmark.ps1
+# The window hook: source, build script and the DLL built by the workflow (with the hash of the source it came from)
+tools/benchhook/BenchHook.cpp
+tools/benchhook/build.ps1
+tools/benchhook/build/OblvBenchHook.dll
+tools/benchhook/build/OblvBenchHook.source-sha256.txt
+# Profiles, scenes and the in-game mod
+bench
+mods/ue4ss/OblvBench

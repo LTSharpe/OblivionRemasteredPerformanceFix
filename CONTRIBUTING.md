@@ -9,8 +9,9 @@ Thank you for helping. There are three ways in, from easiest to most involved.
 - **Bug report:** the *Bug report* form, with `OblivionPerfFix.log` attached (it is next to `version.dll`). For a
   crash, also say what you were doing; for stutter, set `HitchLedger=1` in `OblivionPerfFix.ini`, play the spot again
   and attach `OblivionPerfFix-ledger.csv`.
-- **Benchmark result:** `tools\Bench-Report.ps1` compares the game with and without the fix on your PC and writes a
-  `report.md` to paste into the *Benchmark result* form. See [docs/benchmark.md](docs/benchmark.md).
+- **Benchmark result:** the benchmark kit (`OblivionPerfFix-<version>-Benchmark.zip` from the release, double-click
+  `Benchmark.cmd`) or, from the repository, `tools\Bench-Report.ps1` compares the game with and without the fix on your
+  PC and writes a `report.md` to paste into the *Benchmark result* form. See [docs/benchmark.md](docs/benchmark.md).
 
 ## 2. A game update broke a fix
 
@@ -30,6 +31,9 @@ Read [AGENTS.md](AGENTS.md) first: the layout, the build, how a fix finds its co
   log line if anything differs. Every fix gets an ini switch with a safe default and a self-test.
 - **Prove it.** A benchmark A-B-A (or ABBA) on a public scenario for speed, and an image comparison for anything that
   could touch the picture. Run-to-run noise is about ±10%: per-thread milliseconds are more trustworthy than fps.
+- **Test quickly and alike.** Work on a short scene that reproduces just the problem (30-60 s; `tools\slice_flight.py` cuts
+  one out of a flight), with the hour, weather and timescale pinned so every run sees the same world; confirm on the full
+  scenario at the end ([docs/benchmark.md](docs/benchmark.md), "Mini-scenarios").
 - **Licences.** No game files and no game bytes beyond short search patterns. No Unreal Engine source text (names,
   offsets and descriptions in your own words are fine): `tools\Audit-UESource.py` checks for copied text.
 

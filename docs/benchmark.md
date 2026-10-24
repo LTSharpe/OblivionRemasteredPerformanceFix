@@ -6,24 +6,50 @@ a **new game without a save**, so anyone gets the same scenes. It is how the num
 and how you can check the fix on your own PC, or just watch two cinematic flights with and without it.
 You don't need any of this to use the fix.
 
-**Contents:** [Quick start](#quick-start) · [Reproduce the README numbers](#reproduce-the-numbers-in-the-readme) · [What to run](#what-to-run) · [Watch the flights](#watch-the-flights) ·
+**Just want to check the fix on your PC?** Use the benchmark kit: download `OblivionPerfFix-<version>-Benchmark.zip`
+from [Releases](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/releases), extract it and double-click
+`Benchmark.cmd` (the [README](../README.md#check-it-on-your-pc-before--after) explains it; the game comes up on
+screen with your sound, `Benchmark-Hidden.cmd` runs it hidden and muted). No Build Tools, git or Python
+needed. This page is about the full suite in the repository and what is behind the kit.
+
+**Contents:** [The kit](#the-benchmark-kit) · [Quick start](#quick-start) · [Reproduce the README numbers](#reproduce-the-numbers-in-the-readme) · [What to run](#what-to-run) · [Watch the flights](#watch-the-flights) ·
 [Profiles](#profiles) · [Running scenes yourself](#running-scenes-yourself) · [While it runs](#while-it-runs) ·
 [Reading the results](#reading-the-results) · [Troubleshooting](#troubleshooting) · [UE4SS](#ue4ss-only-for-the-benchmark) ·
 [Writing scenes](#writing-scenes)
 
+## The benchmark kit
+`OblivionPerfFix-<version>-Benchmark.zip` is a fourth file of every release, built by the release workflow like the
+fix zips (listed in `SHA256SUMS.txt`, with a build attestation and a VirusTotal scan). It holds what the benchmark needs
+to run and nothing to build: the scripts and the in-game mod from this repository (the list is `kit/files.txt`), the
+window-hook DLL built by the workflow (`tools/benchhook/build/`), this release's fix in `fix/`, three launchers and a
+`README.txt`. UE4SS and PresentMon are not in it; it downloads them from their own projects on first use, as
+`tools\Setup-Bench.ps1` does.
+
+| Launcher | What it does |
+|---|---|
+| `Benchmark.cmd` | gets the tools if missing; checks that the kit's fix is installed (asks once before installing another version or none, backs up what it replaces in `backup\<time>\`, keeps your ini values); then `tools\Bench-Report.ps1 -Scenario showcase -Profile own -Session fresh -MenuPsoWait`: the Imperial City flight, stock vs fix, 2 rounds, each run in a newly started game that waits hidden at the main menu until its start-up shader precompile is done, then flies at once (no warm-up scene). On screen, in front, with your sound (`-Watch`), in your own window mode: don't touch the mouse or keyboard or switch windows while it runs (a game that is not in front turns frame generation off; the report marks such runs "not comparable"; mouse look and movement keys are ignored during the flights, Esc and Tab are not). Prints and opens the report. `Benchmark.cmd -Rounds 3` for more rounds, `-Rounds 1` for a quick look |
+| `Benchmark-Hidden.cmd` | the same, hidden and muted (never in front, no taskbar button), to keep using the PC meanwhile |
+| `Check-GPU.cmd` | scenario `gpu-check` (the pond by Fort Doublecross in the rain, 30 s) on screen at your settings (`-Hidden`: hidden and muted); prints fps, the graphics card's and the game thread's busy time per rendered frame, and a verdict (graphics card, CPU or frame cap). Change settings in the game, run it again: each run puts back the settings you had when it started |
+
+The `.cmd` files run `tools\Bench-Kit.ps1` with PowerShell's execution policy set to *Bypass* for that window only, and
+clear the downloaded-file mark on the kit's own files, so there is nothing to unblock or allow by hand. The kit's
+working files go to `run\`, results to `captures\bench\`, downloads to `third_party\`, all inside the kit's folder.
+
 ## Quick start
-You need Windows 10 or 11, Oblivion Remastered on Steam (started once by hand, so the licence screen and first-start
-settings are done), the fix installed ([README](../README.md#install-two-minutes)), the free
+From the repository (to run other scenes, change scenes or develop): you need Windows 10 or 11, Oblivion Remastered on
+Steam (started once by hand, so the licence screen and first-start settings are done), the fix installed
+([README](../README.md#install-two-minutes)), the free
 [Build Tools for Visual Studio 2022](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (*Desktop development
-with C++*, for a small window-hook DLL) and about 1 GB of disk space. Download this repository (*Code* > *Download ZIP*,
-extract it, or `git clone`) and open PowerShell in its folder:
+with C++*, to build the small window-hook DLL; or copy `tools\benchhook\build\` from the benchmark kit of the same
+release) and about 1 GB of disk space. Download this repository (*Code* > *Download ZIP*, extract it, or `git clone`) and
+open PowerShell in its folder:
 
 ```powershell
 # 0. Each new PowerShell window: allow this folder's scripts (this window only); once after a ZIP download: unblock them.
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 Get-ChildItem -Recurse | Unblock-File
 
-# 1. Once: get the tools (UE4SS and PresentMon, pinned versions, SHA-256 checked) and build the hook.
+# 1. Once: get the tools (PresentMon pinned; UE4SS the newest official build, 1181 or newer) and build the hook.
 tools\Setup-Bench.ps1 -Check      # what's there and what's missing; changes nothing
 tools\Setup-Bench.ps1
 
@@ -34,7 +60,9 @@ tools\Bench-Report.ps1
 ```
 
 `Bench-Report.ps1` runs the benchmark alternately with every fix switched off ("stock": the DLL loaded with all its
-switches at 0, so it leaves the game's code alone) and with the fix as installed, then writes `report.md` and copies of
+switches at 0, so it leaves the game's code alone, except `FrameRateLimitAtStart`, which only makes the game apply the
+frame-rate limit you saved, a game bug with frame generation on: so both sides run at your saved cap) and with the fix
+as installed, then writes `report.md` and copies of
 the runs' `result.json` with your user name, PC name and folder paths removed. Share it in a
 [Benchmark result](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/new/choose) issue.
 
@@ -44,12 +72,13 @@ Useful options: `-Rounds 3` (more stock/fix pairs, less noise), `-Profile cpu` (
 
 ## Reproduce the numbers in the README
 Each row of the README's results table, as one command (stock vs fix, alternating, a report at the end). Profiles that
-use your monitor's resolution (`user`, `promo`, `native*`) give the README's numbers only on a 4K monitor; on another
-one they measure the same scene at your resolution.
+use your monitor's resolution (`promo`, `native*`) give the README's numbers only on a 4K monitor; on another
+one they measure the same scene at your resolution. `user` (like `own`) runs with your own settings as they are, so its
+numbers are yours, not the README's.
 
 | README row | Command | What the profile sets |
 |---|---|---|
-| Imperial City flight, 4K, frame generation, 60 fps cap | `tools\Bench-Report.ps1 -Scenario showcase -Profile user -Rounds 2` | your monitor's resolution, FSR Performance, frame generation, ray tracing, Ultra with Shadows High, 60 fps cap before frame generation |
+| Imperial City flight, 4K, frame generation, 60 fps cap | `tools\Bench-Report.ps1 -Scenario showcase -Profile native-cap60 -Rounds 2` | your monitor's resolution, FSR Performance, frame generation, ray tracing, Ultra with Shadows High, 60 fps cap before frame generation |
 | Imperial City flight, 4K, no frame generation (the video) | `tools\Bench-Report.ps1 -Scenario showcase -Profile promo -Rounds 2` | the same without frame generation, no cap |
 | Cheydinhal flight, 4K, no frame generation | `tools\Bench-Report.ps1 -Scenario cheydinhal-show -Profile promo -Rounds 2` | as above |
 | Cheydinhal streets when the CPU is the limit | `tools\Bench-Report.ps1 -Profile cpu -Rounds 2` | 1280x720 window, FSR Performance, no frame generation |
@@ -67,6 +96,7 @@ Every scenario is a file in `bench/scenarios/`; `tools\Run-Benchmark.ps1 -List` 
 | Scenario | What it is | Scenes | Good for |
 |---|---|---|---|
 | `cheydinhal` (default) | canal and chapel square at noon, dusk, night and in rain, inn and chapel interiors, three doors and the city gate both ways, a ride and a walk out of town | 15, ~10 min | the CPU-limited town, door hitches |
+| `gpu-check` | the pond by Fort Doublecross north-east of Leyawiin in the rain, late afternoon, 30 s, profile `own` (the kit's `Check-GPU.cmd`) | 1, ~1 min | is the graphics card or the CPU the limit at your settings? |
 | **`showcase`** | **the Imperial City flight**: up the Niben under the stone bridge, once round the Imperial City island over Lake Rumare at golden hour, a climb for a panorama; 111 s, timed to the main theme | 1, ~2 min | watching, before/after at your own settings, streaming at speed |
 | **`cheydinhal-show`** | **the Cheydinhal flight**: over the treetops to the west gate, through the town (main street, both covered bridges, the isle, the chapel square) and into the chapel; 115 s in three scenes, timed to the town music | 3, ~2 min | watching; the CPU-limited town in motion, where the fix shows most |
 | `world` | flights over the Niben and near Leyawiin, a dungeon exit, Kvatch's Oblivion plane, the Shivering Isles | 13, ~9 min | open world, GPU-heavy places |
@@ -88,6 +118,7 @@ tools\Bench-Report.ps1 -Scenario silver-road -Rounds 3               # travel st
 ```
 
 ## Watch the flights
+In the benchmark kit: `Benchmark.cmd` shows the Imperial City flight on screen, stock and fix. From the repository:
 ```powershell
 tools\Run-Benchmark.ps1 -Label look -Scenario showcase -Watch          # the Imperial City flight
 tools\Run-Benchmark.ps1 -Label look -Scenario cheydinhal-show -Watch   # the Cheydinhal flight
@@ -139,7 +170,11 @@ next run starts in seconds; it closes by itself after 20 idle minutes.
   attacks it; characters among themselves behave as usual).
 - Unless you watch, it changes the game's display settings for the run and **puts your settings, config files,
   `OblivionPerfFix.ini` and autosaves back** when the game closes.
-- If the game crashes or hangs, it keeps the evidence in the run folder, restarts the game and carries on.
+- If the game crashes or hangs, it keeps the evidence in the run folder, restarts the game and carries on; such a run
+  is marked not comparable (`comparable=no` in its last line, a warning in the report): repeat it before comparing.
+- **To stop a run, use `tools\Run-Benchmark.ps1 -Stop`** (it ends after the current scene and closes or parks the game
+  properly), not Task Manager or `Stop-Process`. If the runner is killed anyway, a small hidden guard it started keeps
+  its game hidden and muted and closes it cleanly; a game you start yourself is never touched.
 - **Don't minimise the game or play it during a run.** The game crashes when it is restored after loading while
   minimised (a game bug), and your input would change the results.
 - **Achievements:** the benchmark uses console commands (teleport, time, weather), which the game counts against
@@ -155,8 +190,9 @@ settings in effect and `OblivionPerfFix.log`), frame logs, screenshots and frame
   the time until the new place is playable.
 - **worst ms, hitches, hitch ms:** the slowest frame, the number of hitches and the time they took; for flights and
   walks this is the stutter while travelling.
-- **Noise:** two identical runs differ by up to about 10% (NPCs move, weather changes). Compare alternating runs
-  (`Bench-Report.ps1` does), and treat differences under 5% as noise.
+- **Noise:** two identical runs differ by up to about 10% (NPCs move; with `-NoPin` the weather differs too). Compare
+  alternating runs (`Bench-Report.ps1` does), treat differences under 5% as noise, and check a scene's spread with
+  `tools\Repro-Check.ps1` ([mini-scenarios](#identical-runs--pin-and-toolsrepro-checkps1)).
 - **The first 2-3 minutes after a game start are slower** (the game compiles graphics pipelines in the background);
   the runner waits for that before measuring.
 - **Frame generation:** frame times are presented frames, generated ones included.
@@ -183,17 +219,65 @@ its mod into the game folder just before it starts its own game, and takes them 
 you start the game from Steam to play, UE4SS is not loaded. A UE4SS or another `dwmapi.dll` mod you installed yourself is
 set aside during the run and put back afterwards.
 
-**Which UE4SS:** `UE4SS_v3.0.1-1161-g6eb3d9bc-oblvfix1.zip`, the upstream experimental build 3.0.1-1161 with a one-line
-fix for a memory leak: every Lua call of a game function with an 'Out' parameter kept its table in memory for good
-(about 1 GB per hour for a mod that does it every frame; upstream issue
-[#1446](https://github.com/UE4SS-RE/RE-UE4SS/issues/1446), fix offered as
-[pull request #1452](https://github.com/UE4SS-RE/RE-UE4SS/pull/1452)). Setup downloads it from this repository's
-[`bench-tools-v1` release](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/releases/tag/bench-tools-v1) and
-checks its SHA-256 (`C605C22AA02601CE5A98C6824FEB4BE88A286CB63A341EE976E024BB29549E84`). How it was built, and how to
-rebuild it: [`tools/ue4ss-build/`](../tools/ue4ss-build/README.md). If setup can't download it, download the file
-yourself and leave it in your Downloads folder or pass it with `tools\Setup-Bench.ps1 -UE4SSZip <path>`; the hash is
-checked either way. Another UE4SS build works with `-AllowOtherUE4SS`, but is untested (and upstream builds up to at
-least 1161 have the leak): say so when you share results.
+**Which UE4SS:** the official experimental build from the UE4SS project, build 1181 or newer: the first with the fix
+for a memory leak the benchmark would otherwise hit (every Lua call of a game function with an 'Out' parameter kept its
+table in memory for good, about 1 GB per hour for a mod that does it every frame; upstream issue
+[#1446](https://github.com/UE4SS-RE/RE-UE4SS/issues/1446), fixed by
+[pull request #1452](https://github.com/UE4SS-RE/RE-UE4SS/pull/1452)). Upstream keeps only the newest build on its
+[`experimental-latest` release](https://github.com/UE4SS-RE/RE-UE4SS/releases/tag/experimental-latest) and replaces the
+file with each new one, so setup takes the newest `UE4SS_v3.0.1-<build>-g<commit>.zip` there (never the `zDEV-` one),
+checks it against the SHA-256 GitHub lists for it, and records build and SHA-256 in `third_party\ue4ss\oblvbench-build.txt`;
+the report shows them. The benchmark was tested with `UE4SS_v3.0.1-1181-g83330635.zip` (SHA-256
+`B9A166A756605B21058A64CDE93BCAAB1A855DBA3553E5C7E6CE0FA8FDFAD7B9`): the report says "tested build" for that file and
+"newer than tested" for a later one. Once unpacked, a build is kept; `tools\Setup-Bench.ps1 -UpdateUE4SS` looks for a
+newer one. If setup can't download it, download the zip yourself and leave it in your Downloads folder or pass it with
+`-UE4SSZip <path>`. Any other build (older, or your own) needs `-AllowOtherUE4SS` and is untested: say so when you share
+results.
+
+## Mini-scenarios: iterate on one problem spot
+Full scenarios are for confirming; while working on one problem, run a scene that reproduces just that spot in 30-60 s
+and keep the game open between runs (`-Session reuse`), switching the fix's ini key between runs (A-B-B-A).
+`tools/slice_flight.py` cuts such scenes out of a timed `fly` scene, with the original's waypoints, speeds, hour, weather
+and timescale, starting a few seconds before each spot so its cells and characters load during the measured part:
+
+```
+py -3 tools\slice_flight.py --src showcase --scene rumare-loop-flight --out my-spots --spot waterfront:23.9:26.5:"the Waterfront"
+.\tools\Run-Benchmark.ps1 -Scenario my-spots -Scenes waterfront -Runs 2
+```
+
+Spot times are seconds into the full flight (the plots' time axis). Check once that the slice shows the problem before
+you iterate on it. Runs are made comparable by default (pinned conditions, a fixed random seed: below); start each pass from a fresh
+world (the default), and note what still differs between runs (characters' behaviour, GPU state).
+
+### Identical runs: pinned conditions, `-FixedSeed` and `tools\Repro-Check.ps1`
+Every run is pinned by default (`-NoPin` for the old behaviour): every scene gets the same conditions in every run: the weather (the scene's, else the scenario's default, else
+Clear) forced and held (the climate cannot change it), the hour (else 12) and a slow clock (`timescale` 1: one game
+minute per real minute instead of 30, so the light does not move). A scene opts out of any of them with `"keep"`, e.g.
+`"weather": "keep"` for a weather test; a run from a save keeps the save's conditions where nothing is named. A scenario
+can refuse it with `"pin": false` (a test of weather changes). With `-NoPin` only what a scene names is set: a fresh world then picks
+its own weather (overcast in one run, sunny in the next), and after a teleport the game may blend into a forced weather
+over 15 game minutes, which a short scene never finishes. In a pinned run each scene's `cond` in `result.json` (and the "Conditions"
+table in `report.md`) records what was set and what the game reported right after and at the end
+(`hour=18.251 wx=Clear:1.00`: the weather and how far its blend is).
+
+Before iterating on a new mini-scenario, check how repeatable it is:
+
+```
+.\tools\Repro-Check.ps1 -Scenario my-spots -Scenes waterfront -N 3
+.\tools\Repro-Check.ps1 -Runs a-r1,a-r2,a-r3          # runs you already made
+```
+
+It prints per scene the spread of fps, worst frame, frames >= 33 ms, hitches and Game / Render / GPU ms, how alike the
+end screenshots are (SSIM), and the conditions each run had, with a verdict (`captures\bench\_repro\<label>\repro.md`).
+A difference smaller than the spread it reports cannot be seen with that many runs. Runs whose frame log lost most of
+its frames are left out of the spread. The benchmark also starts the game with Unreal's `-FixedSeed` (`-NoFixedSeed` turns it off): the engine's random
+generators start from the same seed in every benchmark game instead of from the clock. It is passed to that launch only
+(`steam -applaunch`), never written into your Steam launch options, and `result.json` records whether it reached the
+game (`fixedSeed`). The seed is set once per game start, so only runs in a newly started game (`-Session fresh`) begin
+from the same state. Still not identical: characters' behaviour (when and where they walk
+depends on frame timing), stutter counts on flights, and the GPU's speed state. For pictures of characters, a static
+scene's `"aiHold": true` switches NPC AI off from before its spawns to its end, so they stand still for the screenshot
+(such a scene's numbers are marked `aiHeld` and are not a measurement).
 
 ## Writing scenes
 A scenario file (`bench/scenarios/<name>.json`) has `places` (a worldspace or interior cell, a position, a heading),
@@ -202,7 +286,8 @@ A scenario file (`bench/scenarios/<name>.json`) has `places` (a worldspace or in
 | Key | Meaning |
 |---|---|
 | `id`, `type`, `tags` | name, `static` / `door` / `fly` / `walk`, tags for `-Tags` |
-| `at`, `hour`, `weather` | a place from `places`, the game hour, a weather name from `weathers` |
+| `at`, `hour`, `weather` | a place from `places`, the game hour, a weather name from `weathers` (always set both: runs then see the same world) |
+| `timescale` | game minutes per real minute during the scene (game default 30; a low value such as 1 holds the light) |
 | `settle`, `measure`, `hold` | seconds to wait before measuring, to measure, and to stay after a door |
 | `visual` | `true`: also capture a frozen reference image for image comparisons |
 | `enter`, `exit` or `legs` | `door` scenes: the door reference IDs to use (as the console shows them) |

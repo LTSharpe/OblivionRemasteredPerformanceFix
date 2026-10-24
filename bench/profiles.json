@@ -42,7 +42,11 @@
     "res": "native", "mode": "borderless", "upscaler": "fsr", "fsrQuality": 3, "fg": 1, "rt": 1, "qualityOptions": { "ShadowQuality": 2 }
   },
   "user": {
-    "description": "The test PC's own play settings (2026-10-06): the monitor's resolution borderless, FSR performance, frame generation on, ray tracing on, Shadows High (the rest Ultra), frame rate capped at 60 before frame generation (t.MaxFPS 60; every other profile runs uncapped)",
+    "description": "How the player plays: their own settings as they are, like own (resolution, window mode, upscaler, quality, frame cap: nothing is changed). Since 2026-10-22; until then it was what native-cap60 is now. Results depend on the player's settings (recorded per run)",
+    "own": true
+  },
+  "native-cap60": {
+    "description": "Fixed 4K play settings (what -Profile user ran until 2026-10-22): the monitor's resolution borderless, FSR performance, frame generation on, ray tracing on, Shadows High (the rest Ultra), frame rate capped at 60 before frame generation (t.MaxFPS 60; every other fixed profile runs uncapped)",
     "res": "native", "mode": "borderless", "upscaler": "fsr", "fsrQuality": 3, "fg": 1, "rt": 1, "qualityOptions": { "ShadowQuality": 2 }, "cvars": { "t.MaxFPS": 60 }
   },
   "promo": {

@@ -1,0 +1,82 @@
+{
+  "name": "gpu-check",
+  "description": "Graphics-card check (Check-GPU.cmd in the benchmark kit): from a new game (no save), the view of Fort Doublecross across the small pond north-east of Leyawiin, late afternoon, rain forced: willows, grass, water and rain, little for the CPU to do. One static scene, 30 s measured, at the player's own settings (profile own). Tells whether the graphics card or the CPU sets the frame rate there. Not part of full; select with -Scenario gpu-check.",
+  "profile": "own",
+  "settings": {},
+  "record": [
+    "r.ScreenPercentage",
+    "Altar.UpscalingMethod",
+    "Altar.FSR3.Quality",
+    "r.FidelityFX.FSR3.QualityMode",
+    "r.FidelityFX.FI.Enabled",
+    "r.VSync",
+    "Altar.GraphicsOptions.VSync",
+    "Altar.GraphicsOptions.FrameRateLimit",
+    "Altar.GraphicsOptions.Brightness",
+    "Altar.GraphicsOptions.HDR",
+    "t.MaxFPS",
+    "sg.ViewDistanceQuality",
+    "sg.ShadowQuality",
+    "sg.GlobalIlluminationQuality",
+    "sg.ReflectionQuality",
+    "sg.PostProcessQuality",
+    "sg.TextureQuality",
+    "sg.EffectsQuality",
+    "sg.FoliageQuality",
+    "sg.ShadingQuality",
+    "r.Lumen.HardwareRayTracing",
+    "r.Lumen.HardwareRayTracing.LightingMode",
+    "r.RayTracing.Culling.Radius",
+    "r.Streaming.PoolSize",
+    "Altar.SaveOnLoading",
+    "Altar.SaveOnFastTravel"
+  ],
+  "masks": [
+    [
+      0.94,
+      0.0,
+      0.06,
+      0.035
+    ]
+  ],
+  "defaults": {
+    "hour": 16.84,
+    "settle": 10,
+    "measure": 30,
+    "hold": 12
+  },
+  "weathers": {
+    "Rain": "00038EF2",
+    "Fog": "00038EEF",
+    "Clear": "00038EEE"
+  },
+  "places": {
+    "doublecross-forest": {
+      "world": "Tamriel",
+      "pos": [
+        117567.2,
+        -120309.2,
+        3154.6
+      ],
+      "heading": 350.2,
+      "pitch": -0.6
+    }
+  },
+  "scenes": [
+    {
+      "id": "doublecross-pond-rain",
+      "type": "static",
+      "at": "doublecross-forest",
+      "weather": "Rain",
+      "visual": false,
+      "comment": "The pond by Fort Doublecross in the rain (same view as leyawiin-forest's leyawiin-forest-rain): GPU-heavy foliage, water and weather; 10 s to settle, 30 s measured",
+      "tags": [
+        "outdoor",
+        "weather",
+        "foliage",
+        "water",
+        "gpu"
+      ]
+    }
+  ]
+}

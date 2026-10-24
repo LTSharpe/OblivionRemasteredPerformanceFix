@@ -55,8 +55,12 @@ param(
     [ValidateSet('auto', 'park', 'close', 'keep')][string]$After = 'auto',
     [switch]$Close,                                      # close the game left open by earlier runs, restore saves and config
     [switch]$Park,                                       # put the running benchmark game at the main menu and exit
+    [switch]$Stop,                                       # ask the runner that holds the game (or -StopPid) to stop after its current scene; later runs in that process refuse to start. Never Stop-Process a runner or a chain
+    [int]$StopPid = 0,                                   # -Stop: the runner (or chain) process to stop; default: the one in game.lock / bench-status.json
+    [string]$StopReason = '',                            # -Stop: why (shown in that run's warnings)
     [switch]$NoSpectate,                                 # use the game's own camera and HUD (default: spectator mode)
     [switch]$KeepWorld,                                  # do not start a fresh world for each pass when the game is already in one
+    [switch]$MenuReturn,                                 # frame-generation profiles: go back to the main menu for a fresh world anyway (it can hang there, so by default such a game is restarted instead)
     [int]$MaxRestarts = 2,                               # game restarts after a crash or hang per pass before giving up
     [double]$MaxMinutes = 0,                             # time limit for one run (0: from the scene estimate)
     [double]$MaxSessionMin = 60,                         # -Session auto restarts a game older than this (UE4SS's Lua bindings add ~1 GB/h in a busy session; fps itself did not drift in 105 min, 2026-10-06)
@@ -70,7 +74,16 @@ param(
     [switch]$Audible,                                    # keep the game's sound (default: muted in the volume mixer during runs; un-muted before the benchmark closes it)
     [switch]$Watch,                                      # to watch a run: -Visible -Audible and, unless -Profile is given, profile "own" (your settings as they are)
     [switch]$Record,                                     # promo: record each flight scene with OBS (tools\Obs.ps1, docs\promo-video.md) into <run>\video\: from the hover in black to after the fade-out
+    [switch]$Pin,                                        # the same conditions in every run: weather (scene -> scenario default -> Clear) held with the weather override, hour (-> 12), timescale (-> 1); a scene opts out with "keep". On by default since 2026-10-20 (user); a scenario's "pin": false turns it off (docs\benchmark.md "Identical runs")
+    [switch]$NoPin,                                      # the old behaviour: only what a scene names is set (same as -Pin:$false)
+    [switch]$NoFixedSeed,                                # launch the game without UE's -FixedSeed (on by default since 2026-10-20: the engine's random generators start from the same seed in every benchmark game; passed to this launch only, never to the player's own Steam launch options)
     [switch]$SkipPsoWait,                                # lab only: do not wait for the game's PSO precompile after a launch (to measure what it costs)
+    [switch]$NoWarmup,                                   # lab only: start the scenes without the shader warm-up wait (driver compilation quiet) either (start-up measurements, 2026-10-23)
+    [double]$MenuHoldSec = 0,                            # lab only: after a launch, stay this long at the main menu before entering the world (a player looking at the menu while the precompile runs)
+    [switch]$MenuPsoWait,                                # after a launch, wait at the main menu (hidden) until the game's start-up PSO precompile has finished (at most 6 min), then enter the world: the scenes start in the same state with or without the fix, with no warm-up scene (the benchmark kit, 2026-10-24)
+    [int]$StallSec = 0,                                  # lab only: the watchdog ends a game whose frame counter stood still this long (0 = its default, 30 s); the window-not-responding limit (20 s) is raised with it; e.g. 150 to let a cold-cache start-up stall or UE's own 120 s render-thread timeout play out
+    [int]$CpuLimit = 0,                                  # lab only: act as an N-core CPU without SMT: the game runs in a Job object limited to N logical processors (one per physical core) from its start, and -corelimit=N -physicalcorelimit=N size UE's thread pools for N (0 = off)
+    [string[]]$ExtraGameArgs = @(),                      # lab only: more game command-line arguments for this launch (e.g. '-corelimit=8', '-physicalcorelimit=4' to act as a smaller CPU)
     [switch]$SelfTest                                    # passive 15 s capture of the running game: checks PresentMon, sampler, analysis and report without sending it anything
 )
 
@@ -89,7 +102,7 @@ $saveDir = Join-Path $script:GameSaved 'SaveGames'
 $guardDir = Join-Path $script:BenchRun 'save-guard'
 $fixIniPath = Join-Path $script:GameWin64 'OblivionPerfFix.ini'
 $idlePidFile = Join-Path $script:BenchRun 'bench-idle.pid'
-if (-not ($List -or $Close -or $Park) -and -not (Test-Path $presentMon)) { throw "PresentMon not found at $presentMon (run tools\Setup-Bench.ps1 first)" }
+if (-not ($List -or $Close -or $Park -or $Stop) -and -not (Test-Path $presentMon)) { throw "PresentMon not found at $presentMon (run tools\Setup-Bench.ps1 first)" }
 
 # Plain strings from a file another process holds open for writing (Get-Content would also do, but its
 # strings carry provider properties that ConvertTo-Json serialises)
@@ -107,6 +120,14 @@ function Opt($obj, [string]$name, $default) { if ($obj -and $obj.PSObject.Proper
 if (-not $Start) { $Start = Opt $scn 'start' 'fresh' }
 if ($Watch) { $Visible = [switch]$true; $Audible = [switch]$true; if (-not $Profile) { $Profile = 'own' } }
 if (-not $Profile) { $Profile = Opt $scn 'profile' 'small' }
+# -Pin (2026-10-20, benchrepro): on by default (user, 2026-10-20); -NoPin or -Pin:$false turn it off
+$pinOn = if ($NoPin) { $false } elseif ($PSBoundParameters.ContainsKey('Pin')) { [bool]$Pin } else { [bool](Opt $scn 'pin' $true) }
+# UE's -FixedSeed on the game's command line for benchmark launches (FMath::RandInit / SRandInit from 0 instead of the clock)
+$script:GameLaunchArgs = if ($NoFixedSeed) { @() } else { @('-FixedSeed') }
+$script:GameLaunchArgs = @($script:GameLaunchArgs) + @($ExtraGameArgs | Where-Object { $_ })
+if ($CpuLimit -gt 0) { $script:GameLaunchArgs = @($script:GameLaunchArgs) + @("-corelimit=$CpuLimit", "-physicalcorelimit=$CpuLimit") }
+# a scenario that tests weather changes themselves says "pin": false; that wins over -Pin
+if ($pinOn -and $scn.PSObject.Properties['pin'] -and -not [bool]$scn.pin) { $pinOn = $false; $script:pinRefused = $true }
 function Rnd($v, [int]$digits = 1) { if ($null -eq $v -or [double]::IsNaN([double]$v) -or [double]::IsInfinity([double]$v)) { 0 } else { [math]::Round([double]$v, $digits) } }
 
 # ---------------------------------------------------------------- profiles (bench\profiles.json)
@@ -125,10 +146,25 @@ function Get-ProfileDef([string]$name) {
     $p.Value
 }
 $prof = Get-ProfileDef $Profile
+# A hidden game with frame generation on hangs on its way back to the main menu (known problem; 2026-10-20 npcslice:
+# 4 of 4 returns after ic-waterfront-pass at -Profile user): for a fresh world it is restarted instead, and it is
+# closed rather than parked at the end. -MenuReturn keeps the old way, -KeepWorld needs no menu at all.
 
 $script:nativeRes = $null
-# A profile with "own": true changes no display or graphics setting (the player's own, for -Watch).
+# A profile with "own": true changes no display or graphics setting (the player's own, for -Watch and `user`).
 function Test-OwnProfile($p) { [bool](Opt $p 'own' $false) }
+
+# A profile that sets the options decides by its own "fg"; one with the player's settings ("own") by the game's live
+# frame generation setting, read when the decision is made (no game or no answer: assume the risk, restart/close is safe).
+function Test-FgMenuRisk {
+    if ($MenuReturn) { return $false }
+    if (-not (Test-OwnProfile $prof)) { return (Opt $prof 'upscaler' 'fsr') -eq 'fsr' -and [int](Opt $prof 'fg' 0) -eq 1 }
+    if (-not (Get-Game)) { return $true }
+    $v = (Send-Bench 'get r.FidelityFX.FI.Enabled' -NoThrow) -replace '^.*=', ''
+    $d = 0.0
+    if (-not [double]::TryParse([string]$v, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$d)) { return $true }
+    $d -ge 1
+}
 
 function Get-ProfileRes($p) {
     if (Test-OwnProfile $p) { return 'own' }
@@ -395,12 +431,13 @@ function Get-SessionState($game) {
         $st = Get-Content $sessionFile -Raw | ConvertFrom-Json
         if ($st.key -eq $key) {
             $st.spawned = @($st.spawned)
-            foreach ($k in 'fingerprint', 'launchedAt', 'runs', 'parked', 'lastActivity', 'capBeforePark') { if (-not $st.PSObject.Properties[$k]) { $st | Add-Member NoteProperty $k $null } }
+            foreach ($k in 'fingerprint', 'launchedAt', 'runs', 'parked', 'lastActivity', 'capBeforePark', 'profileApplied') { if (-not $st.PSObject.Properties[$k]) { $st | Add-Member NoteProperty $k $null } }
             return $st
         }
     }
     [pscustomobject]@{ key = $key; initialized = $false; detectOff = $false; aiOff = $false; spawned = @()
-                       fingerprint = $null; launchedAt = $null; runs = 0; parked = $false; lastActivity = $null; capBeforePark = $null }
+                       fingerprint = $null; launchedAt = $null; runs = 0; parked = $false; lastActivity = $null; capBeforePark = $null
+                       profileApplied = $null }
 }
 function Save-SessionState($state) { $state | ConvertTo-Json -Depth 4 | Set-Content $sessionFile -Encoding utf8 }
 
@@ -438,6 +475,8 @@ function Get-LaunchFingerprint {
         benchHook = Get-TextHash ([IO.File]::ReadAllText((Join-Path $root 'tools\benchhook\BenchHook.cpp')))
         # the UE4SS build Start-Game would enable (a running game has the one from its launch in the game folder)
         ue4ss = Get-FileStamp (Join-Path $(if ($env:OBLIVION_UE4SS_DIR) { $env:OBLIVION_UE4SS_DIR } else { Join-Path $root 'third_party\ue4ss' }) 'ue4ss\UE4SS.dll')
+        # the game's own command-line arguments (-FixedSeed): only a new launch changes them
+        launchArgs = ($script:GameLaunchArgs -join ' ')
     }
 }
 
@@ -468,6 +507,7 @@ function Get-RestartReason($game) {
     }
     $hb = [OblvBench.GameWatch]::HeartbeatAge
     if ($hb -gt 10) { return ("no game frame for {0:N0} s" -f $hb) }
+    if ((Test-FgMenuRisk) -and -not $KeepWorld -and (Get-GamePlace) -eq 'world') { return 'a fresh world at a frame-generation profile: the way back to the main menu can hang there (known problem), so the game is restarted (-KeepWorld keeps the world, -MenuReturn goes back to the menu anyway)' }
     $null
 }
 
@@ -517,8 +557,18 @@ function Start-BenchGame([string]$why) {
     }
     $game = $null
     for ($try = 1; -not $game; $try++) {
-        try { $game = Start-Game -Unobtrusive:(-not $Visible) -Audible:$Audible }
+        $cpuMask = [uint64]0
+        if ($StallSec -gt 0) { [OblvBench.GameWatch]::StallSec = $StallSec; [OblvBench.GameWatch]::HungSec = [math]::Max(20, $StallSec) }
+        if ($CpuLimit -gt 0) {
+            if (-not ('OblvBench.CpuLimitJob' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'CpuLimitJob.cs') }
+            $cpuMask = [OblvBench.CpuLimitJob]::MaskForCores($CpuLimit)
+            if (-not $cpuMask) { throw "-CpuLimit $CpuLimit is more than this PC's physical cores" }
+            # below the minimum spec (6 cores) the game shows "Thank you for installing ..." at start-up: answered with OK, as a player would
+            if ($CpuLimit -lt 6) { [OblvBench.GameWatch]::AcceptBoxPrefix = 'Thank you for installing'; [OblvBench.GameWatch]::AcceptedBoxes = 0; [OblvBench.GameWatch]::AcceptLog = '' }
+        }
+        try { $game = Start-Game -Unobtrusive:(-not $Visible) -Audible:$Audible -GameArgs $script:GameLaunchArgs -CpuMask $cpuMask }
         catch {
+            if ($CpuLimit -gt 0 -and $CpuLimit -lt 6) { Step "minimum-spec box: answered $([OblvBench.GameWatch]::AcceptedBoxes) time(s) $([OblvBench.GameWatch]::AcceptLog)" }
             if ($try -ge 2 -or "$_" -match '^(NEEDSUSER|DEADLINE)') { throw }
             Step "start failed ($_), trying once more"
             [OblvBench.GameWatch]::Dismiss() | ForEach-Object { Step "dismissed: $_" }
@@ -527,11 +577,19 @@ function Start-BenchGame([string]$why) {
         }
     }
     $script:launchMs = Get-QpcMs
+    if ($CpuLimit -gt 0 -and $CpuLimit -lt 6) { Step "minimum-spec box: answered $([OblvBench.GameWatch]::AcceptedBoxes) time(s) $([OblvBench.GameWatch]::AcceptLog)" }
+    # did the arguments reach the game? (Steam adds the player's own launch options; the shipping exe gets them from the stub)
+    $script:gameCmdLine = try { "$((Get-CimInstance Win32_Process -Filter "ProcessId=$($game.Id)").CommandLine)" } catch { '' }
+    foreach ($a in $script:GameLaunchArgs) {
+        if ($script:gameCmdLine -notmatch "(^|\s)$([regex]::Escape($a))(\s|$)") { Write-Warning "$a did not reach the game (its command line: $($script:gameCmdLine))"; $script:launchArgMissing = $a }
+    }
+    if ($script:GameLaunchArgs.Count) { Step "game command line: $(($script:gameCmdLine -replace '^\s*("[^"]*"|\S+)\s*', '').Trim())" }
     $state = Get-SessionState $game
     $state.fingerprint = Get-LaunchFingerprint; $state.launchedAt = (Get-Date).ToString('s'); $state.runs = 0
     Save-SessionState $state
     Step 'waiting for the main menu (skipping the start-up videos and the title screen)'
     Wait-MainMenu
+    if ($Visible) { Step (Set-GameForeground) }          # a game started by Steam may come up behind the console
     $game
 }
 
@@ -632,6 +690,12 @@ function Invoke-Recovery([string]$runDir, [int]$n, [string]$problem, [datetime]$
     $notes.Add("problem: $problem")
     foreach ($l in [OblvBench.GameWatch]::TakeLog()) { $notes.Add("watch: $l") }
     $crashMsg = $null
+    # Lab FullCrashDump: the crashed game waits in UE's crash handling while OblivionPerfFix-dumpwriter.exe writes its
+    # full memory dump (UE's minidump file stays open until then): let it finish before copying and ending the game.
+    # Since 2026-10-20 (npcpromo) also before the writer exists: the memory snapshot before it can take ~20 s at 4K, and
+    # a run that checked only for the writer copied too early and failed, after which the next run ended the game under it.
+    $w = Wait-LabCrashDump
+    if ($w) { $notes.Add($w); Step $w }
     # UE's crash report folder of this game process (crash context, minidump, breadcrumbs: about 1 MB)
     $crashes = Join-Path $script:GameSaved 'Crashes'
     $wait = [Diagnostics.Stopwatch]::StartNew()
@@ -640,7 +704,14 @@ function Invoke-Recovery([string]$runDir, [int]$n, [string]$problem, [datetime]$
         if (-not $cr -and $problem -match 'crash') { Start-Sleep -Milliseconds 500 }
     } while (-not $cr -and $problem -match 'crash' -and $wait.Elapsed.TotalSeconds -lt 10)
     if ($cr) {
-        Copy-Item -LiteralPath $cr.FullName -Destination $dir -Recurse -Force
+        # file by file with shared reads: a file the game still holds open must not fail the run (2026-10-20)
+        $crDir = Join-Path $dir $cr.Name
+        New-Item -ItemType Directory -Force $crDir | Out-Null
+        foreach ($f in Get-ChildItem -LiteralPath $cr.FullName -File -Recurse -ErrorAction SilentlyContinue) {
+            $to = Join-Path $crDir $f.FullName.Substring($cr.FullName.Length).TrimStart('\')
+            New-Item -ItemType Directory -Force (Split-Path $to) | Out-Null
+            if (-not (Copy-SharedFile $f.FullName $to)) { $notes.Add("could not copy $($f.Name) (in use)") }
+        }
         $ctx = Join-Path $cr.FullName 'CrashContext.runtime-xml'
         if ((Test-Path $ctx) -and ((Get-Content $ctx -Raw) -match '<ErrorMessage>([^<]*)</ErrorMessage>')) {
             $crashMsg = ($Matches[1] -replace '\s+', ' ').Trim()
@@ -651,15 +722,20 @@ function Invoke-Recovery([string]$runDir, [int]$n, [string]$problem, [datetime]$
     $ue4ssLog = Join-Path $script:GameWin64 'ue4ss\UE4SS.log'
     if (Test-Path $ue4ssLog) { Read-SharedLines $ue4ssLog | Select-Object -Last 150 | Set-Content (Join-Path $dir 'UE4SS-tail.log') -Encoding utf8 }
     if (Test-Path $script:BenchLogFile) { Read-SharedLines $script:BenchLogFile | Select-Object -Last 200 | Set-Content (Join-Path $dir 'bench-tail.log') -Encoding utf8 }
+    # the DLL log (its [gpucrash] / [crash] blocks): the next game overwrites it
+    $fixLog = Join-Path $script:GameWin64 $script:FixLogName
+    if ((Test-Path $fixLog) -and -not (Copy-SharedFile $fixLog (Join-Path $dir $script:FixLogName))) { $notes.Add('could not copy the DLL log') }
     # close what the failure left on screen (crash reporter, error dialogs, AMD driver pop-ups), then the game
     foreach ($a in [OblvBench.GameWatch]::Dismiss()) { $notes.Add("dismissed: $a"); Step "dismissed: $a" }
     [OblvBench.GameWatch]::Stop()
     Update-SaveGuard
     $g = Get-Game
     if ($g) {
-        if ((Set-GameUnmuted) -gt 0) { $notes.Add('un-muted the game before ending it (Windows would remember the mute)') }   # a hung game still has its audio session
-        Stop-Process -Id $g.Id -Force -ErrorAction SilentlyContinue
-        if (-not $g.WaitForExit(20000)) { $notes.Add('the game process did not end within 20 s') }
+        # a hung game still has its audio session: never un-mute it as it is (it may still be playing); freeze it, un-mute
+        # only once it reads silence, else end it muted (2026-10-20)
+        # not $n: that is this function's [int] run number (a game that had ended by itself failed the run, 2026-10-21)
+        foreach ($sq in (Stop-GameQuietly $g)) { $notes.Add($sq) }
+        if (-not $g.HasExited) { $notes.Add('the game process did not end within 20 s') }
     }
     Start-Sleep -Seconds 2
     foreach ($a in [OblvBench.GameWatch]::Dismiss()) { $notes.Add("dismissed: $a"); Step "dismissed: $a" }     # a crash reporter that came up as the game ended
@@ -813,12 +889,43 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
                 Enter-MainMenu; $place = 'menu'
             }
             $freshWorld = $place -eq 'menu'
+            if ($freshWorld -and $startReason -and $MenuHoldSec -gt 0) {
+                Step "holding at the main menu for $MenuHoldSec s (-MenuHoldSec)"
+                Set-BenchStatus @{ phase = 'main menu hold' }
+                Wait-Game $MenuHoldSec
+                $session.menuHoldSec = $MenuHoldSec
+            }
+            if ($freshWorld -and $startReason -and $MenuPsoWait -and -not $SelfTest) {
+                # the precompile runs at the main menu as it would for a player waiting there (the fix's PsoPrecompileFast
+                # makes it faster); waiting here rather than in the world keeps the world's clock and streaming out of it
+                Set-BenchStatus @{ phase = 'main menu: waiting for the PSO precompile' }
+                Step "main menu: waiting for the game's PSO precompile (-MenuPsoWait)"
+                $base = 0L
+                try { $base = $game.MainModule.BaseAddress.ToInt64() } catch { }
+                $sw = [Diagnostics.Stopwatch]::StartNew(); $v = -1
+                while ($base) {
+                    $v = [OblvBench.GameFlags]::PsoPrecompiling($game.Id, $base)
+                    if ($v -le 0 -or $sw.Elapsed.TotalSeconds -ge 360) { break }
+                    Wait-Game 2
+                }
+                $session.menuPsoWaitSec = if ($v -lt 0) { -1 } else { [int]$sw.Elapsed.TotalSeconds }
+                if ($v -lt 0) { Step 'PSO precompile state not readable in this game build: not waiting at the main menu' }
+                elseif ($v -gt 0) { Warn "the game's PSO precompile still running after 360 s at the main menu: entering the world anyway" }
+                else { Step "waited $($session.menuPsoWaitSec) s at the main menu for the game's PSO precompile (-MenuPsoWait)" }
+            }
             if ($freshWorld) { $s = Enter-World } else { $s = Get-BenchState; Step 'using the world as it is (-KeepWorld)' }
             if ($script:launchMs) { $session.loadSec = Rnd (((Get-QpcMs) - $script:launchMs) / 1000) }
             Step ("in the world: {0}{1}" -f $s.level, $(if ($script:launchMs) { " ($($session.loadSec) s after launch)" }))
             Set-BenchStatus @{ game = 'world'; gamePid = $game.Id }
             if (-not $Visible) {
-                foreach ($line in Get-UnobtrusiveLog) { Step $line }
+                # a hook that came after the window of a game this run started (2026-10-20): the window may have been on
+                # screen for a moment. In a reused game the hook DLL is in it since its launch, so a re-hook finds the window up.
+                # only for this run's game: the previous (parked) game is re-hooked before -Session fresh closes it, and its
+                # window is up by then (a false warning seen 2026-10-22/23)
+                foreach ($line in Get-UnobtrusiveLog) {
+                    $otherPid = $line -match '\bpid (\d+)\b' -and [int]$Matches[1] -ne $game.Id
+                    if ($session.startedGame -and -not $otherPid -and $line -match 'its window was already up|before its window came up') { Warn "late window hook: $line" } else { Step $line }
+                }
                 $session.hidden = [OblvBench.GameHider]::Stats()
                 if ([OblvBench.GameHider]::HookedPid -ne $game.Id) { Warn "the window hook is not in this game (pid $($game.Id); hook: $($session.hidden)): its window is only kept off-screen from outside" }
             }
@@ -856,7 +963,19 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
             Save-SessionState $state
             foreach ($p in $scn.settings.PSObject.Properties) { Send-Bench "cvar $($p.Name) $($p.Value)" | Out-Null }
             Step "profile $Profile`: $(Opt $prof 'description' '')"
-            Invoke-ProfileCommands (Get-ProfileCommands $prof)
+            if ($pinOn) { Step 'conditions pinned (-Pin): every scene gets its weather (held), hour and timescale' }
+            elseif ($script:pinRefused) { Warn "scenario $($scn.name) says ""pin"": false (it tests weather changes): -Pin ignored" }
+            # -KeepWorld in a game that already has this profile from an earlier run in the same world: apply only what
+            # drifted (plus the profile's own cvars). The full set switches the upscaler to TAA at 100 % and back, which at
+            # 4K with a loaded world is a large render-target reallocation: two 4K GPU hangs (DXGI_ERROR_DEVICE_HUNG, VRAM over
+            # its budget) came right at that toggle in the second reused run of a held world (2026-10-20, npcpromo).
+            $kept = $KeepWorld -and -not $freshWorld -and $state.profileApplied -eq $Profile -and $null -eq $state.capBeforePark -and $Cvars.Count -eq 0
+            if ($kept) {
+                $parts = @(@(Get-ProfileDrift $prof $hwnd) | ForEach-Object { $_.part } | Select-Object -Unique)
+                Step "profile $Profile kept from the last run in this world$(if ($parts.Count) { "; re-applied: $($parts -join ', ')" } else { '' })"
+                foreach ($partName in $parts + @('cvars')) { Invoke-ProfileCommands (Get-ProfileCommands $prof $partName) }
+            } else { Invoke-ProfileCommands (Get-ProfileCommands $prof) }
+            $state.profileApplied = $Profile; Save-SessionState $state
             # Profile "own" keeps the player's frame cap: a game parked by an earlier run gets its cap back (parking sets 30).
             # The other profiles set it themselves (0 = uncapped, or their own cvar).
             if ($null -ne $state.capBeforePark) {
@@ -1088,7 +1207,63 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
             Send-Bench ("look {0} {1}" -f $p.heading, (Opt $p 'pitch' 0)) | Out-Null
         }
 
+        # -Pin: one value per condition, scene -> scenario defaults -> the fixed default; "keep" leaves it as the world
+        # has it. A run from a save keeps the save's conditions where neither the scene nor the defaults name one.
+        function Get-PinValue($scene, [string]$key, $fallback) {
+            $v = Opt $scene $key $null
+            if ($null -eq $v) { $v = Opt $scn.defaults $key $null }
+            if ($null -eq $v) { $v = if ($Start -ne 'fresh') { 'keep' } else { $fallback } }
+            $v
+        }
+        function Get-WeatherId([string]$name, $scene) {
+            $id = Opt $scn.weathers $name $null
+            if (-not $id) { $id = @{ Clear = '00038EEE'; SEClear = '00078801' }[$name] }
+            if (-not $id) { throw "unknown weather '$name'" }
+            $id
+        }
+        function Set-PinnedConditions($scene) {
+            $c = [ordered]@{ pinned = $true }
+            $hour = Get-PinValue $scene 'hour' 12
+            if ("$hour" -ne 'keep') { Send-Bench "obv set gamehour to $hour" | Out-Null }
+            $c.hour = "$hour"
+            $ts = Get-PinValue $scene 'timescale' 1
+            if ("$ts" -ne 'keep') { Send-Bench "obv set timescale to $ts" | Out-Null; $script:timescaleSet = $true }
+            elseif ($script:timescaleSet) { Send-Bench 'obv set timescale to 30' | Out-Null; $script:timescaleSet = $false }
+            $c.timescale = "$ts"
+            # no weather named anywhere: Clear (SEClear in the Shivering Isles' worldspaces)
+            $world = "$(Opt $scene 'world' (Opt (Opt $scn.places "$($scene.at)" $null) 'world' ''))"
+            $w = Get-PinValue $scene 'weather' $(if ($world -like 'SE*') { 'SEClear' } else { 'Clear' })
+            if ("$w" -eq 'keep') {
+                if ($state.wxOverride) { Send-Bench 'obv ReleaseWeatherOverride' | Out-Null; $state | Add-Member -Force NoteProperty wxOverride $false; Save-SessionState $state }
+            } else {
+                # the 1 = override: the climate cannot change it until ReleaseWeatherOverride (checked 2026-10-20: held
+                # over 17 game hours at timescale 2000); the atmosphere tool switches within a frame
+                $id = Get-WeatherId $w $scene
+                Send-Bench "obv fw $id 1" | Out-Null
+                $state | Add-Member -Force NoteProperty wxOverride $true; Save-SessionState $state
+                # After a teleport or load, or after the hour was set back, the atmosphere tool blends into the weather
+                # over 15 game minutes (30 s at the game's timescale 30, ~15 min at timescale 1), and forcing the same
+                # weather again does not restart it; forcing another weather and then this one switches at once
+                # (2026-10-20). So: until the weather reads back fully applied, flip once through another weather.
+                Wait-Game 0.3
+                for ($try = 0; $try -lt 2; $try++) {
+                    $now = Send-Bench 'cond 0' -NoThrow
+                    if ("$now" -match '(?:^|\s)wx=([^\s,]+):(1\.00)(?:\s|$)') { break }
+                    $other = if ($id -eq '00038EEE') { '00038EF0' } else { '00038EEE' }
+                    Send-Bench "obv fw $other 1" | Out-Null; Wait-Game 0.3
+                    Send-Bench "obv fw $id 1" | Out-Null; Wait-Game 0.3
+                    $c.flipped = $try + 1
+                }
+            }
+            $c.weather = "$w"
+            Wait-Game 0.3
+            $c.atSet = Send-Bench 'cond 0' -NoThrow
+            $script:sceneCond = $c
+        }
+
         function Set-Conditions($scene) {
+            $script:sceneCond = $null
+            if ($pinOn) { Set-PinnedConditions $scene; return }
             $hour = Opt $scene 'hour' (Opt $scn.defaults 'hour' $null)
             if ($null -ne $hour) { Send-Bench "obv set gamehour to $hour" | Out-Null }     # no hour: keep the save's
             # "timescale": game minutes per real minute (game default 30). A low value holds the light (sunset) for the
@@ -1107,7 +1282,19 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
             }
         }
 
-        function Add-Segment([hashtable]$seg) { [void]$session.segments.Add($seg) }
+        # the conditions the scene had (Set-Conditions, and read back again at its end; "cond" in bench.lua)
+        function Add-Segment([hashtable]$seg) {
+            if ($script:sceneCond -and -not $SelfTest) {
+                $c = [ordered]@{}; foreach ($k in $script:sceneCond.Keys) { $c[$k] = $script:sceneCond[$k] }
+                $c.atEnd = Send-Bench 'cond' -NoThrow
+                $seg.cond = $c
+                if ($c.pinned -and "$($c.weather)" -ne 'keep' -and "$($c.atSet)" -match 'wx=(\S+)' -and "$($c.atEnd)" -match 'wx=(\S+)') {
+                    $a = ("$($c.atSet)" -replace '^.*wx=(\S+).*$', '$1'); $b = $Matches[1]
+                    if ($a -ne $b) { Warn "$($seg.id): the weather changed during the scene ($a -> $b) although it was pinned" }
+                }
+            }
+            [void]$session.segments.Add($seg)
+        }
 
         # Did the game change a pinned setting during the scene? (the mod put it back within half a second)
         function Test-Pins([string]$scene) {
@@ -1158,8 +1345,11 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
                 Send-Bench 'prep' | Out-Null
             }
             Set-BenchStatus @{ phase = 'shader warm-up' }
-            $session.quietSec = Wait-Quiet 240
-            Step "warm-up done (waited $($session.quietSec) s for shader compilation)"
+            if ($NoWarmup) { $session.quietSec = 0; Step 'no shader warm-up wait (-NoWarmup)' }
+            else {
+                $session.quietSec = Wait-Quiet 240
+                Step "warm-up done (waited $($session.quietSec) s for shader compilation)"
+            }
             if ($SkipPsoWait) {
                 # 1 = the game was still precompiling when the scenes started (measured on purpose), 0 = not, -1 = unknown
                 $session.psoRunningAtStart = try { [OblvBench.GameFlags]::PsoPrecompiling($game.Id, $game.MainModule.BaseAddress.ToInt64()) } catch { -1 }
@@ -1198,6 +1388,10 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
         $index = 0
         foreach ($scene in $sceneList) { try {
             $index++
+            if (-not $SelfTest -and ($stopReq = Get-StopRequest)) {
+                if (-not $script:stopNoted) { Warn "stop requested ($(([datetime]$stopReq.time).ToString('HH:mm:ss'))$(if ($stopReq.reason) { ": $($stopReq.reason)" })): the remaining scenes are not run"; $script:stopNoted = $true }
+                [void]$session.completed.Add($scene.id); continue
+            }
             $settle =[double](Opt $scene 'settle' $scn.defaults.settle)
             $isVisual = [bool](Opt $scene 'visual' $false)
             if ($kind -eq 'visual' -and -not $isVisual) { [void]$session.completed.Add($scene.id); continue }
@@ -1206,6 +1400,8 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
             $left = ($sceneList | Select-Object -Skip ($index - 1) | ForEach-Object { Get-SceneSeconds $_ } | Measure-Object -Sum).Sum
             Set-BenchStatus @{ phase = "$kind pass"; scene = $scene.id; sceneIndex = $index; sceneCount = $sceneList.Count; passEta = (Get-Date).AddSeconds($left).ToString('s') }
             Repair-Settings $scene.id
+            # on-screen runs: the game in front with the keyboard focus when each measured scene starts (no input is sent)
+            if ($Visible -and $kind -eq 'perf' -and -not $SelfTest) { $fgr = Set-GameForeground; if ($fgr -notmatch 'already$') { Step $fgr } }
             # a flight that fades itself in ("fadein" in its flyopt) keeps the black over its teleport and hover;
             # every other scene clears it (they show their set-up as before)
             $fadesIn = $scene.type -eq 'fly' -and "$(Opt $scene 'flyopt' '')" -match '\bfadein='
@@ -1247,8 +1443,16 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
                     Move-To $scene.at; Set-Conditions $scene
                     $spawn = @(Opt $scene 'spawn' @())
                     $detect = [bool](Opt $scene 'detect' $false)
+                    $aiHeld = $false
                     try {
                         if ($detect -and $state.detectOff) { Send-Bench 'obv tdetect' | Out-Null; $state.detectOff = $false; Save-SessionState $state }
+                        # "aiHold": true (shots only, 2026-10-20): NPC AI off from before the spawn to the end of the scene, so
+                        # the characters stand where they are for the screenshot (switched off after the spawn, a character
+                        # already walking kept walking) (`tai`, as in the visual pass). The scene's
+                        # numbers then measure a world without AI: they are marked (aiHeld) and must not be compared.
+                        if ([bool](Opt $scene 'aiHold' (Opt $scn.defaults 'aiHold' $false)) -and -not $state.aiOff) {
+                            Send-Bench 'obv tai' | Out-Null; $state.aiOff = $true; Save-SessionState $state; $aiHeld = $true
+                        }
                         if ($spawn.Count) {
                             if ($state.spawned -contains $scene.id) { Warn "$($scene.id): its actors were already spawned in this game session, so there are more of them than in a fresh run" }
                             foreach ($sp in $spawn) {
@@ -1257,12 +1461,24 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
                             }
                             $state.spawned = @($state.spawned) + $scene.id; Save-SessionState $state
                         }
+                        # "aim": "<max distance> [name part]" = stand in front of the nearest such other character and turn the
+                        # camera to its head (bench.lua `aim`), again just before the screenshot (spawned actors stand where the
+                        # old engine faces, not the camera)
+                        $aim = Opt $scene 'aim' $null
+                        if ($aim) {
+                            Wait-Game 2; $r = Send-Bench "aim $aim front" -NoThrow; if ($r) { Step "  $r" }
+                            Wait-Game 1.5; $r = Send-Bench "aim $aim" -NoThrow; if ($r) { Step "  $r" }
+                        }
                         Wait-Game $settle
                         $t0 = Get-QpcMs
                         Wait-Game ([double](Opt $scene 'measure' $scn.defaults.measure))
                         $t1 = Get-QpcMs
+                        if ($aim) {   # characters walk about: stand in front of it again, then look at its head
+                            $r = Send-Bench "aim $aim front" -NoThrow; if ($r) { Step "  $r" }
+                            Wait-Game 1.5; $r = Send-Bench "aim $aim" -NoThrow; if ($r) { Step "  $r" }; Wait-Game 0.5
+                        }
                         $endState = Get-BenchState
-                        Add-Segment @{ id = $scene.id; type = 'static'; t0 = $t0; t1 = $t1; shot = Save-Shot $scene.id; state = $endState }
+                        Add-Segment @{ id = $scene.id; type = 'static'; t0 = $t0; t1 = $t1; shot = Save-Shot $scene.id; state = $endState; aiHeld = $aiHeld }
                         # A menu or a conversation (e.g. a forced greeting) pauses much of the world: such a scene measured the menu
                         if ($endState -and ($endState.menu -eq '1' -or $endState.frozen -eq '1')) {
                             Warn "$($scene.id): a menu or conversation was open at the end of the scene (menu=$($endState.menu) frozen=$($endState.frozen)): its numbers measure the paused world, not the scene (see the shot)"
@@ -1272,6 +1488,9 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
                             if ($null -ne (Send-Bench 'obv tdetect' -NoThrow)) { $state.detectOff = $true; Save-SessionState $state }
                         }
                         if ($spawn.Count) { $script:place = $null }
+                        if ($aiHeld -and $state.aiOff) {
+                            if ($null -ne (Send-Bench 'obv tai' -NoThrow)) { $state.aiOff = $false; Save-SessionState $state }
+                        }
                     }
                 }
                 'door' {
@@ -1526,6 +1745,11 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
             Send-Bench 'freeze 0' -NoThrow | Out-Null; Send-Bench 'watch 0' -NoThrow | Out-Null; Send-Bench 'walkstop' -NoThrow | Out-Null; Send-Bench 'flystop' -NoThrow | Out-Null
         } }
         $session.current = $null
+        # -Pin: give the weather back to the climate at the end of the pass, so a later run in this game process (pinned
+        # or not) starts as without -Pin; timescale and hour go with the next world
+        if ($pinOn -and $state.PSObject.Properties['wxOverride'] -and $state.wxOverride) {
+            if ($null -ne (Send-Bench 'obv ReleaseWeatherOverride' -NoThrow)) { $state.wxOverride = $false; Save-SessionState $state }
+        }
         if ($null -ne $musicVolume -and $musicVolume -ne '') { Send-Bench "cvar Altar.Audio.MusicVolume $musicVolume" -NoThrow | Out-Null }
         if (-not $SelfTest) {
             # settings can change under us (the upscaler's render scale did): compare with the start of the pass
@@ -1582,6 +1806,9 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
                 gpuBusyMs = if ($session.frameCapture -eq 'cpu-only') { $null } else { Rnd $f.GpuBusyMs 2 }       # not measured in a CPU-side capture
                 gpuBoundPct = if ($session.frameCapture -eq 'cpu-only') { $null } else { Rnd $f.GpuBoundPct }
                 frameGen = ($wall -gt 0 -and $fgMs / $wall -gt 0.01)          # FSR frame generation ran: fps counts generated frames too
+                # on-screen runs (-Visible/-Watch): share of the measured time the game was not the foreground window (the
+                # game turns frame generation off and lowers its sound then); hidden runs: $null (never in front, by design)
+                notForegroundPct = if ($Visible -and ($fgs = $sampler.ForegroundShare($seg.t0, $seg.t1)) -ge 0) { Rnd (100 * (1 - $fgs)) 1 } else { $null }
                 threads = $threads; workerCores = Rnd ($workers / $wall) 2; driverCompileCores = Rnd ($d3d / $wall) 2; processCores = Rnd ($total / $wall) 2
                 ioReadMBps = Rnd ($sampler.IoReadMB($seg.t0, $seg.t1) / ($wall / 1000)); privateGB = Rnd ($sampler.PrivateGB($seg.t1)) 2
                 # memory state (2026-10-06): door and hitch numbers follow the PC's memory pressure (hard paging)
@@ -1596,6 +1823,7 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
             if ($f.Frames) { foreach ($u in $use) { $v = $u.CpuMs / $f.Frames; if ($v -ge 0.05) { $all[$u.Name] = Rnd $v 2 } } }
             $r.allThreads = $all
             if (-not $f.Frames) { Warn "$($seg.id): no frames in the measured time (game frozen?): the numbers of this scene are void" }
+            if ($null -ne $r.notForegroundPct -and $r.notForegroundPct -gt 2) { Warn "$($seg.id): the game was not the foreground window for $($r.notForegroundPct)% of the measured time (another window was in front; the game then turns frame generation off): not comparable" }
             if ($seg.type -eq 'door') {
                 $after = $log.Stats($seg.tA, $seg.t1)
                 $r.arrived = $seg.arrived; if ($seg.activationRetries) { $r.activationRetries = $seg.activationRetries }; $r.arriveSec = Rnd (($seg.tA - $seg.t0) / 1000) 2; $r.tAMs = Rnd $seg.tA 1
@@ -1611,6 +1839,8 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
                 $sampler.WriteWindow(($plot -replace '\.png$', '-threads.csv'), $seg.t0, $seg.t1, 10)
             }
             if ($seg.events) { $r.events = @($seg.events) }
+            if ($seg.cond) { $r.cond = $seg.cond }
+            if ($seg.aiHeld) { $r.aiHeld = $true }
             if ($seg.video) { $r.video = $seg.video }
             if ($seg.state) { $r.hour = $seg.state.hour; $r.level = $seg.state.level; $r.sub = $seg.state.sub; $r.pos = "$($seg.state.x),$($seg.state.y),$($seg.state.z)"
                 if ($null -ne $seg.state.menu) { $r.menu = $seg.state.menu }; if ($null -ne $seg.state.frozen) { $r.frozen = $seg.state.frozen } }
@@ -1699,7 +1929,8 @@ function Write-Report($result, [string]$runDir) {
         foreach ($s in $perf.scenes | Where-Object { $_.type -ne 'door' }) {
             $plot = if ($s.plot) { "[plot]($($s.plot))" } else { '' }
             $fg = if ($s.frameGen) { ' (FG)' } else { '' }
-            $md.Add("| $($s.id) | $($s.type) | $($s.fps)$fg | $($s.low1) | $($s.worstMs) | $($s.hitches) | $($s.hitchMs) | $($s.threads.GameThread.msPerFrame) | $($s.threads.RenderThread.msPerFrame) | $($s.threads.RHIThread.msPerFrame) | $($s.gpuBusyMs) | $(Get-Limiter $s) | $($s.ioReadMBps) | $plot |")
+            $held = if ($s.aiHeld) { ' (AI held: not a measurement)' } else { '' }
+            $md.Add("| $($s.id) | $($s.type)$held | $($s.fps)$fg | $($s.low1) | $($s.worstMs) | $($s.hitches) | $($s.hitchMs) | $($s.threads.GameThread.msPerFrame) | $($s.threads.RenderThread.msPerFrame) | $($s.threads.RHIThread.msPerFrame) | $($s.gpuBusyMs) | $(Get-Limiter $s) | $($s.ioReadMBps) | $plot |")
         }
         $doors = @($perf.scenes | Where-Object { $_.type -eq 'door' })
         if ($doors.Count) {
@@ -1710,6 +1941,13 @@ function Write-Report($result, [string]$runDir) {
             foreach ($s in $doors) {
                 $md.Add("| $($s.id) | $($s.arriveSec) | $($s.longestGapMs) | $($s.over100) | $($s.afterFps) | $($s.afterLow1) | $($s.afterHitches) | $($s.afterHitchMs) | $($s.afterWorstMs) | [plot]($($s.plot)) |")
             }
+        }
+        # the conditions each scene had (2026-10-20): what was set, and what the game reported right after and at the end
+        $conds = @($perf.scenes | Where-Object { $_.cond })
+        if ($conds.Count) {
+            $md.Add(''); $md.Add('## Conditions (pinned: -Pin)'); $md.Add('')
+            $md.Add('| Scene | weather set | hour set | timescale set | right after | at the end |'); $md.Add('|---|---|---|---|---|---|')
+            foreach ($s in $conds) { $md.Add("| $($s.id) | $($s.cond.weather) | $($s.cond.hour) | $($s.cond.timescale) | $($s.cond.atSet) | $($s.cond.atEnd) |") }
         }
         $md.Add(''); $md.Add("Shader warm-up wait: $($perf.quietSec) s$(if ($perf.psoWaitSec -gt 0) { ", then $($perf.psoWaitSec) s for the game's PSO precompile" } elseif ($perf.psoWaitSec -lt 0) { ' (PSO precompile state not readable)' }). Private memory at the end: $($perf.endPrivateGB) GB.")
         # memory pressure: hard paging stalls the game (idle-process frames), so door and hitch numbers depend on it
@@ -1793,6 +2031,26 @@ if ($List) {
     return
 }
 
+# ---- -Stop (2026-10-20): a graceful stop instead of Stop-Process (which once left a half-launched game on the PC
+# user's screen). The runner checks the request before every scene and before every run.
+function Get-StopRequest {
+    try {
+        if (-not (Test-Path $script:BenchStopFile)) { return $null }
+        $r = Get-Content $script:BenchStopFile -Raw | ConvertFrom-Json
+        if ([int]$r.pid -ne $PID -or ((Get-Date) - [datetime]$r.time).TotalHours -gt 12) { return $null }
+        $r
+    } catch { $null }
+}
+if ($Stop) {
+    $target = $StopPid
+    if (-not $target -and (Test-Path $script:BenchLockFile) -and ((Get-Content $script:BenchLockFile -Raw) -match 'pid=(\d+)')) { $target = [int]$Matches[1] }
+    if (-not $target -and (Test-Path $script:BenchStatusFile)) { try { $st = Get-Content $script:BenchStatusFile -Raw | ConvertFrom-Json; if ($st.state -eq 'running') { $target = [int]$st.pid } } catch {} }
+    if (-not $target -or -not (Get-Process -Id $target -ErrorAction SilentlyContinue)) { Step 'no running benchmark to stop'; exit 0 }
+    @{ pid = $target; time = (Get-Date).ToString('o'); reason = $StopReason; by = $PID } | ConvertTo-Json | Set-Content $script:BenchStopFile -Encoding utf8
+    Step "stop requested for runner pid $target$(if ($StopReason) { " ($StopReason)" }): it ends after its current scene and parks or closes the game as its -After says; later runs in that process do not start"
+    exit 0
+}
+
 if ($Close -or $Park) {
     $busy = Get-GameBusyReason
     if ($busy -and -not $Force) { throw "The game is in use ($busy). Not touching it; use -Force to override." }
@@ -1822,6 +2080,10 @@ $exitCode = 0
 
 for ($run = 1; $run -le $Runs; $run++) {
     $runLabel = if ($Runs -gt 1) { "$Label-r$run" } else { $Label }
+    if (-not $SelfTest -and ($stopReq = Get-StopRequest)) {
+        Write-Host ("BENCH-RESULT stopped {0} (stop requested {1}{2}: not started)" -f $runLabel, ([datetime]$stopReq.time).ToString('HH:mm:ss'), $(if ($stopReq.reason) { ", $($stopReq.reason)" }))
+        $exitCode = 3; break
+    }
     $busy = if ($SelfTest) { $null } else { Get-GameBusyReason }
     if ($busy -and -not $Force) { throw "The game is in use ($busy). Not starting; use -Force to override." }
     $runDir = Join-Path $root ('captures\bench\{0}-{1}' -f (Get-Date -Format 'yyyyMMdd-HHmmss'), $runLabel)
@@ -1835,6 +2097,12 @@ for ($run = 1; $run -le $Runs; $run++) {
                        deadline = (Get-Date).AddMinutes($limit).ToString('s'); scenario = $scn.name; profile = $Profile; passes = ($passes -join ','); restarts = 0 }
     $result = $null; $outcome = 'failed'; $gameLeft = 'unknown'
     if (-not $SelfTest) { Lock-Game "benchmark $runLabel"; Stop-IdleWatcher }
+    # dead-man switch: if this process dies holding the game (killed mid-launch or mid-scene), tools\Runner-Guard.ps1
+    # keeps its game hidden and muted and closes it cleanly
+    if (-not $SelfTest -and -not $Visible) { Start-RunnerGuard -Audible:$Audible }
+    # on-screen runs that close their game at the end (the kit: -Watch -Session fresh): a guard that, if this runner is
+    # stopped (Ctrl+C, console window closed), closes its game and restores config, saves and UE4SS (nothing hidden)
+    if (-not $SelfTest -and $Visible -and ($Session -eq 'fresh' -or $After -eq 'close')) { Start-RunnerGuard -Audible:$Audible -Visible }
     if (-not $SelfTest -and -not $Visible) { Start-Unobtrusive -Audible:$Audible -Capturable:$Record }   # also hides (and mutes) a game parked by an earlier run
     try {
         $script:BenchDeadline = (Get-Date).AddMinutes($limit)
@@ -1877,9 +2145,10 @@ for ($run = 1; $run -le $Runs; $run++) {
             system = [ordered]@{ cpu = (Get-CimInstance Win32_Processor | Select-Object -First 1).Name.Trim(); gpu = $gpu.Name; gpuDriver = $gpu.DriverVersion }
             sessions = @()
         }
+        if ($pinOn) { $result.pinned = $true }        # -Pin (else absent, as before)
         $sessions = @()
         foreach ($kind in $passes) {
-            $reason = if ($SelfTest) { $null } elseif ($kind -eq $passes[0]) { $startReason } elseif ($Session -eq 'fresh') { 'a fresh session for each pass (-Session fresh)' } elseif (-not (Get-Game)) { 'no game running' } else { $null }
+            $reason = if ($SelfTest) { $null } elseif ($kind -eq $passes[0]) { $startReason } elseif ($Session -eq 'fresh') { 'a fresh session for each pass (-Session fresh)' } elseif (-not (Get-Game)) { 'no game running' } elseif ((Test-FgMenuRisk) -and -not $KeepWorld) { 'a fresh world at a frame-generation profile (the main-menu return can hang there): restarting the game' } else { $null }
             $s = Invoke-Pass $kind $runDir $sceneList $reason
             $sessions += , $s
             if ($s.deadline -or $s.needsUser) { break }
@@ -1890,6 +2159,13 @@ for ($run = 1; $run -le $Runs; $run++) {
         # runs only after the result is written). .NET read: strings from Get-Content carry provider properties that
         # ConvertTo-Json would serialise.
         if (Test-Path -LiteralPath $fixIniPath) { $result.perfFix.ini = @(Read-SharedLines $fixIniPath | Where-Object { $_ -match '^\s*\w+\s*=' }) }
+        # the game's command-line arguments as the game process has them (-FixedSeed since 2026-10-20)
+        if (-not $SelfTest -and ($gNow = Get-Game)) {
+            $cl = try { "$((Get-CimInstance Win32_Process -Filter "ProcessId=$($gNow.Id)").CommandLine)" } catch { '' }
+            $result.fixedSeed = $cl -match '(^|\s)-FixedSeed(\s|$)'
+            if ($CpuLimit -gt 0) { $result.cpuLimit = [ordered]@{ logical = $CpuLimit; launch = "$script:CpuLimitReport"; minSpecBoxesAnswered = [OblvBench.GameWatch]::AcceptedBoxes; minSpecBoxLog = [OblvBench.GameWatch]::AcceptLog } }
+            if ($script:GameLaunchArgs -contains '-FixedSeed' -and -not $result.fixedSeed -and $sessions.Count) { [void]$sessions[0].warnings.Add("-FixedSeed is not on the game's command line ($cl): its random generators were seeded from the clock") }
+        }
         $result | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $runDir 'result.json') -Encoding utf8
         Write-Report $result $runDir | Out-Host
         # ok: every pass ran to its end and no scene failed; partial: some results; failed: none
@@ -1897,6 +2173,16 @@ for ($run = 1; $run -le $Runs; $run++) {
         $failedScenes = @($sessions | ForEach-Object { $_.warnings } | Where-Object { $_ -match '^(scene \S+ (failed|skipped)|gave up)|: no frames in the measured time' }).Count
         $stopped = @($sessions | Where-Object { $_.error }).Count
         $outcome = if (-not $measured) { 'failed' } elseif ($failedScenes -or $stopped -or $sessions.Count -lt $passes.Count) { 'partial' } else { 'ok' }
+        # a restart inside the run (2026-10-20): the scenes after it ran in a new game process (cold caches, shader and
+        # PSO state, another world): such a run is not comparable with runs that had none
+        if ($script:restartCount -gt 0) {
+            $result.comparable = $false
+            $msg = "the game was restarted $($script:restartCount) time(s) during this run: NOT COMPARABLE with runs without a restart (the scenes after it ran in a new game process)"
+            if ($sessions.Count) { [void]$sessions[0].warnings.Add($msg) }
+            $result | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $runDir 'result.json') -Encoding utf8
+            Write-Report $result $runDir | Out-Null
+            Write-Warning $msg
+        }
         Step "results: $runDir"
     }
     catch {
@@ -1915,7 +2201,7 @@ for ($run = 1; $run -le $Runs; $run++) {
                 if ($policy -eq 'auto') {
                     $age = if ($g) { ((Get-Date) - $g.StartTime).TotalMinutes } else { 0 }
                     $sick = [OblvBench.GameWatch]::Running -and [OblvBench.GameWatch]::Problem
-                    $policy = if (-not $g) { 'close' } elseif ($Session -eq 'fresh') { 'close' } elseif ($sick) { 'close' } elseif ($age -gt $MaxSessionMin) { 'close' } elseif ($run -lt $Runs) { 'keep' } else { 'park' }
+                    $policy = if (-not $g) { 'close' } elseif ($Session -eq 'fresh') { 'close' } elseif ($sick) { 'close' } elseif ($age -gt $MaxSessionMin) { 'close' } elseif ($run -lt $Runs) { 'keep' } elseif ((Test-FgMenuRisk)) { 'close' } else { 'park' }
                 }
                 if ($policy -eq 'park' -and $g) {
                     try { Set-GameParked $g; $gameLeft = 'parked at the main menu' }
@@ -1942,7 +2228,9 @@ for ($run = 1; $run -le $Runs; $run++) {
         $nWarn = if ($result) { @($result.sessions | ForEach-Object { $_.warnings } | Where-Object { $_ }).Count } else { 0 }
         Set-BenchStatus @{ state = 'done'; outcome = $outcome; game = $gameLeft; warnings = $nWarn; finished = (Get-Date).ToString('s'); scene = $null; message = "finished: $outcome" }
         if ($outcome -ne 'ok') { $exitCode = [math]::Max($exitCode, $(if ($outcome -eq 'partial') { 1 } else { 2 })) }
-        Write-Host ("BENCH-RESULT {0} {1} dir={2} warnings={3} restarts={4} game={5}" -f $outcome, $runLabel, $runDir, $nWarn, $script:restartCount, $gameLeft)
+        Write-Host ("BENCH-RESULT {0} {1} dir={2} warnings={3} restarts={4} game={5}{6}" -f $outcome, $runLabel, $runDir, $nWarn, $script:restartCount, $gameLeft, $(if ($script:restartCount -gt 0) { ' comparable=no' } else { '' }))
     }
 }
+# for an on-screen run's guard (Runner-Guard -Visible): this runner reached its normal end
+if ($Visible) { try { Set-Content (Join-Path $script:BenchRun 'runner-clean.txt') "$PID" -Encoding ascii } catch { } }
 exit $exitCode

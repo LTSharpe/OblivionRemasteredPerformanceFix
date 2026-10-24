@@ -242,6 +242,7 @@ using MaxTickRateFn = void (*)(void* engine);
 using GetMaxTickRateFn = float (*)(void* engine, float delta, bool allowSmoothing);
 using ActorWorldFn = void* (*)(const void* actor);
 using LastRenderFn = float (*)(const void* actor);
+using StaticClassFn = const uint8_t* (*)();
 
 enum UnitType { kCreate, kGeneric, kAppearance, kEquipment, kHair, kNumTypes };
 const char* const kTypeName[kNumTypes] = {"create", "head/BP", "appearance", "equipment", "hair"};
@@ -689,6 +690,7 @@ bool FindPlayer(const GameModule& game)
     return true;
 }
 
+
 // ---- positions (game thread) ----
 
 // [root + location] of an actor, if obj is one: its root component's outer is the actor itself.
@@ -754,6 +756,7 @@ bool RecentlyRendered(const uint8_t* actor)
     return now - static_cast<double>(last) <= std::max(static_cast<double>(delta), kRenderedWithinS);
 }
 
+
 bool FarFrom(double x, double y, double z)
 {
     if (!Player()) return false;
@@ -775,7 +778,8 @@ bool ResolveDelegate(const uint8_t* inst, uintptr_t* key, bool* distant)
             double x, y, z;
             if (ActorLocation(obj, &x, &y, &z)) {
                 *key = reinterpret_cast<uintptr_t>(obj);
-                const bool far1 = FarFrom(x, y, z), seen = far1 && RecentlyRendered(obj);
+                const bool far1 = FarFrom(x, y, z);
+                bool seen = far1 && RecentlyRendered(obj);
                 *distant = far1 && !seen;
                 if (g.delegateLogs < 16) {
                     ++g.delegateLogs;
@@ -849,7 +853,7 @@ void Account(int type, uint64_t us)
     }
 }
 
-#define LAB_UNIT(t, us, a, p) ((void)0)
+#define LAB_UNIT(t, us, a, p, l) ((void)0)
 
 // Whether a distant unit of this type must wait: the first unit of a frame always runs, then the budget decides.
 // The budget grows with the lag of the work waiting (lag = frames it has waited): x1 up to half of PacingMaxLagFrames,
@@ -888,9 +892,11 @@ bool FifoHasKey(uintptr_t key)
     return false;
 }
 
+
+
 // Runs a unit (depth and the distance a nested completion inherits) and returns its time in us.
 template <class F>
-uint64_t TimeUnit(bool distant, F&& body)
+uint64_t TimeUnit(int type, bool distant, F&& body)
 {
     const bool outer = g.unitDistant;
     g.unitDistant = distant;
@@ -898,6 +904,7 @@ uint64_t TimeUnit(bool distant, F&& body)
     const uint64_t t0 = NowUs();
     body();
     const uint64_t us = NowUs() - t0;
+    (void)type;
     --g.depth;
     g.unitDistant = outer;
     return us;
@@ -907,11 +914,11 @@ void RunEntry()
 {
     Entry& e = Front();
     const DelegateType& d = g.del[e.type - kAppearance];
-    const uint64_t us = TimeUnit(e.distant, [&] {
+    const uint64_t us = TimeUnit(e.type, e.distant, [&] {
         d.execIfSafe(e.inst);
         d.dtor(e.inst, 0);
     });
-    LAB_UNIT(e.type, us, reinterpret_cast<const uint8_t*>(e.key), nullptr);
+    LAB_UNIT(e.type, us, reinterpret_cast<const uint8_t*>(e.key), nullptr, g.frame - e.since);
     g.head = (g.head + 1) % kFifoCap;
     --g.count;
     Account(e.type, us);
@@ -933,7 +940,9 @@ void ReplayBudget()
         const Entry& e = Front();
         const uint64_t age = g.frame - e.since;
         const bool forced = age > 2 * maxLag;
-        if (!forced && e.distant && OverBudget(e.type, age)) break;
+        if (!forced && e.distant && OverBudget(e.type, age)) {
+                break;
+        }
         if (forced) {
             s.forced.fetch_add(1, std::memory_order_relaxed);
             g.frameFlags |= 2;
@@ -942,7 +951,7 @@ void ReplayBudget()
     }
 }
 
-bool Enqueue(int type, const uint8_t* inst, uintptr_t key, bool distant)
+bool Enqueue(int type, const uint8_t* inst, uintptr_t key, bool distant, bool fadeHeld = false)
 {
     if (g.count == kFifoCap) return false;
     const DelegateType& d = g.del[type - kAppearance];
@@ -956,6 +965,7 @@ bool Enqueue(int type, const uint8_t* inst, uintptr_t key, bool distant)
     e.since = g.frame;
     e.key = key;
     e.distant = distant;
+    (void)fadeHeld;
     ++g.count;
     s.deferred[type].fetch_add(1, std::memory_order_relaxed);
     AtomicMax(s.maxFifo, g.count);
@@ -998,8 +1008,9 @@ bool DelegateUnit(int type, void* inst, bool* result)
         // With a backlog, a distant unit (or one of an actor that has queued units) queues behind it; a near unit of
         // another actor runs now. Without one, a distant unit waits only when the frame's budget is spent.
         const bool wait = g.count ? (distant || FifoHasKey(key)) : (distant && OverBudget(type));
+        bool fadeHeld = false;
         if (wait) {
-            if (Enqueue(type, p, key, distant)) {
+            if (Enqueue(type, p, key, distant, fadeHeld)) {
                 *result = true;
                 return true;
             }
@@ -1007,9 +1018,9 @@ bool DelegateUnit(int type, void* inst, bool* result)
         }
     }
     if (OverBudget(type)) g.frameFlags |= 4;
-    const uint64_t us = TimeUnit(distant, [&] { *result = d.execIfSafe(inst); });
+    const uint64_t us = TimeUnit(type, distant, [&] { *result = d.execIfSafe(inst); });
     Account(type, us);
-    LAB_UNIT(type, us, reinterpret_cast<const uint8_t*>(unitKey), nullptr);
+    LAB_UNIT(type, us, reinterpret_cast<const uint8_t*>(unitKey), nullptr, 0);
     (void)unitKey;
     return true;
 }
@@ -1067,7 +1078,7 @@ uint64_t CreateExecHook(void* cmd)
     g.lastCreateFar = distant;
     if (OverBudget(kCreate)) g.frameFlags |= distant ? 2 : 4;
     uint64_t r = 0;
-    const uint64_t us = TimeUnit(distant, [&] { r = g.origCreate(cmd); });
+    const uint64_t us = TimeUnit(kCreate, distant, [&] { r = g.origCreate(cmd); });
     Account(kCreate, us);
     return r;
 }
@@ -1087,10 +1098,10 @@ uint64_t GenericExecHook(void* cmd)
     if (heavy && g.allowDefer && g.lastCreateFar && !PairForced() && OverBudget(kGeneric, PairLag()))
         return Defer(static_cast<uint8_t*>(g.session), kGeneric);
     uint64_t r = 0;
-    const uint64_t us = TimeUnit(heavy && g.lastCreateFar, [&] { r = g.origGeneric(cmd); });
+    const uint64_t us = TimeUnit(kGeneric, heavy && g.lastCreateFar, [&] { r = g.origGeneric(cmd); });
     if (heavy) {
         Account(kGeneric, us);
-        LAB_UNIT(kGeneric, us, nullptr, nullptr);
+        LAB_UNIT(kGeneric, us, nullptr, nullptr, PairLag());
     } else if (us >= 2000 && g.numHeavy < 16) {
         g.heavyFns[g.numHeavy++] = fn;
         Log("[pacing] generic pairing command exe+0x%llX took %.1f ms: treated as an NPC unit from now on",
@@ -1169,12 +1180,12 @@ void MaxTickRateHook(void* engine)
 }
 
 // Runs the owed part of the pairing queue (and the deferred delegates) at once, without deferring.
-void Drain(void* manager)
+void Drain(void* manager, bool delegates = true)
 {
-    if (g.E >= g.S && !g.count) return;
+    if (g.E >= g.S && (!g.count || !delegates)) return;
     s.drains.fetch_add(1, std::memory_order_relaxed);
     g.frameFlags |= 1;
-    ReplayAll();
+    if (delegates) ReplayAll();
     const bool saved = g.allowDefer;
     g.allowDefer = false;
     g.inMainRun = true;
@@ -1409,6 +1420,8 @@ void SetNpcPacing(bool enabled, int budgetMs, int minDistance, int maxLagFrames,
     if (was != g.enabled.load()) Log("[pacing] NPC creation pacing %s", g.enabled.load() ? "on" : "off (backlog runs at once)");
 }
 
+
+
 void LogNpcPacingStats()
 {
     if (!g.installed) return;
@@ -1521,6 +1534,7 @@ void NpcPacingTestSetup(const NpcPacingTestFakes& f)
     g.installed = true;
     if (!g.fifo) g.fifo = static_cast<Entry*>(VirtualAlloc(nullptr, sizeof(Entry) * kFifoCap, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
 }
+
 
 NpcPacingTestState NpcPacingTestRead()
 {

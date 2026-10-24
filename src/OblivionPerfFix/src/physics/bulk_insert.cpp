@@ -476,7 +476,10 @@ void ExtHook(uint8_t* evolution, void** structure, uint8_t* queue)
     }
 }
 
+}  // namespace
+
 // The function a code address belongs to, through the exe's unwind data (chained entries followed to the primary one).
+// Shared (common.h): SaveBytesBulk checks its call sites with it.
 uint8_t* PrimaryFunction(const GameModule& game, const uint8_t* at)
 {
     const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(game.base);
@@ -503,6 +506,8 @@ uint8_t* PrimaryFunction(const GameModule& game, const uint8_t* at)
     }
     return nullptr;
 }
+
+namespace {
 
 // PhysicsQueueShrinkOnce's call site, checked: the shrink's shape, and the call inside the function the catch-up tail-jumps to.
 uint8_t* FindShrinkSite(const GameModule& game, uint8_t* ext, uint8_t** shrinkFn, const char** why)

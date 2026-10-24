@@ -65,6 +65,8 @@ $starts = @(@($baseRuns) + @($testRuns) | ForEach-Object { if ($_.start) { $_.st
 if ($starts.Count -gt 1) { $md.Add('- **Note: the runs started differently** (`-Start fresh` = new game with the default character, `continue` = a save; runs from before 2026-10-04 15:30 are `continue`). Character, quest state and NPCs differ, so small differences are not meaningful.') }
 $profs = @(@($baseRuns) + @($testRuns) | ForEach-Object { if ($_.profile -and $_.profile.name) { $_.profile.name } else { 'cpu' } } | Select-Object -Unique)
 if ($profs.Count -gt 1) { $md.Add("- **Note: the runs used different display profiles** ($($profs -join ', ')): resolution, upscaler and frame generation differ, so fps and GPU ms are not comparable (the default changed from ``cpu`` to ``small`` on 2026-10-06).") }
+$restarted = @(@($baseRuns) + @($testRuns) | Where-Object { $_.PSObject.Properties['comparable'] -and -not $_.comparable -or ($_.restarts -and [int]$_.restarts -gt 0) } | ForEach-Object label)
+if ($restarted.Count) { $md.Add("- **Not comparable: the game was restarted during $($restarted -join ', ')** (the scenes after a restart ran in a new game process): repeat those runs.") }
 if (@(@($baseRuns) + @($testRuns) | Where-Object { $_.mode -eq 'reuse' }).Count) { $md.Add('- Note: at least one run reused a game session (`-Reuse`). Fps drifts within a session: confirm with fresh runs.') }
 $md.Add('')
 

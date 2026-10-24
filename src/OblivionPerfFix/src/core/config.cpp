@@ -27,6 +27,10 @@ Config LoadConfig(const wchar_t* iniPath)
     c.editorIdLookupGuard = get(L"Fixes", L"NameLookupCrashGuard", c.editorIdLookupGuard) != 0;
     c.trapCrashGuard = get(L"Fixes", L"TrapCrashGuard", c.trapCrashGuard) != 0;
     c.frameGenCrashGuard = get(L"Fixes", L"FrameGenCrashGuard", c.frameGenCrashGuard) != 0;
+    c.objectReplaceGuard = get(L"Fixes", L"ObjectReplaceCrashGuard", c.objectReplaceGuard);
+    c.taskWaitDeadlockGuard = get(L"Fixes", L"TaskWaitDeadlockGuard", c.taskWaitDeadlockGuard);
+    c.psoCompileThreadPool = get(L"Fixes", L"PsoCompileThreadPool", c.psoCompileThreadPool);
+    c.psoCompileThreadPoolPriority = get(L"Fixes", L"PsoCompileThreadPoolPriority", c.psoCompileThreadPoolPriority);
     c.frameGenAsyncCompute = get(L"Fixes", L"FrameGenAsyncCompute", c.frameGenAsyncCompute) != 0;
     c.frameGenCameraInfo = get(L"Fixes", L"FrameGenCameraInfo", c.frameGenCameraInfo) != 0;
     c.frameGenPacingTuning = get(L"Fixes", L"FrameGenPacingTuning", c.frameGenPacingTuning);
@@ -59,10 +63,44 @@ Config LoadConfig(const wchar_t* iniPath)
     c.bulkIndexInsertMin = get(L"Fixes", L"BulkIndexInsertMin", c.bulkIndexInsertMin);
     c.physicsInternalFlushParallel = get(L"Fixes", L"PhysicsInternalFlushParallel", c.physicsInternalFlushParallel) != 0;
     c.physicsQueueShrinkOnce = get(L"Fixes", L"PhysicsQueueShrinkOnce", c.physicsQueueShrinkOnce) != 0;
+    c.physicsDestroyBatch = get(L"Fixes", L"PhysicsDestroyBatch", c.physicsDestroyBatch);
+    c.physicsDestroyBatchMin = get(L"Fixes", L"PhysicsDestroyBatchMin", c.physicsDestroyBatchMin);
+    c.npcBodiesOneLock = get(L"Fixes", L"NpcBodiesOneLock", c.npcBodiesOneLock);
+    c.clothRegisterLite = get(L"Fixes", L"ClothRegisterLite", c.clothRegisterLite);
+    c.rigVmHashMemo = get(L"Fixes", L"RigVmHashMemo", c.rigVmHashMemo);
+    c.rigLogicMapCache = get(L"Fixes", L"RigLogicMapCache", c.rigLogicMapCache);
+    c.rtSceneBufferKeep = get(L"Fixes", L"RtSceneBufferKeep", c.rtSceneBufferKeep);
+    c.waterCaptureFsrSkip = get(L"Fixes", L"WaterCaptureFsrSkip", c.waterCaptureFsrSkip) != 0;
+    c.waterCaptureNoRhiFlush = get(L"Fixes", L"WaterCaptureNoRhiFlush", c.waterCaptureNoRhiFlush) != 0;
+    c.waterCaptureNoOcclusionWait = get(L"Fixes", L"WaterCaptureNoOcclusionWait", c.waterCaptureNoOcclusionWait) != 0;
+    c.waterCaptureFastMeshScan = get(L"Fixes", L"WaterCaptureFastMeshScan", c.waterCaptureFastMeshScan);
+    c.naniteInitialRootPages = get(L"Fixes", L"NaniteInitialRootPages", c.naniteInitialRootPages);
+    c.frameRateLimitAtStart = get(L"Fixes", L"FrameRateLimitAtStart", c.frameRateLimitAtStart);
+    c.navLinkFast = get(L"Fixes", L"NavLinkFast", c.navLinkFast);
+    c.saveBytesBulk = get(L"Fixes", L"SaveBytesBulk", c.saveBytesBulk);
+    c.saveRefIdIndex = get(L"Fixes", L"SaveRefIdIndex", c.saveRefIdIndex);
+    c.saveThumbnailAsync = get(L"Fixes", L"SaveThumbnailAsync", c.saveThumbnailAsync);
+    // The public build has one ClothRegisterLite mode (3) and no verify / check / log-only modes (lab 2 and NavLinkFast's 3):
+    // other values read as on.
+    if (c.clothRegisterLite) c.clothRegisterLite = 3;
+    if (c.rigVmHashMemo) c.rigVmHashMemo = 1;
+    if (c.rigLogicMapCache) c.rigLogicMapCache = 1;
+    if (c.rtSceneBufferKeep != 0 && c.rtSceneBufferKeep != 2) c.rtSceneBufferKeep = 1;
+    if (c.waterCaptureFastMeshScan) c.waterCaptureFastMeshScan = 1;
+    if (c.frameRateLimitAtStart) c.frameRateLimitAtStart = 1;
+    if (c.navLinkFast) c.navLinkFast = 1;
+    if (c.saveBytesBulk) c.saveBytesBulk = 1;
+    if (c.saveRefIdIndex) c.saveRefIdIndex = 1;
+    if (c.saveThumbnailAsync) c.saveThumbnailAsync = 1;
+    if (c.taskWaitDeadlockGuard) c.taskWaitDeadlockGuard = 1;          // lab 2 (measure only) reads as on
+    if (c.psoCompileThreadPool < -1) c.psoCompileThreadPool = -1;      // 0 the game's, N threads, -1 automatic
     c.osPageCache = get(L"Fixes", L"OsPageCache", c.osPageCache);
     c.osPageCacheMB = get(L"Fixes", L"OsPageCacheMB", c.osPageCacheMB);
     c.osPageCacheTrimSeconds = get(L"Fixes", L"OsPageCacheTrimSeconds", c.osPageCacheTrimSeconds);
     c.psoPrecompileFast = get(L"Fixes", L"PsoPrecompileFast", c.psoPrecompileFast) != 0;
+    c.psoPrecompileFastInGameMenus = get(L"Fixes", L"PsoPrecompileFastInGameMenus", c.psoPrecompileFastInGameMenus) != 0;
+    c.psoPrecompileFastBudgetMs = get(L"Fixes", L"PsoPrecompileFastBudgetMs", c.psoPrecompileFastBudgetMs);
+    c.psoPrecompileColdQueue = get(L"Fixes", L"PsoPrecompileColdQueue", c.psoPrecompileColdQueue);
     c.animTeardownParallel = get(L"Fixes", L"AnimTeardownParallel", c.animTeardownParallel);
     c.cellBufferPacedEvict = get(L"Fixes", L"CellBufferPacedEvict", c.cellBufferPacedEvict);
     c.physicsPushParallel = get(L"Fixes", L"PhysicsPushParallel", c.physicsPushParallel);
@@ -91,6 +129,7 @@ Config LoadConfig(const wchar_t* iniPath)
     c.allocatorTrimWindowSeconds = get(L"Fixes", L"AllocatorTrimWindowSeconds", c.allocatorTrimWindowSeconds);
     c.immediateAllocatorLists = get(L"Fixes", L"ImmediateAllocatorLists", c.immediateAllocatorLists);
     c.allocatorTrimHeadroomMB = get(L"Fixes", L"AllocatorTrimHeadroomMB", c.allocatorTrimHeadroomMB);
+    c.logFile = get(L"General", L"LogFile", c.logFile) != 0;
     c.gpuCrashReport = get(L"General", L"GpuCrashReport", c.gpuCrashReport) != 0;
     c.statsIntervalSeconds = get(L"General", L"StatsIntervalSeconds", c.statsIntervalSeconds);
     return c;

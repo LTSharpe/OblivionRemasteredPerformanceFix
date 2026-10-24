@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   One command for a shareable "stock vs fix" result: runs the benchmark alternately with every fix switched off and
   with the fix as installed (A-B-A-B), then writes report.md for the "Benchmark result" issue form, plus copies of the
@@ -6,8 +6,9 @@
 
   Or, with -Base and -Test, only writes the report from runs you already made (no game needed).
 
-  "Stock" = OblivionPerfFix loaded with all its switches at 0 (each fix then leaves the game's code alone); the ini is
-  put back after every run. The fix must be installed (see README) and the benchmark set up (tools\Setup-Bench.ps1).
+  "Stock" = OblivionPerfFix loaded with all its switches at 0 (each fix then leaves the game's code alone), except
+  FrameRateLimitAtStart: that one only makes the game apply the frame-rate limit the player saved (a game bug with frame
+  generation on), so both sides run at the player's saved cap; it is not a speed-up. The ini is put back after every run. The fix must be installed (see README) and the benchmark set up (tools\Setup-Bench.ps1).
 
 .PARAMETER Rounds
   How many stock/fix pairs (default 2, i.e. 4 runs). More rounds = smaller noise; differences under ~5% are noise.
@@ -22,6 +23,15 @@
 .PARAMETER Watch
   Watch the runs: the game window and sound on, at your own graphics settings (profile "own" unless -Profile is
   given). The default keeps the game hidden and muted.
+.PARAMETER Session
+  How each run gets its game (Run-Benchmark.ps1 -Session): auto (default; stock and fix runs start their own game
+  anyway, because the fix's switches are read at start-up), fresh (always a newly started game), reuse.
+.PARAMETER Plain
+  For the benchmark kit's console: progress in plain words, one line per step with the time ("KIT> " in front, which
+  Bench-Kit.ps1 strips), instead of the runner's verdict lines.
+.PARAMETER MenuPsoWait
+  After each game start, wait at the main menu until the game's start-up shader (PSO) precompile has finished before
+  the scenes start (Run-Benchmark.ps1 -MenuPsoWait). The benchmark kit uses it for the Imperial City flight.
 
 .EXAMPLE
   tools\Bench-Report.ps1
@@ -39,7 +49,10 @@ param(
     [string]$Label = 'report',
     [string[]]$Base,
     [string[]]$Test,
-    [switch]$Watch
+    [switch]$Watch,
+    [ValidateSet('auto', 'fresh', 'reuse')][string]$Session = 'auto',
+    [switch]$MenuPsoWait,
+    [switch]$Plain
 )
 if ($Watch -and -not $PSBoundParameters.ContainsKey('Profile')) { $Profile = 'own' }
 $ErrorActionPreference = 'Stop'
@@ -81,6 +94,9 @@ if (-not $Base -and -not $Test) {
         if ($line -match '^\s*\[(.+)\]') { $inFixes = $Matches[1] -eq 'Fixes'; continue }
         if ($inFixes -and $line -match '^\s*([A-Za-z0-9]+)\s*=') { $off[$Matches[1]] = 0 }
     }
+    # Kept as installed on the stock side: not a speed-up, it only makes the game honour the player's saved frame cap
+    # (with frame generation on the game forgets it after a start), so stock and fix run at the same cap.
+    foreach ($k in @('FrameRateLimitAtStart')) { $off.Remove($k) }
     if (-not $off.Count) { throw "no switches found in $iniPath" }
     $runner = Join-Path $PSScriptRoot 'Run-Benchmark.ps1'
     $Base = @(); $Test = @()
@@ -88,17 +104,42 @@ if (-not $Base -and -not $Test) {
     for ($r = 1; $r -le $Rounds; $r++) {
         foreach ($side in 'stock', 'fix') {
             $lbl = "$Label-$stamp-$side-r$r"
-            $argLine = "-Label '$lbl' -Pass perf -Profile '$Profile' -Session auto"
+            $argLine = "-Label '$lbl' -Pass perf -Profile '$Profile' -Session $Session"
+            if ($MenuPsoWait) { $argLine += ' -MenuPsoWait' }
             if ($Watch) { $argLine += ' -Watch' }
             if ($Scenario) { $argLine += " -Scenario '$Scenario'" }
             if ($Scenes) { $argLine += " -Scenes " + (($Scenes | ForEach-Object { "'$_'" }) -join ',') }
             if ($side -eq 'stock') { $argLine += ' -FixIni @{ ' + (($off.Keys | Sort-Object | ForEach-Object { "$_ = 0" }) -join '; ') + ' }' }
-            Write-Host "== run $(2 * $r - ($side -eq 'stock')) of $(2 * $Rounds): $lbl"
-            $out = & powershell -NoProfile -ExecutionPolicy Bypass -Command "& '$runner' $argLine" 2>&1 | ForEach-Object { "$_" }
+            $runNo = 2 * $r - [int]($side -eq 'stock')
+            if ($Plain) {
+                Write-Host ''
+                Write-Host ("KIT> Run {0} of {1} ({2:HH:mm}): starting the game {3}" -f $runNo, (2 * $Rounds), (Get-Date), $(if ($side -eq 'stock') { 'WITHOUT the fix (stock)' } else { 'WITH the fix' }))
+            } else { Write-Host "== run $runNo of $(2 * $Rounds): $lbl" }
+            # -Plain: the runner's time-stamped steps that a player should see, in plain words, as they happen
+            $flightText = if ($Scenario -eq 'showcase') { 'about 2 minutes' } else { 'a few minutes' }
+            $out = & powershell -NoProfile -ExecutionPolicy Bypass -Command "& '$($runner -replace "'", "''")' $argLine" 2>&1 | ForEach-Object {
+                $s = "$_"
+                if ($Plain -and $s -match '^\[(\d\d:\d\d):\d\d\] (.*)$') {
+                    $t = $Matches[1]; $m = $Matches[2]
+                    $say = switch -Regex ($m) {
+                        '^starting the game' { 'Steam starts the game; it opens by itself (no save is loaded, your characters are not touched)' }
+                        '^waiting for the main menu' { 'skipping the start-up videos' }
+                        "^main menu: waiting for the game's PSO precompile" { 'at the main menu the game prepares its shaders: normal, about 2 minutes without the fix, less with it; the game looks idle meanwhile' }
+                        '^waited \d+ s at the main menu' { 'shaders ready: starting a new game' }
+                        '^in the world' { 'in the world: setting up the flight (weather, time of day, camera)' }
+                        '^scene \d+/\d+: ' { "flight running ($flightText)$(if ($Watch) { ": please don't touch the mouse or keyboard" })" }
+                        '^closing the game' { 'flight done: closing the game' }
+                        '^config files restored' { 'your game settings are back as they were' }
+                    }
+                    if ($say) { Write-Host "KIT>   $t  $say" }
+                } elseif ($Plain -and $s -match '^WARNING: (.*)$') { Write-Host "KIT>   note: $($Matches[1])" }
+                $s
+            }
             $verdict = $out | Where-Object { $_ -like 'BENCH-RESULT*' } | Select-Object -Last 1
-            Write-Host "   $verdict"
+            if ($Plain) { if ("$verdict" -match '^BENCH-RESULT (ok|partial)') { Write-Host ("KIT>   {0:HH:mm}  run {1} done" -f (Get-Date), $runNo) } }
+            else { Write-Host "   $verdict" }
             # the runner's step lines, kept with the run: they explain a warning such as "no arrival detected"
-            if ("$verdict" -match ' dir=(\S+)' -and (Test-Path -LiteralPath $Matches[1])) { $out | Set-Content (Join-Path $Matches[1] 'runner.log') -Encoding utf8 }
+            if ("$verdict" -match ' dir=(.+?) warnings=' -and (Test-Path -LiteralPath $Matches[1])) { $out | Set-Content (Join-Path $Matches[1] 'runner.log') -Encoding utf8 }
             if ($verdict -notmatch '^BENCH-RESULT (ok|partial)') { throw "benchmark run $lbl failed: $verdict (see its report.md)" }
             if ($side -eq 'stock') { $Base += $lbl } else { $Test += $lbl }
         }
@@ -176,22 +217,66 @@ $md.Add("| CPU | $($first.system.cpu) |")
 $md.Add("| GPU, driver | $($first.system.gpu), $($first.system.gpuDriver) |")
 $md.Add("| RAM | $([math]::Round($cs.TotalPhysicalMemory / 1GB)) GB |")
 $md.Add("| Windows | $($os.Caption -replace 'Microsoft ', '') build $($os.BuildNumber) |")
-$md.Add("| Profile | $($first.profile.name): $($first.profile.res) $($first.profile.mode), upscaler $($first.profile.upscaler), FG $($first.profile.fg), RT $($first.profile.rt) |")
+if ($first.profile.own) { $md.Add("| Profile | $($first.profile.name): the player's own settings, nothing changed |") }
+else { $md.Add("| Profile | $($first.profile.name): $($first.profile.res) $($first.profile.mode), upscaler $($first.profile.upscaler), FG $($first.profile.fg), RT $($first.profile.rt) |") }
+# At the player's own settings (profile own / user): what those settings were, from the run's recorded cvars
+if ($first.profile.own) {
+    $set = @($testRuns | ForEach-Object { $_.R.sessions } | Where-Object { $_.kind -eq 'perf' -and $_.settings } | Select-Object -First 1).settings
+    if ($set) {
+        $lv = { param($v) if ($null -eq $v) { '?' } else { @('Low', 'Medium', 'High', 'Ultra', 'Cinematic')[[math]::Min(4, [math]::Max(0, [int][double]$v))] } }
+        $up = switch ([int][double]$set.'Altar.UpscalingMethod') { 0 { 'none' } 1 { 'TSR' } 2 { 'FSR' } 3 { 'DLSS' } 4 { 'XeSS' } default { "method $($set.'Altar.UpscalingMethod')" } }
+        $txt = "render scale $([math]::Round([double]$set.'r.ScreenPercentage'))%, upscaler $up, frame generation $(if ([double]$set.'r.FidelityFX.FI.Enabled' -ge 1) { 'on (FSR)' } else { 'off (FSR)' }), " +
+               "hardware RT $(if ([double]$set.'r.Lumen.HardwareRayTracing' -ge 1) { "on (lighting mode $([int][double]$set.'r.Lumen.HardwareRayTracing.LightingMode'))" } else { 'off' }), " +
+               "view distance $(& $lv $set.'sg.ViewDistanceQuality'), shadows $(& $lv $set.'sg.ShadowQuality'), GI $(& $lv $set.'sg.GlobalIlluminationQuality'), " +
+               "reflections $(& $lv $set.'sg.ReflectionQuality'), foliage $(& $lv $set.'sg.FoliageQuality'), textures $(& $lv $set.'sg.TextureQuality'), " +
+               "effects $(& $lv $set.'sg.EffectsQuality'), post-processing $(& $lv $set.'sg.PostProcessQuality'), shading $(& $lv $set.'sg.ShadingQuality')"
+        $md.Add("| Settings (the player's) | $txt |")
+    }
+}
 $caps = @(@($baseRuns) + @($testRuns) | ForEach-Object { $_.R.sessions } | ForEach-Object { $_.frameCap } | Where-Object { $_ } | Select-Object -Unique)
 if ($caps.Count) { $md.Add("| Frame cap | fps capped at $($caps -join ' / ') by $(if ($first.profile.own) { "the player's settings" } else { 'the profile' }) |") }
+elseif ($first.profile.own -and @($testRuns | ForEach-Object { $_.R.sessions } | ForEach-Object { $_.scenes } | Where-Object { $_.frameGen }).Count) {
+    # stock game behaviour: with frame generation on, the saved Frame Rate Limit is not applied after a start (only once
+    # the Graphics page is opened), so a player's 60 cap is not in effect in these freshly started games
+    $md.Add("| Frame cap | none in effect: with frame generation on, the game does not apply its saved frame-rate limit after a start (it does once you open the Graphics settings), stock and fix alike |")
+}
 $md.Add("| Runs | stock $($baseRuns.Count), fix $($testRuns.Count) (medians; alternated) |")
+$md.Add("| Stock | the fix loaded with every switch off except FrameRateLimitAtStart (a game bug fix, not a speed-up: it applies the frame-rate limit you saved), so both sides run at your saved frame-rate cap |")
+# Short of RAM: Windows pages and the game hitches far more (2-5x the hitches seen at < 3 GB free): such runs are not comparable
+$lowRam = @(@($baseRuns) + @($testRuns) | Where-Object {
+    @($_.R.sessions | ForEach-Object { $_.scenes } | Where-Object { $null -ne $_.availMinMB -and [double]$_.availMinMB -lt 3072 }).Count } | ForEach-Object Name)
+if ($lowRam.Count) { $md.Add("| **Not comparable** | less than 3 GB of RAM was free during $($lowRam -join ', '): close other programs and run it again |") }
+# On screen (-Watch): the game must stay the foreground window while it is measured. Behind another window it turns frame
+# generation off (FSR3 off on focus loss) and lowers its sound, and Windows schedules it as a background program.
+$onScreen = @(@($baseRuns) + @($testRuns) | ForEach-Object { $_.R.sessions } | ForEach-Object { $_.scenes } | Where-Object { $null -ne $_.notForegroundPct })
+$md.Add("| Game window | $(if ($onScreen.Count) { "on screen, in front$(if (($m = ($onScreen | Measure-Object notForegroundPct -Maximum).Maximum) -gt 0) { " (not in front for up to $m% of a measured flight)" })" } else { 'hidden and muted (the game was never in front)' }) |")
+$notFront = @(@($baseRuns) + @($testRuns) | Where-Object {
+    @($_.R.sessions | ForEach-Object { $_.scenes } | Where-Object { $null -ne $_.notForegroundPct -and [double]$_.notForegroundPct -gt 2 }).Count } | ForEach-Object Name)
+if ($notFront.Count) { $md.Add("| **Not comparable** | another window was in front of the game for more than 2% of the measured time in $($notFront -join ', '); behind another window the game turns frame generation off and Windows gives it less time: run it again without switching windows |") }
+# The benchmark's UE4SS build (tools\Setup-Bench.ps1 writes third_party\ue4ss\oblvbench-build.txt: name, sha256=, tested=)
+$ue4ssMark = if ($env:OBLIVION_UE4SS_DIR) { Join-Path $env:OBLIVION_UE4SS_DIR 'oblvbench-build.txt' } else { Join-Path $root 'third_party\ue4ss\oblvbench-build.txt' }
+if (Test-Path -LiteralPath $ue4ssMark) {
+    $um = @(Get-Content -LiteralPath $ue4ssMark)
+    $uSha = "$($um | Where-Object { $_ -like 'sha256=*' } | Select-Object -First 1)" -replace '^sha256=', ''
+    $uTested = "$($um | Where-Object { $_ -like 'tested=*' } | Select-Object -First 1)" -replace '^tested=', ''
+    $uText = $um[0].Trim()
+    if ($uTested) { $uText += " ($uTested)" }
+    if ($uSha) { $uText += ', SHA-256 `' + $uSha + '`' }
+    $md.Add("| Benchmark's UE4SS | $uText |")
+}
 $md.Add('')
 $md.Add('Each cell is stock -> fix (change). `~` = under 5%, within run-to-run noise. Game / Render / RHI = CPU ms per frame')
 $md.Add('on that thread; GPU = GPU busy ms per frame.')
 $md.Add('')
-$md.Add('## Steady views')
-$md.Add('')
-$md.Add('| Scene | fps | 1% low | Game ms | Render ms | RHI ms | GPU ms |')
-$md.Add('|---|---|---|---|---|---|---|')
-foreach ($id in $bs.Keys) {
-    if (-not $ts.Contains($id)) { continue }
+$static = @($bs.Keys | Where-Object { $ts.Contains($_) -and $bs[$_][0].type -eq 'static' })
+if ($static.Count) {
+    $md.Add('## Steady views')
+    $md.Add('')
+    $md.Add('| Scene | fps | 1% low | Game ms | Render ms | RHI ms | GPU ms |')
+    $md.Add('|---|---|---|---|---|---|---|')
+}
+foreach ($id in $static) {
     $b = $bs[$id]; $t = $ts[$id]
-    if ($b[0].type -ne 'static') { continue }
     $md.Add("| $id | $(Cell (Value $b fps) (Value $t fps)) | $(Cell (Value $b low1) (Value $t low1)) | $(Cell (Value $b threads.GameThread.msPerFrame) (Value $t threads.GameThread.msPerFrame) 'F2') | $(Cell (Value $b threads.RenderThread.msPerFrame) (Value $t threads.RenderThread.msPerFrame) 'F2') | $(Cell (Value $b threads.RHIThread.msPerFrame) (Value $t threads.RHIThread.msPerFrame) 'F2') | $(Cell (Value $b gpuBusyMs) (Value $t gpuBusyMs) 'F1') |")
 }
 $doors = @($bs.Keys | Where-Object { $ts.Contains($_) -and $bs[$_][0].PSObject.Properties['afterWorstMs'] })
@@ -214,11 +299,11 @@ if ($moving.Count) {
     $md.Add('')
     $md.Add('## Moving through the world')
     $md.Add('')
-    $md.Add('| Scene | fps | 1% low | worst frame (ms) | hitches |')
-    $md.Add('|---|---|---|---|---|')
+    $md.Add('| Scene | fps | 1% low | worst frame (ms) | hitches | Game ms | GPU ms |')
+    $md.Add('|---|---|---|---|---|---|---|')
     foreach ($id in $moving) {
         $b = $bs[$id]; $t = $ts[$id]
-        $md.Add("| $id | $(Cell (Value $b fps) (Value $t fps)) | $(Cell (Value $b low1) (Value $t low1)) | $(Cell (Value $b worstMs) (Value $t worstMs) 'F0') | $(Cell (Value $b hitches) (Value $t hitches) 'F0') |")
+        $md.Add("| $id | $(Cell (Value $b fps) (Value $t fps)) | $(Cell (Value $b low1) (Value $t low1)) | $(Cell (Value $b worstMs) (Value $t worstMs) 'F0') | $(Cell (Value $b hitches) (Value $t hitches) 'F0') | $(Cell (Value $b threads.GameThread.msPerFrame) (Value $t threads.GameThread.msPerFrame) 'F2') | $(Cell (Value $b gpuBusyMs) (Value $t gpuBusyMs) 'F1') |")
     }
 }
 # What the fix log said on this PC: which fixes found their code. Only lines that say something is off or missing.

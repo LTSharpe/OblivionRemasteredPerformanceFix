@@ -11,7 +11,7 @@
 #include <string_view>
 #include <vector>
 
-#define OPF_VERSION "1.1.0"
+#define OPF_VERSION "1.2.0"
 
 namespace opf {
 
@@ -56,7 +56,9 @@ template <class T, class Done> T WaitWord(std::atomic<T>& word, WaitGate& gate, 
 }
 
 // ---- log.cpp ----
-void LogOpen(const wchar_t* path, int keepPrevious = 0);  // keepPrevious: earlier logs kept as <name>.1.log, .2.log, ...
+void LogOpen(const wchar_t* path, int keepPrevious = 0, bool enabled = true);  // keepPrevious: earlier logs kept as <name>.1.log, .2.log, ...; enabled=false ([General] LogFile=0): nothing is written or renamed until a [gpucrash] line arrives
+bool LogEnabled();  // false with LogFile=0
+void LogClose();    // self-test only
 void Log(const char* fmt, ...);
 
 // ---- config.cpp ----
@@ -81,6 +83,18 @@ struct Config {
     bool editorIdLookupGuard = true;   // NameLookupCrashGuard: name lookups skip freed name-table entries instead of crashing (game bug)
     bool trapCrashGuard = true;        // TrapCrashGuard: traps drop actors that no longer exist instead of crashing (game bug)
     bool frameGenCrashGuard = true;    // FrameGenCrashGuard: FSR 3 frame generation waits for a free command list instead of crashing (AMD library)
+    int objectReplaceGuard = 1;        // ObjectReplaceCrashGuard: an in-place object re-creation whose destroy kept its slot releases it instead of
+                                       // the UObjectArray.cpp:234 fatal (game bug; start-up install, then live): 0 off, 1 on (lab: 2 log only)
+    int psoCompileThreadPool = -1;     // PsoCompileThreadPool (default on since 1.2.0, user 2026-10-24): the PSO precompile and precache compile on UE's PSO thread pool, not the task
+                                       // workers (game bug: with a cold driver cache the loading froze behind them; START-UP ONLY, and only
+                                       // applied with TaskWaitDeadlockGuard=1 installed): 0 the game's (task workers), N threads,
+                                       // -1 logical processors - 2 (at least 1)
+    int psoCompileThreadPoolPriority = -1; // not in the shipped ini: the pool threads' EThreadPriority (-1 = UE's below normal, kept; 0 normal = the
+                                           // task workers': with a cold cache the loading then competes with the pool, 21 s stalls instead of 4 s)
+    int taskWaitDeadlockGuard = 1;     // TaskWaitDeadlockGuard (default on since 1.2.0): a task worker waiting for tasks is also woken by the reserve worker covering it,
+                                       // not only by a trigger task that may never get a thread (game bug: the cold-cache deadlock; start-up
+                                       // install, then live): 0 off, 1 on, 2 measure only (the game's wake-up timing, through the guard's own
+                                       // wait; only 0 is the game's code). PsoCompileThreadPool keeps it at 1.
     bool frameGenAsyncCompute = true;  // FrameGenAsyncCompute: r.FidelityFX.FI.AllowAsyncWorkloads 1 at start-up (frame generation on its own GPU queue)
     bool frameGenCameraInfo = true;   // FrameGenCameraInfo: the camera desc for AMD's ML frame generation (SDK 2.x DLLs)
     int frameGenPacingTuning = 1;      // FrameGenPacingTuning: AMD's FG present pacing tuning (FSR 3.1.4 or SDK 2.x DLLs): 0 game's, 1 Set B, 2 Set A (1)
@@ -108,7 +122,8 @@ struct Config {
     int parallelStaticBodiesMin = 64;  // not in the shipped ini: ParallelStaticBodies only for components with at least this many bodies
     int parallelStaticBodiesThreads = 0; // not in the shipped ini: ParallelStaticBodies's helper threads (0 = logical processors / 4, max 8)
     int parallelMinProcessors = 8;     // not in the shipped ini: ParallelStaticBodies (with PipelinedSceneAdd/BodyCreation), PhysicsPushParallel and
-                                       // AnimTeardownParallel stay off below this many usable logical processors (re-checked live)
+                                       // AnimTeardownParallel stay off below this many usable logical processors (re-checked live;
+                                       // PhysicsDestroyBatch's helper: checked once at start-up)
     bool pipelinedSceneAdd = true;     // PipelinedSceneAdd: InitStaticBodies' scene add, registration and inserts side by side (
                                        // start-up install with ParallelStaticBodies, then live)
     int pipelinedSceneAddMin = 64;     // not in the shipped ini
@@ -122,6 +137,52 @@ struct Config {
     bool physicsInternalFlushParallel = true; // PhysicsInternalFlushParallel: a swap step's FlushInternal beside FlushAsync (identical; live)
     bool physicsQueueShrinkOnce = true;  // PhysicsQueueShrinkOnce: the game thread's catch-up shrinks its pending queue once, not per
                                          // removal (identical contents; installed with BulkIndexInsert at start-up, then live)
+    int physicsDestroyBatch = 3;       // PhysicsDestroyBatch: physics/destroy_batch.cpp, the step's destruction of removed bodies:
+                                       // 1 proxies deleted by a helper, 2 one UpdateViews, 3 both, 4 installed but off; 0 = not
+                                       // installed (start-up), then live
+    int physicsDestroyBatchMin = 256;  // not in the shipped ini: PhysicsDestroyBatch acts only from this many pending bodies
+    int npcBodiesOneLock = 1;          // NpcBodiesOneLock: npcs/npc_bodies.cpp, a character's physics bodies and constraints
+                                       // (InitArticulated's InstantiatePhysicsAsset_Internal) made under one hold of the scene's
+                                       // write lock (start-up install, then live): 0 off, 1 on
+    int clothRegisterLite = 3;         // ClothRegisterLite: npcs/cloth_register.cpp, every cloth build of an EquipBodyPart call made
+                                       // without its constraint rules, the one left at the call's end completed in place (start-up
+                                       // install, then live): 0 off, 3 on (lab: 1 learned, 2 the registration build only; the
+                                       // public build reads any value != 0 as 3)
+    int rigVmHashMemo = 1;             // RigVmHashMemo: npcs/rig_setup.cpp, URigVM::ComputeVMHash memoised on its full inputs
+                                       // (identical; start-up install, then live): 0 off, 1 on (lab: 2 verify; public reads 2 as 1)
+    int rigLogicMapCache = 1;          // RigLogicMapCache: npcs/rig_setup.cpp, the head rig's DNA name -> hierarchy index maps
+                                       // replayed per DNA content (identical; start-up install, then live): 0 off, 1 on (lab: 2 verify)
+    int rtSceneBufferKeep = 1;         // RtSceneBufferKeep: streaming/rt_scene_keep.cpp, the ray tracing scene's TLAS buffer is not
+                                       // re-created smaller (1), or installed but the game's way, creations timed (2); start-up
+                                       // install when != 0, then live 1/2
+    bool waterCaptureFsrSkip = true;   // WaterCaptureFsrSkip: render/water_info.cpp, no FSR3 pre-alpha copy in water-info renderers
+    bool waterCaptureNoRhiFlush = true;  // WaterCaptureNoRhiFlush: water-info renderers skip the RHI-thread flush
+    bool waterCaptureNoOcclusionWait = true;  // WaterCaptureNoOcclusionWait: water-info renderers skip the occlusion-fence wait
+    int waterCaptureFastMeshScan = 1;  // WaterCaptureFastMeshScan: FEnableWaterInfoMeshesScoped scans the packed component ids
+                                       // (1; lab: 2 = and checks against the stock scan; the public build reads 2 as 1).
+                                       // The four water keys: installed at start-up (version.dll route) when any is on, then live
+    int naniteInitialRootPages = 3072; // NaniteInitialRootPages: streaming/nanite_stream_buffers.cpp, r.Nanite.Streaming.
+                                       // NumInitialRootPages set at start-up (0 or up to 2048 = the game's 2048; 2049-8192):
+                                       // ClusterPageData starts with that many root pages (3072: +32 MiB of video memory)
+    int frameRateLimitAtStart = 1;     // FrameRateLimitAtStart: framegen/frame_cap_start.cpp (game bug): with frame generation on at
+                                       // start-up, the saved Frame Rate Limit applied once after the game's switch zeroed it, as the
+                                       // Graphics page does (1; lab: 2 = only logged; the public build reads 2 as 1); start-up
+                                       // install when != 0, 0 off
+    int navLinkFast = 1;               // NavLinkFast: streaming/nav_link_fast.cpp, a streamed navmesh tile's border links with less
+                                       // searching (calls that cannot make a link left out; the search looks only at the
+                                       // neighbour's polygons with a border edge on that side; same links): 1 on (lab: 2 on +
+                                       // checked against the game's, 3 installed but the game's calls and search, timed; the
+                                       // public build reads 2 and 3 as 1); 0 = not installed (start-up), then live (0 at run
+                                       // time = the game's calls and search)
+    int saveBytesBulk = 1;             // SaveBytesBulk: saves/save_bytes.cpp, a save's byte arrays (the save list's thumbnails) written
+                                       // in one piece (same bytes): 1 on (lab: 2 on + every save also written the game's way and
+                                       // compared; the public build reads 2 as 1); 0 = not installed (start-up), then live
+    int saveRefIdIndex = 1;            // SaveRefIdIndex: saves/save_refid.cpp, the old engine save's refID lookups through a hash
+                                       // index (same refIDs): 1 on (lab: 2 on + compared with the linear search; public reads 2 as 1);
+                                       // 0 = not installed (start-up), then live
+    int saveThumbnailAsync = 1;        // SaveThumbnailAsync: saves/save_thumb.cpp, the save's thumbnail read back without the game
+                                       // thread waiting (same picture): 1 on (lab: 2 on + compared with the game's read-back; public
+                                       // reads 2 as 1); 0 = not installed (start-up), then live
     int osPageCache = 1;                 // OsPageCache: blocks the allocator releases to Windows are kept (exact size, bounded) and
                                          // handed out again for its own cache misses (identical; start-up install, then live)
     int osPageCacheMB = 64;              // not in the shipped ini: OsPageCache's cap (MB, 4-1024)
@@ -134,6 +195,13 @@ struct Config {
                                          // after a crossing (live): 0 in the crossing frame (as the game), 1 paced
     bool psoPrecompileFast = true;       // PsoPrecompileFast: the start-up PSO precompile at UE's Fast pace outside play (identical: timing
                                          // only; start-up install, then live)
+    int psoPrecompileFastBudgetMs = 4;   // PsoPrecompileFastBudgetMs: render-thread ms per frame at the faster pace (16 = UE's Fast,
+                                         // the pace before 1.1.10; live)
+    int psoPrecompileColdQueue = 1000;   // PsoPrecompileColdQueue: once this many pipelines wait (a cold driver cache), the game's own
+                                         // pace for the rest of the precompile (0 = no cold-cache guard at all: no queue,
+                                         // driver-thread or 60 s limit; live)
+    bool psoPrecompileFastInGameMenus = false;  // PsoPrecompileFastInGameMenus: also Fast in menus once play has started
+                                         // (inventory, map, dialogue, pause); 0 = the game's pace there (live)
     int physicsPushParallel = 1;       // PhysicsPushParallel: the physics side of the push of new static bodies: 0 off, 1 batch creation +
                                        // shapes set up on helper threads, 2 batch creation only, 3 = 1 + verify (start-up install, then live)
     int physicsPushMin = 32;           // not in the shipped ini: PhysicsPushParallel's helpers only for runs of at least this many proxies
@@ -165,10 +233,45 @@ struct Config {
     int allocatorTrimWindowSeconds = 20; // not in the shipped ini: the window whose peak of allocators in flight is kept
     int allocatorTrimHeadroomMB = 2048; // not in the shipped ini: CommandAllocatorTrim trims the copy pool only within this much of the budget (0 = always)
     int immediateAllocatorLists = 0;   // not in the shipped ini: CommandAllocatorTrim part 2, lists the immediate context records per allocator
+    bool logFile = true;               // [General] LogFile: 0 = no OblivionPerfFix.log except a GPU crash report (start-up only; lab builds ignore it)
     bool gpuCrashReport = true;        // [General] GpuCrashReport: DRED + memory report in the log at a GPU crash
     int statsIntervalSeconds = 60;     // 0 = no periodic stats in the log
 };
 Config LoadConfig(const wchar_t* iniPath);
+
+// ---- streaming/nav_link_fast.cpp (NavLinkFast) ----
+bool InstallNavLinkFast(bool beforeGameCode, int mode);  // findConnectingPolys' and connectExtLinks' calls redirected (start-up only)
+void SetNavLinkFast(int mode);                           // live, once installed: 1 fast, else the game's (lab: 2 checked)
+void LogNavLinkFastStats();
+int NavLinkFastTestFind(int mode, void* nav, const double* va, const double* vb, void* fromTile, int fromPolyIdx, uint8_t* tile, int side,
+                        void* cons);  // self-test only
+int NavLinkFastTestOriginal(void* nav, const double* va, const double* vb, void* fromTile, int fromPolyIdx, uint8_t* tile, int side,
+                            void* cons);  // self-test only
+int NavLinkFastTestSkip(const uint8_t* tile, const uint8_t* target, int side);  // self-test only: 0 = the call is made
+uint8_t* NavLinkFastTestSite(int which);   // self-test only: -1 the findConnectingPolys call, 0-3 addTile's connectExtLinks calls
+// ---- framegen/frame_cap_start.cpp (FrameRateLimitAtStart, game bug) ----
+bool FindFrameCapStart();
+bool InstallFrameCapStart(bool beforeGameCode, int mode);  // start-up only (version.dll and OBSE64 routes, while T's state is off)
+bool FrameCapStartTestPatched();                           // self-test: T's entry jump and trampoline
+bool FrameCapStartTestRun(void* fakeOrig, void* fakeGetter, void* fakeHash, void* fakeFind, void* fakeSet, const void* name,
+                          const uint8_t* state, int menu, int mode, bool on, bool reset);  // self-test: one hook call with fakes
+// ---- streaming/nanite_stream_buffers.cpp (NaniteInitialRootPages; the probe and minimums are lab-only) ----
+bool FindNaniteStreamBuffers();                   // ProcessNewResources' three resizes (the root-page variable is checked against it)
+int32_t* FindNaniteRootPagesVar();                // r.Nanite.Streaming.NumInitialRootPages' value (nullptr if not found)
+bool SetNaniteInitialRootPages(int pages, bool beforeGameCode);  // NaniteInitialRootPages (start-up only, both routes)
+// ---- render/water_info.cpp (WaterCaptureFsrSkip / NoRhiFlush / NoOcclusionWait / FastMeshScan) ----
+bool InstallWaterCapture(bool beforeGameCode, bool probe);  // start-up only (version.dll route); probe = lab WaterInfoProbe's game-thread part
+void SetWaterCaptureFsrSkip(bool on);
+void SetWaterCaptureNoRhiFlush(bool on);
+void SetWaterCaptureNoOcclusionWait(bool on);
+void SetWaterCaptureFastMeshScan(int mode);
+void LogWaterCaptureStats();
+const char* WaterInfoTestScan();
+bool WaterInfoTestOccTrampoline();
+bool WaterInfoTestPatched();
+const char* WaterInfoTestHooks();
+bool WaterInfoTestTrampoline();
+bool WaterInfoTestMismatch();
 
 
 // ---- view_rename_guard.cpp (ViewRenameGuard: closes UE-217692, view creation vs pool defragmentation) ----
@@ -212,9 +315,22 @@ struct Pattern {
 };
 Pattern ParsePattern(std::string_view text);
 std::vector<uint8_t*> FindAll(const Section& s, const Pattern& p);
+// The original search (memchr for the first byte): the same results as FindAll, slower.
+std::vector<uint8_t*> FindAllReference(const Section& s, const Pattern& p);
+// Start-up cost of the pattern searches (FindAll calls, their time, bytes searched, ScanVerify mismatches).
+struct ScanStats {
+    uint64_t calls, microseconds, bytes, mismatches;
+};
+ScanStats GetScanStats();
+// 0 = fast search; 1 = also run FindAllReference on every search, log differences and use its result; 2 = only the
+// reference search (the original start-up, for timing comparisons).
+void SetScanMode(int mode);
+using ScanObserver = void (*)(const Section& s, const Pattern& p, const std::vector<uint8_t*>& hits, uint64_t ticks);
+void SetScanObserver(ScanObserver observe);  // self-test: sees every search
 bool MatchesAt(const uint8_t* at, const Pattern& p);
 // Absolute target of a RIP-relative operand: disp32 at insn+dispOffset, instruction length insnLen.
 uint8_t* RipTarget(const uint8_t* insn, size_t dispOffset, size_t insnLen);
+uint8_t* PrimaryFunction(const GameModule& game, const uint8_t* at);  // physics/bulk_insert.cpp: the .pdata function holding a code address (nullptr if none)
 bool WriteCode(void* at, std::span<const uint8_t> bytes);
 bool WritePointer(void** at, void* value);
 void** FindImportSlot(uint8_t* base, const char* dll, const char* function);  // the import slot of dll!function
@@ -391,6 +507,65 @@ bool EditorIdLookupGuardInfo(EditorIdGuardInfo* out);
 int EditorIdGuardFilter(const EXCEPTION_RECORD* rec, const char* key);  // the guard's exception filter
 void EditorIdLookupGuardTestImport(void* const* fakeImport);  // self-test only: the import slot to call
 
+// object_replace_guard.cpp (ObjectReplaceCrashGuard: StaticAllocateObject's replace-in-place destroy that keeps the slot)
+struct ObjectReplaceGuardInfoOut {
+    uint8_t* site;                  // the matched destroy sequence (lea rcx,[cs]; EnterCriticalSection; ...)
+    uint8_t* call;                  // the patched 8 bytes (call stub; nop dword)
+    uint8_t* stub;
+    uint8_t* objectArray;           // GUObjectArray
+    int32_t oldIndexOffset;         // OldIndex's place in StaticAllocateObject's frame ([rsp+off])
+    const uint8_t* baseVtable;      // UObjectBase's vtable (written by ~UObjectBase)
+    const uint8_t* objInitialized;  // GObjInitialized
+    const uint8_t* criticalError;   // GIsCriticalError
+    uint64_t replaced, kept, released;
+};
+bool ApplyObjectReplaceGuard();            // start-up (one call site in StaticAllocateObject)
+void SetObjectReplaceGuardMode(int mode);  // live: 1 on; lab 2 = log only
+void LogObjectReplaceGuardStats();
+bool ObjectReplaceGuardInfo(ObjectReplaceGuardInfoOut* out);
+bool ObjectReplaceGuardTestPatched();                  // self-test only
+void ObjectReplaceGuardTestArray(uint8_t* fakeArray);  // self-test only: a fake GUObjectArray
+
+// pso_pool.cpp (PsoCompileThreadPool: r.pso.PrecompileThreadPoolSize set while the game starts)
+bool FindPsoCompileThreadPool();           // no patching; false = unavailable (logged)
+void SetPsoCompileThreadPool(int threads, int priority); // start-up, once, after InstallTaskWaitGuard: 0 = the game's, N, -1 = logical - 2;
+                                                          // applied only with the guard installed in mode 1 (else logged);
+                                                          // priority: the pool threads' EThreadPriority (-1 = UE's below normal)
+void PsoCompileThreadPoolTick(int threads, int priority); // once a second: later ini changes are ignored (logged once), Engine.ini check
+bool PsoCompileThreadPoolApplied();        // the pool size we wrote is in force (the guard must then stay in mode 1)
+void PsoCompileThreadPoolTestReset();      // self-test only
+bool PsoCompileThreadPoolInfo(int32_t** size, int32_t** percent, int32_t** priority = nullptr);
+
+// task_wait_guard.cpp (TaskWaitDeadlockGuard: the task graph's worker wait, woken by its reserve worker too)
+struct TaskWaitGuardInfoOut {
+    uint8_t* wait;                  // FTaskGraphCompatibilityImplementation::WaitUntilTasksComplete
+    void** slot;                    // its vtable slot
+    uint8_t* doReserve;             // FReserveScheduler::DoReserveWorkUntil
+    uint8_t* trigger;               // TriggerEventWhenTasksComplete
+    uint8_t* reserveScheduler;      // FReserveScheduler singleton
+    uint8_t* scheduler;             // LowLevelTasks::FScheduler singleton
+    const uint32_t* tlsIndex;       // the exe's TLS index (FSchedulerTls)
+    uint32_t flagOffset;            // bReserveWorkersEnabled in the task graph object
+    uint32_t triggerThread;         // the trigger task's thread (ENamedThreads value the game passes)
+};
+struct TaskWaitGuardCounters {
+    uint64_t rescues = 0, lateTriggers = 0;
+    int64_t orphans = 0;
+};
+bool FindTaskWaitGuard();                  // no patching; false = unavailable (logged)
+bool InstallTaskWaitGuard(int mode);       // one vtable slot (start-up; afterwards the mode is live)
+void SetTaskWaitGuardMode(int mode);       // 0 the game's wait, 1 on, 2 measure only (ignored while PsoCompileThreadPool runs: it needs 1)
+int TaskWaitGuardMode();                   // the mode now; -1 = not installed
+void TaskWaitGuardTick();                  // once a second: logs waiters left without a trigger task for 1 s or more
+void LogTaskWaitGuardStats();
+bool TaskWaitGuardInfo(TaskWaitGuardInfoOut* out);
+void TaskWaitGuardTestSet(void* doReserve, void* trigger, uint8_t* reserveScheduler, uint32_t triggerThread);  // self-test only
+bool TaskWaitGuardTestWait(void* self, const void* tasks, int mode);  // self-test only: the worker branch with the fakes
+TaskWaitGuardCounters TaskWaitGuardTestCounters();                    // self-test only (resets the counters it returns)
+bool TaskWaitGuardTestConditionCheck(uint8_t** call);                  // self-test only: the stock-condition layout check again (call: the stock Call)
+int64_t TaskWaitGuardTestLiveWaits();                                 // self-test only: wait objects alive (0 when every wait is over)
+
+
 // trap_guard.cpp (TrapCrashGuard: crash guard for the old engine's trap listener, a destroyed actor still in a trap's list)
 struct TrapGuardInfo {
     uint8_t* update;            // TESTrapListener's update (the original)
@@ -532,6 +707,7 @@ bool OsPageCacheInfo(OsPageCacheInfoOut* out);
 // pso_precompile.cpp (PsoPrecompileFast: the start-up PSO precompile at UE's Fast pace outside play)
 bool InstallPsoPrecompileFast(bool beforeGameCode);  // SetBatchMode's entry detour (start-up)
 void SetPsoPrecompileFast(bool enabled);             // live (the game thread's timer applies it at its next check)
+void SetPsoPrecompileFastInGameMenus(bool enabled);  // live: Fast also in menus after play started (default: the game's pace)
 void LogPsoPrecompileStats();
 struct PsoPrecompileInfoOut {
     uint8_t* setBatchMode;
@@ -545,9 +721,24 @@ struct PsoPrecompileInfoOut {
     int requested, applied, inPlay;
     bool timerRunning;
     uint64_t switchesFast, handBacks, replaced, fastMs, doneMs;
+    bool bounded;              // the faster pace runs with the bounded render-thread budget (not UE's Fast values)
+    bool cold;                 // this precompile was found slow (cold driver cache): the game's own pace until it ends
+    int64_t* active;           // TotalActiveTasks (null: not found)
+    const char* coldWhy;       // which cold-cache guard tripped ("" while none)
+    int driverThreads;         // the driver's compile threads held now (monitor thread)
+    int driverSearches;        // searches for them in this precompile
+    bool driverGaveUp;         // none found in three searches: no driver-thread guard for this precompile
+    double driverSearchMs;     // the last search's duration
 };
 bool PsoPrecompileInfo(PsoPrecompileInfoOut* out);
 void PsoPrecompileTestOriginal(void* fakeSetBatchMode);  // self-test: a fake instead of the game's SetBatchMode, state reset
+void PsoPrecompileTestPlayMs(uint32_t ms);  // self-test: how long play must be seen before "play has started" (default 3000)
+void PsoPrecompileTestTiming(uint32_t fastMaxMs, uint32_t driverRetryMs);  // self-test: the 60 s limit, the 10 s search interval
+void SetPsoPrecompileFastBudget(float ms, int coldQueue);  // live: render-thread ms per frame at the faster pace; the queue that
+                                                           // means a cold driver cache (0: no cold-cache guard at all)
+void PsoPrecompileTestStatics(uint32_t* batchSize, float* batchTime, int64_t* active);  // self-test: fakes for the statics
+void PsoPrecompileWatchDriver();               // monitor thread, once a second: the driver's compile threads (cold-cache guard)
+void PsoPrecompileTestDriverBusy(double cores);  // self-test: one second's reading of the driver's compile threads
 // anim_teardown.cpp (AnimTeardownParallel, lab prototype: dying NPC animation data's interpolators on helper threads; off by default)
 bool FindAnimTeardownParallel();                         // locate and verify everything (no patching)
 bool InstallAnimTeardownParallel(bool beforeGameCode);   // start-up only (three calls redirected)
@@ -694,6 +885,7 @@ void AllocatorTrimTick();                             // monitor thread, once a 
 void LogAllocatorTrimStats();
 bool AllocatorTrimInfo(AllocatorTrimInfoOut* out);
 void* AllocatorTrimTestStub();                        // self-test only: the stand-in allocator object
+const char* AllocatorTrimSelfTest();                  // self-test of the give-back (obtain between passes) and the latch
 bool StreamChurnInfo(StreamChurnFixInfo* out);
 void StreamChurnTestOriginals(void* removeAt0, void* shrink1, void* buddy, void* pool, void* grow);  // self-test only
 
@@ -859,7 +1051,58 @@ VramReliefEvent MemoryReliefTestVramStep(bool reset, uint64_t vramMB, uint64_t b
 void MemoryReliefTestAllowTranslate(bool allow);  // self-test: VramReliefPauseTranslate for the test state machine
 bool MemoryReliefTestCommitStep(uint64_t commitRoomMB);  // self-test: one second of RAM/commit relief (the live state); commit relief on?
 bool GpuCrashReportTestDred(void* device);                      // self-test: the DRED part of the report
+// saves/save_bytes.cpp (SaveBytesBulk; lab: SaveStallTimers): byte arrays inside SaveGameToMemory written in one piece
+// start-up only: bulk = SaveGameToMemory's calls and FArrayProperty::SerializeItem's slots, thumb = the screenshot read-back call
+bool InstallSaveBytes(bool beforeGameCode, bool bulk, bool thumb);
+void SetSaveBytes(int bulk, bool timers, int thumbAsync);  // live, once installed (bulk / thumbAsync: 0 off, 1 on; lab 2 on + verify)
+bool SaveCallSiteValid(const GameModule& game, const uint8_t* call);  // an E8 hit inside a .pdata function, 84 C0 within 8 bytes after
+// saves/save_thumb.cpp (SaveThumbnailAsync): the save's thumbnail read back without the game / render thread waiting
+bool InstallSaveThumbAsync(uint8_t* readBackCall, void* getViewportScreenShot);  // start-up, from InstallSaveBytes
+void SetSaveThumbAsync(int mode, bool timers);
+bool SaveThumbTakeOver(void* viewport, const void* rect);  // game thread, in place of the read-back; true = taken over
+void LogSaveThumbStats();
+int SaveThumbTestDeliverOrder(const bool* save, int n, int* order);  // self-test only: the helper's delivery order
+// saves/save_refid.cpp (SaveRefIdIndex; lab: the SaveGame timer): the old engine save's formID -> refID lookups through a hash index
+bool InstallSaveRefIdIndex(bool beforeGameCode);  // start-up only (SaveGame entry, two lookup blocks)
+void SetSaveRefIdIndex(int mode, bool timers);    // live: 0 linear (the game's), 1 index, 2 index + verify
+void LogSaveRefIdStats();
+void SaveRefIdTestSetup(void* append, int mode);                       // self-test only
+uint64_t SaveRefIdTestCall(void* saveLoad, uint32_t id, bool inSave);  // self-test only
+void SaveRefIdTestNewSave();                                            // self-test only
+void LogSaveBytesStats();
+void SaveBytesTestSetup(void* arrayOrig, void* getArchive, void* byteSerialize, bool bulk);  // self-test only
+void SaveBytesTestCall(void* self, void* slot, void* value, bool inSave);                    // self-test only
 
+// ---- cloth_register.cpp (ClothRegisterLite; lab: ClothRegisterSkip, ClothRegisterVerify) ----
+struct ClothRegisterInfoOut {
+    uint8_t* recreate; uint8_t* onRegisterCall; uint8_t* setAssetCall;
+    void** execRecreateSlot; void** execSuspendedSlot; void** execEnabledSlot;
+    void* clothVtable; void** requiresSyncSlot; void** calcBoundsSlot;
+    uint8_t* equip; void** equipSlots[4]; int numEquipSlots; uint8_t* equipCall;
+    uint32_t proxyOff, registeredOff;
+    void* onRegisterHook; void* setAssetHook; void* execRecreateHook; void* execSuspendedHook; void* execEnabledHook;
+    void* requiresSyncHook; void* calcBoundsHook; void* equipHook;
+    uint8_t* addRulesCall; void* addRulesHook;  // ClothRegisterLite (npcspawn)
+    uint8_t* ccUpdateCall; uint8_t* ccEnable; void* ccUpdateHook;  // identical completion (clothfinish)
+    void** onUnregisterSlot; void* onUnregisterHook;
+};
+struct ClothRegisterStats {
+    uint64_t registers, skipped, learning, kept, rebuiltAfterSkip, lateBuilds, fallbacks, readsSync, readsSuspended, readsEnabled;
+    uint64_t liteBuilds, liteLearning, liteReplaced, liteFallbacks, rulesLeftOut;  // ClothRegisterLite
+    uint64_t completed, completeFail, twins, verified, mismatches;              // identical completion / verify (clothfinish)
+};
+bool FindClothRegisterSkip();                        // locate every site (no patching); false = unavailable (logged)
+bool InstallClothRegisterSkip(bool beforeGameCode);  // start-up only (version.dll): the native table is read at class registration;
+                                                     // installs the hooks of ClothRegisterLite and of the lab's ClothRegisterSkip
+void SetClothRegisterLite(int mode);                 // ClothRegisterLite: 0 off, 3 all lite + completion (lab: 1 all builds of a
+                                                     // call but the last lite, learned; 2 only the registration build); live
+bool ClothRegisterLiteAvailable();
+void ClothRegisterLiteTestSetup(void* addRules, void* ccEnable, void* ccUpdate);  // self-test only (after ClothRegisterTestSetup)
+void LogClothRegisterStats();
+bool ClothRegisterInfo(ClothRegisterInfoOut* out);
+ClothRegisterStats GetClothRegisterStats();
+void ClothRegisterTestSetup(void* recreate, void* execRecreate, void* execSuspended, void* execEnabled, void* requiresSync,
+                            void* calcBounds, void* equip, void* clothVtable, uint32_t proxyOff, uint32_t registeredOff);  // self-test only
 
 // ---- static_bodies.cpp (ParallelStaticBodies) ----
 struct StaticBodiesInfoOut { uint8_t* call; uint8_t* create; uint32_t handleOff, staticOff; void* hook; int threads; };
@@ -932,6 +1175,45 @@ struct ShrinkTestInfo { bool installed; uint8_t* site; void* hook; void* real; }
 ShrinkTestInfo BulkShrinkTestInfo();                    // self-test: PhysicsQueueShrinkOnce's call site and functions
 void BulkShrinkTestSetup(void* fakeExtOriginal, void* fakeShrink, bool on);  // self-test: fakes for the catch-up and shrink
 void BulkTestCatchUp(uint8_t* evolution, void** structure, uint8_t* queue);  // self-test: the catch-up's detour
+// ---- destroy_batch.cpp (PhysicsDestroyBatch): the step's destruction of removed bodies, same physics state ----
+bool InstallPhysicsDestroyBatch(bool beforeGameCode, int minProcessors);  // start-up only; the helper from minProcessors on
+void SetPhysicsDestroyBatch(int mode, int minPending);                    // live once installed (0/4 off, 1, 2, 3)
+void LogPhysicsDestroyBatchStats();
+bool PhysicsDestroyBatchTestSites(const GameModule& game);  // self-test
+const char* PhysicsDestroyBatchTestRun(int mode, int n, int gcNum, int cuNum);  // self-test: the wrapper with fakes
+const char* PhysicsDestroyBatchTestConcurrent(int callers, int rounds, int n);    // self-test: concurrent solvers
+const char* PhysicsDestroyBatchTestPaths();  // self-test: inline paths, no helper, sleeping helper, stall guard
+// ---- npc_bodies.cpp (NpcBodiesOneLock): a character's physics bodies and constraints under one hold of the scene lock ----
+bool InstallNpcBodiesOneLock(bool beforeGameCode);  // start-up only (one call redirected)
+void SetNpcBodiesOneLock(int mode);                 // live once installed: 0 off, 1 on
+void LogNpcBodiesOneLockStats();
+void NpcBodiesTestSetup(void* fakeIpa, uint32_t solverOff, uint32_t lockOff);  // self-test
+void* NpcBodiesTestHook();
+bool NpcBodiesTestFind(void** site, void** fn, uint32_t* solverOff, uint32_t* lockOff);
+// ---- rig_setup.cpp (RigVmHashMemo, RigLogicMapCache): identical shortcuts in an NPC's Control Rig set-up ----
+bool InstallRigSetup(bool beforeGameCode);  // start-up only
+void SetRigSetup(int vmHashMemo, int mapCache);  // live once installed: 0 off, 1 on, 2 verify
+void LogRigSetupStats();
+uint8_t* RigSetupTestSites(int which);  // self-test: 0 = ComputeVMHash
+struct RigSetupTestFns {
+    void *vmOrig, *staticClass, *memoryHash, *fnameCtor, *nameHash, *resizeTo, *grow32, *grow16, *empty16, *free;
+    void* mapOrig[4];  // joints, controls, morph targets, mask multipliers
+};
+void RigSetupTestSetup(const RigSetupTestFns& f);  // also clears both caches
+void* RigSetupTestNameHook();                      // the FName capture hook the fake map functions call
+uint32_t RigSetupTestVm(const void* vm);
+void RigSetupTestMap(int kind, void* data, void* hierarchy);
+void RigSetupTestCounts(uint64_t* out);  // 23 counters, see rig_setup.cpp
+int RigSetupTestReaderClasses(int state);  // reader classes in a state (1 usable, 0 unchecked, -1 refused)
+bool RigSetupTestUnwrapShape(const uint8_t* fn);  // the IDNAReader::Unwrap code-shape check
+// ---- rt_scene_keep.cpp (RtSceneBufferKeep): the ray tracing scene's TLAS buffer is not re-created smaller ----
+bool FindRtSceneKeep();
+bool InstallRtSceneKeep(bool beforeGameCode);  // start-up only
+void SetRtSceneKeep(int mode);                 // live once installed: 1 keep, 0/2 the game's way
+void LogRtSceneKeepStats();
+bool RtSceneLogCreate(int site, uint32_t size, uint32_t was, uint64_t us);  // whether a buffer creation gets a log line (0 = TLAS)
+int RtSceneKeepTestDecide(uint64_t need, uint64_t size);  // self-test only: 1 keep, 0 re-create, -1 not installed
+bool RtSceneKeepTestPatched();                    // self-test only
 // ---- physics_push.cpp (PhysicsPushParallel, PhysicsPushParallel): batch creation and parallel shape set-up of new statics ----
 bool FindPhysicsPush();                                                 // locate the sites (no patching)
 bool InstallPhysicsPush(bool beforeGameCode, int threads, int minParallel);  // start-up only (five calls redirected)

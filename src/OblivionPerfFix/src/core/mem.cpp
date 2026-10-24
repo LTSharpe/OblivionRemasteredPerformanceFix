@@ -3,6 +3,8 @@
 #include "common.h"
 
 #include <cstring>
+#include <emmintrin.h>
+#include <intrin.h>
 
 namespace opf {
 
@@ -143,7 +145,78 @@ bool MatchesAt(const uint8_t* at, const Pattern& p)
     return true;
 }
 
-std::vector<uint8_t*> FindAll(const Section& s, const Pattern& p)
+namespace {
+// How often each byte value occurs in the game's .text (parts per 65536; Steam build 0xF19077A4). Only the search speed
+// depends on it: FindAll looks for a pattern's two rarest fixed bytes first. x64 code keeps this profile across builds.
+constexpr uint16_t kTextByteFrequency[256] = {
+     5293,  1125,   505,   570,   501,   702,   277,   232,   748,    95,   103,   108,   266,   306,    80,  2475,
+      810,   347,    63,    50,   132,   199,    85,    70,   274,    85,    57,    39,    86,    69,    42,   138,
+      610,    58,    49,    59,  1746,    69,    33,    46,   645,   172,    41,   108,    65,    46,    54,    61,
+      403,    48,    56,   300,    86,    51,    34,    39,   269,   126,    66,   252,    77,    63,    40,    49,
+      530,   996,   150,   249,   971,   613,   112,   139,  5259,   606,    73,   100,   926,   360,    67,    81,
+      316,    56,    41,    98,   180,   157,    93,   209,   253,   216,    67,   105,   344,   128,   111,   164,
+      183,    39,    87,   214,    65,    62,   497,    33,   109,    46,    25,    57,   117,    49,    51,    77,
+      173,    40,    64,    79,   674,   362,    86,    60,   147,   109,    44,    82,   193,   164,    95,   109,
+      228,   160,    56,   855,   334,   713,    54,    78,   201,  1463,    36,  3127,    87,  1359,    54,    61,
+      178,    37,    36,    34,    60,    63,    28,    39,    93,    40,    22,    25,    68,    40,    27,    33,
+      112,    30,    24,    29,    47,    32,    22,    33,   100,    27,    30,    28,    55,    32,    27,    44,
+      125,    37,    32,    33,    70,    39,   126,    87,   164,    83,   103,    45,    69,    57,    42,    53,
+      617,   436,   203,   401,   534,   289,   238,   388,   342,   311,   106,   220,  1803,    71,   123,   144,
+      223,   104,   172,    99,    61,    56,    81,   108,   157,    89,    77,   137,    51,    43,    46,    55,
+      172,    94,    94,   154,    59,    43,    43,    55,   994,   181,    56,   201,   226,    69,    46,    62,
+      259,    76,   338,   276,    43,    45,   167,    82,   256,   132,   117,   155,   180,   201,   223,  1412,
+};
+
+std::atomic<uint64_t> g_scanCalls{0}, g_scanTicks{0}, g_scanBytes{0}, g_scanMismatches{0};
+std::atomic<int> g_scanMode{0};  // 0 fast, 1 fast checked against the reference, 2 reference only
+ScanObserver g_scanObserver = nullptr;
+
+uint64_t Ticks()
+{
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    return static_cast<uint64_t>(t.QuadPart);
+}
+
+// The fast search: every start in [begin, end - size] where the pattern matches, in address order (the same set and
+// order as FindAllReference). SSE2 compares the pattern's two rarest fixed bytes at 16 starts at once; only starts
+// where both match are checked in full with MatchesAt.
+std::vector<uint8_t*> FindAllFast(const Section& s, const Pattern& p)
+{
+    std::vector<uint8_t*> hits;
+    if (p.size() == 0 || !p.care[0] || static_cast<size_t>(s.end - s.begin) < p.size()) return hits;
+    size_t k1 = 0, k2 = 0;  // offsets of the rarest and the second-rarest fixed byte (k2 = k1 with one fixed byte)
+    for (size_t i = 1; i < p.size(); ++i) {
+        if (!p.care[i]) continue;
+        const uint16_t f = kTextByteFrequency[p.bytes[i]];
+        if (f < kTextByteFrequency[p.bytes[k1]]) k2 = k1, k1 = i;
+        else if (k2 == k1 || f < kTextByteFrequency[p.bytes[k2]]) k2 = i;
+    }
+    const __m128i b1 = _mm_set1_epi8(static_cast<char>(p.bytes[k1]));
+    const __m128i b2 = _mm_set1_epi8(static_cast<char>(p.bytes[k2]));
+    uint8_t* at = s.begin;
+    uint8_t* const last = s.end - p.size();  // the last start: the loads below read at most up to last + k + 15
+    for (; last - at >= 15; at += 16) {      // (k < size), so never past the section's end
+        const __m128i x1 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(at + k1));
+        const __m128i x2 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(at + k2));
+        unsigned mask = static_cast<unsigned>(
+            _mm_movemask_epi8(_mm_and_si128(_mm_cmpeq_epi8(x1, b1), _mm_cmpeq_epi8(x2, b2))));
+        while (mask) {
+            unsigned long bit;
+            _BitScanForward(&bit, mask);
+            mask &= mask - 1;
+            if (MatchesAt(at + bit, p)) hits.push_back(at + bit);
+        }
+    }
+    for (; at <= last; ++at)
+        if (MatchesAt(at, p)) hits.push_back(at);
+    return hits;
+}
+}  // namespace
+
+// The original search (OblivionPerfFix up to 1.1.5): memchr for the pattern's first byte, then MatchesAt. Kept as the
+// reference that the self-test and the lab key ScanVerify compare FindAll with.
+std::vector<uint8_t*> FindAllReference(const Section& s, const Pattern& p)
 {
     std::vector<uint8_t*> hits;
     if (p.size() == 0 || !p.care[0] || static_cast<size_t>(s.end - s.begin) < p.size()) return hits;
@@ -154,6 +227,39 @@ std::vector<uint8_t*> FindAll(const Section& s, const Pattern& p)
         if (MatchesAt(at, p)) hits.push_back(at);
     }
     return hits;
+}
+
+std::vector<uint8_t*> FindAll(const Section& s, const Pattern& p)
+{
+    const int mode = g_scanMode.load(std::memory_order_relaxed);
+    const uint64_t t0 = Ticks();
+    std::vector<uint8_t*> hits = mode == 2 ? FindAllReference(s, p) : FindAllFast(s, p);
+    const uint64_t ticks = Ticks() - t0;
+    g_scanCalls.fetch_add(1, std::memory_order_relaxed);
+    g_scanTicks.fetch_add(ticks, std::memory_order_relaxed);
+    g_scanBytes.fetch_add(static_cast<uint64_t>(s.end - s.begin), std::memory_order_relaxed);
+    if (mode == 1) {
+        std::vector<uint8_t*> ref = FindAllReference(s, p);
+        if (ref != hits) {
+            const uint64_t n = g_scanMismatches.fetch_add(1) + 1;
+            if (n <= 20)
+                Log("[scan] verify: MISMATCH %zu-byte pattern (first byte %02X) over %zu bytes: fast %zu hit(s), reference %zu",
+                    p.size(), p.bytes.empty() ? 0 : p.bytes[0], static_cast<size_t>(s.end - s.begin), hits.size(), ref.size());
+            hits.swap(ref);  // the reference result is used
+        }
+    }
+    if (const ScanObserver observe = g_scanObserver) observe(s, p, hits, ticks);
+    return hits;
+}
+
+void SetScanMode(int mode) { g_scanMode.store(mode); }
+void SetScanObserver(ScanObserver observe) { g_scanObserver = observe; }
+ScanStats GetScanStats()
+{
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+    return {g_scanCalls.load(), QpcToMicroseconds(g_scanTicks.load(), static_cast<uint64_t>(f.QuadPart)), g_scanBytes.load(),
+            g_scanMismatches.load()};
 }
 
 uint8_t* RipTarget(const uint8_t* insn, size_t dispOffset, size_t insnLen)

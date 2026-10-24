@@ -271,6 +271,59 @@ loading itself is unchanged (arrival 2.7-3.1 s after the door is used, both).
   - GameThread time per frame went from 12.99 to 12.46 ms.
   - Frozen images on vs off: SSIM 0.992, the same as off vs off.
 
+<a id="watercapture"></a>
+
+### Water pictures redrawn without work nobody sees (`WaterCaptureFsrSkip`, `WaterCaptureNoRhiFlush`, `WaterCaptureNoOcclusionWait`, `WaterCaptureFastMeshScan`)
+
+[Explanation](how-it-works.md#watercapture).
+
+- **Found (2026-10-22, Imperial City flight, 4K at the test PC's play settings):** the stone-bridge and lake hitches were
+  render-thread-bound frames. The render thread was in `UpdateWaterInfoRendering_RenderThread` (exe+0x42EEDA0, UE 5.3
+  Water plugin): three standalone `FSceneRenderer`s (ground depth, water bodies, dilation) into a zone's 32 x 32 or
+  256 x 256 water-info texture. Trigger: `AWaterZone::OnLevelChanged` / `AddWaterBodyComponent`, i.e. every World
+  Partition level streamed in or out that holds a landscape proxy or a water body touching the zone. A timing probe
+  counted about 155 zone updates per flight, none with the same inputs as the zone's previous update, so skipping
+  updates is never identical.
+- **What each update did that the result does not need:**
+  (1) AMD's FSR3 FX system `PostRenderOpaque` (vtable slot exe+0x799AF18) re-creates its `FFXFSR3SceneColorPreAlpha`
+  texture whenever a renderer's scene colour has another size: once at the water size, then again at full size for the
+  next main view (97 % of the callback is `RHICreateTexture`). The copy is read only by FSR3's upscaler; the water views
+  use no anti-aliasing method and are never upscaled, and the main view copies its whole scene colour over the texture
+  before its upscaler reads it.
+  (2) A scene renderer created on its own defaults to `bIsFirstSceneRenderer = true` (SceneRendering.cpp), so each water
+  renderer calls `EndFlushResourcesRHI` (exe+0x26B77C0): the render thread waits until the RHI thread has translated
+  everything queued. UE's own non-first view families of a frame skip that flush; the main renderer still flushes once
+  per frame.
+  (3) With the flush gone the wait moved to `FSceneRenderer::WaitOcclusionTests` (exe+0x22EC8E0): each renderer waits on
+  the occlusion fence the previous renderer pushed. The fence protects reads of occlusion-query results, and every read
+  goes through the view's `FSceneViewState`; the water views have none (WaterInfoRendering.cpp), so they read no results.
+  The renderers still push their own fences, so the main view still waits on the latest one, which follows its own
+  previous-frame queries in RHI order. A renderer with several view families switches the skip off for the session.
+  (4) `FEnableWaterInfoMeshesScoped` (exe+0x42B0540) runs twice per update and reads every scene proxy's
+  `PrimitiveComponentId` (a cache miss per heap object) to find the few in the view's `ShowOnlyPrimitives` set. `FScene`
+  keeps the same ids packed index for index in `PrimitiveComponentIds`; both arrays change only together inside
+  `FScene::UpdateAllPrimitiveSceneInfos`, and the constructor runs outside it.
+- **The change:** the water-info render's entry is detoured to mark a thread-local scope. Inside it only: (1) the FSR3
+  callback returns at once, (2) `EndFlushResourcesRHI` returns at once, (3) `WaitOcclusionTests` returns at once, and
+  (4) the mesh scan reads the packed ids with the stock set lookup and runs the game's constructor on a stand-in scene
+  that lists only the matching proxies, so the game's code does its own test, enable and append. Per call it falls back
+  to the game's scan when the scene's two array getters are not as expected, the arrays differ in length, or the first
+  or last packed id is not its proxy's own id. Each function is found through its single caller (or its unique body)
+  and its first bytes are checked; any miss leaves that part off. Installed at start-up (version.dll route) when any of
+  the four keys is on, then live.
+- **Why identical:** reviewed independently from the UE 5.3 source for each key. A forced re-draw of every water zone
+  with the keys off and on gave bit-identical raw texture values (10 zones, 32 x 32 and 256 x 256); the maintainers'
+  check mode of the mesh scan compared every fast scan with the game's (no difference, no fallback); screenshots of
+  the bridge and the lakes: the same within the run-to-run variation.
+- **Results** (showcase flight, the test PC's play settings: 4K, FSR Performance, frame generation, 60 fps cap; one
+  held game, keys switched live): `WaterCaptureFsrSkip` + `WaterCaptureNoRhiFlush`, A,B,A,B: render-thread-bound time
+  over 16.7 ms 889 / 588 -> 411 / 368 ms per flight, frames of 33 ms or more 67 / 37 -> 37 / 28, all frames' time over
+  16.7 ms 3,731 / 2,958 -> 2,886 / 2,558 ms; the water-info frames' share of the slow frames' excess 22-24 % -> 15 %.
+  `WaterCaptureNoOcclusionWait` on top, A,B,A,A,B: render thread per water update 7.5 -> 5.1 ms (1,183 -> 799 ms per
+  flight), render-thread-bound time over 16.7 ms 318 -> 223 ms; frame totals within the run-to-run noise.
+  `WaterCaptureFastMeshScan`: the constructor's own time was measured with a timer on maintainer slices of this flight
+  (not in the public benchmark), so no number is quoted here; it is small next to the three others.
+
 ## Travelling: memory and threads
 
 <a id="lumenkeeparraycapacity"></a>
@@ -374,6 +427,65 @@ loading itself is unchanged (arrival 2.7-3.1 s after the door is used, both).
   or door), which these one-way benchmark routes do not produce; its effect over a long play session is not measured
   yet.
 
+<a id="rtscenebufferkeep"></a>
+
+### The ray-traced scene's list keeps its memory (`RtSceneBufferKeep`)
+
+[Explanation](how-it-works.md#rtscenebufferkeep).
+
+- **Found (2026-10-20, 4K at the test PC's play settings, horse routes):** the render-thread stalls of the worst frames
+  were the render thread in `NtGdiDdDDIWaitForSynchronizationObjectFromCpu` under D3D12 resource creation, called from
+  `FRayTracingScene::Create` (exe+0x2208A30, UE 5.3 RayTracingScene.cpp:88) creating the TLAS result buffer
+  "FRayTracingScene::SceneBuffer"; the GPU was idle meanwhile (its paging fence while video memory made room). UE 5.3
+  re-creates that buffer when the need is above its size or below half of it (16 MiB steps): it dropped after every
+  scene start and grew back in several creations, at the same places on every pass. Each creation is normally a few
+  milliseconds; the stalls occurred only near the video memory budget.
+- **The change:** the check `cmp; ja grow; shr rax,1; cmp; jae keep` becomes a call to a stub that answers "keep" for the
+  shrink case (the growth case and the registers as in the game). The three `RHICreateBuffer` calls of `Create`, recognised
+  by the debug names they pass, are timed for the stats line (a creation is logged only when the TLAS changes size or a
+  creation takes 1 ms or more, 5 ms for the upload buffers). Start-up install; then 1 = keep, 0 / 2 = the game's way.
+- **Why identical:** the TLAS is built at the start of the buffer it is given and the ray tracing layers' views use the
+  scene's own offsets, so the acceleration structure is the same; screenshots of the same flight with and without the
+  fix showed no difference beyond the flight's own end-point variation. Extra video memory: at most the session's largest
+  TLAS size minus the current need.
+- **Results:** with the fix the buffer was kept instead of shrinking for over a thousand frames per pass and not
+  re-created again within a pass; on a loading screen the engine drops it (the "no buffer" path), so the first growth
+  after a door still happens, now in one creation. The routes used are maintainer routes that are not in the public
+  benchmark, so no frame numbers are quoted here. Self-test: the site, the patch and the stub's decisions in both modes.
+
+<a id="naniteinitialrootpages"></a>
+
+### Nanite's page block starts big enough (`NaniteInitialRootPages`)
+
+[Explanation](how-it-works.md#naniteinitialrootpages).
+
+- **Found (2026-10-22, showcase flight at the test PC's play settings, fresh game processes):** a freeze of up to
+  ~1.7 s about 45 s into the Imperial City flight, just past the Talos bridge, always at the same place. In the long
+  frame the render thread was in `Nanite::FStreamingManager::ProcessNewResources` (exe+0x35D2FA0, UE 5.3
+  NaniteStreamingManager.cpp) -> `ResizeByteAddressBufferIfNeeded` -> `CreateCommittedResource`, waiting on the paging
+  fence, and the GPU then needed up to ~1.2 s more; video memory rose by ~0.55 GB at that moment and fell back. The
+  buffer is ClusterPageData: the 512 MiB streaming pool plus root pages x 32 KiB, root pages = max(
+  `r.Nanite.Streaming.NumInitialRootPages` (2048), the root-page allocator's size rounded up to 2 significant bits). The
+  first time a process needs more than 2048 root pages it makes a new 608 MiB buffer beside the 576 MiB one and copies
+  it on the GPU. Once grown it does not grow again in that process, which is why runs in one held game never froze.
+- **The change:** at start-up the value of `r.Nanite.Streaming.NumInitialRootPages` becomes 3072, the first growth step
+  (2048 rounded up to 2 significant bits, just past it), so the buffer starts at 608 MiB and that re-creation is never
+  needed; past 3072 root pages the engine grows it as before. The variable is found through its registration and
+  checked against `ProcessNewResources`' read of it, and is written only while it holds the built-in 2048 (an Engine.ini
+  line, applied later, still wins). It is the same as `r.Nanite.Streaming.NumInitialRootPages=3072` under
+  `[SystemSettings]` in Engine.ini (tested that way too: the same buffer sizes). The version.dll route writes it before
+  the variable is registered; the OBSE64 route runs the start-up after the static initialisers and before `WinMain`
+  (no ini read, no renderer yet), and writes the same int (the console variable's displayed value stays 2048 there).
+- **Why identical:** root pages are addressed from `MaxStreamingPages` (`GPUPageIndexToGPUOffset`), not from the buffer's
+  size; the bigger buffer only has unused space at its end. The other users of the count are `RootPageInfos` and a
+  stat. Visual pass (small profile, Cheydinhal canal and chapel square at noon): the same.
+- **Cost:** +32 MiB of video memory from the first area on (stock reaches the same 608 MiB at the bridge). 4096 would
+  also skip the next step, for +64 MiB.
+- **Results** (showcase, the test PC's play settings, a fresh game per run): stock, five runs: long frames adding up to
+  952, 1,739 (1,416 + 323), 1,333 (731 + 602) and 121 ms at the spot, and once 19 ms (the re-creation is deterministic,
+  its cost depends on how full video memory is); with 4096 and with 3072, one run each: the buffer was never
+  re-created, no freeze, worst frames of the flight 119 and 66 ms.
+
 <a id="instanceclearreserve"></a>
 
 ### Clearing grass without re-copying its list (`InstanceClearReserve`)
@@ -449,6 +561,37 @@ Memory: the game's private bytes and working set rose by about the cap (0-60 MB)
 [Explanation](how-it-works.md#busywaitflagcheck).
 
 **Measured:** Imperial City flight, small profile: tiles built inside a wait 6 in 10 flights without the fix (frame stalls of 82 ms to 2.6 s), 0 in 7 with it (largest tick-group-0 wait 29 ms); 4K FG test completed without a crash.
+
+<a id="navlinkfast"></a>
+
+### Navigation tiles linked with less searching (`NavLinkFast`)
+
+[Explanation](how-it-works.md#navlinkfast).
+
+- **Found (2026-10-23, a maintainer road route at the test PC's play settings):** some slow frames' tail was level
+  streaming's `AddToWorld`, and its largest single items were `ANavigationDataChunkActor::BeginPlay`:
+  `UNavigationSystemV1::AddNavigationDataChunk` -> `ARecastNavMesh::OnStreamingNavDataAdded` -> `AttachTiles` ->
+  `dtNavMesh::addTile` per tile (UE 5.3 DetourNavMesh.cpp). `addTile` calls `connectExtLinks` for every other layer of the
+  tile's cell and every layer of the 4 neighbouring cells, both ways; each call walks the tile's polygons and, for each
+  portal edge on the side, calls `findConnectingPolys`, which walks all polygons of the target. A probe counted many
+  `connectExtLinks` calls per chunk, most of which could not make a link (the tile had no portal edge for that side,
+  or the target had no polygon facing back). One chunk attach is one actor, so the engine's time-slicing of
+  `AddToWorld` cannot split it.
+- **The change:** per tile, one walk (cached for the chunk attach, keyed by the tile's slot, salt, header and polygon
+  count) notes the sides its portal edges point to and, per side, the polygons with an edge marked exactly for it.
+  (1) A `connectExtLinks` call is left out when the tile has no portal edge the call would look at, or the target has
+  no polygon marked for any side those edges would search: then every search the stock call makes returns nothing, so
+  it makes no link and changes nothing. (2) A call that is made searches through `findConnectingPolys`' one call site:
+  the game's own `findConnectingPolys` runs once per listed polygon on a copy of the target's tile descriptor that
+  starts at that polygon, so it does exactly the per-polygon work of its own loop; each entry's polygon reference is then
+  written as the stock code computes it for the real tile. Tiles with polygons of more than 6 vertices and odd sides take
+  the stock path. The four call sites in `addTile` and the one in `connectExtLinks` are checked before they are written,
+  only while the game starts (version.dll route).
+- **Why identical:** the maintainers' check mode compared every fast search with the stock search in the game, byte
+  for byte (no difference), and made every left-out call anyway (none made an entry); the self-test does the same on
+  thousands of random tiles, against a brute-force run of every search the stock call would make.
+- **Results:** chunk attaches became cheaper with the same links, and the frame totals moved within the run-to-run
+  noise. The route is a maintainer route that is not in the public benchmark, so no numbers are quoted here.
 
 ## Travelling: physics, when a new area arrives
 
@@ -602,6 +745,26 @@ frames that carry them 21-27 ms instead of 24-32 ms. At the test PC's own play s
 runs each way) the main thread's hand-overs at C 1.3-1.4 ms in all instead of 9.5-15.1 ms; the frame totals there are
 within the run-to-run noise. No change on the Brotch walk.
 
+<a id="physicsdestroybatch"></a>
+
+### Removed collision taken apart faster (`PhysicsDestroyBatch`)
+
+[Explanation](how-it-works.md#physicsdestroybatch).
+
+**Where the time went (2026-10-22, Imperial City flight, timers on the physics step's stages):** the main thread's
+EndPhysics waits at the stone bridge were bodies being removed, not added: World Partition unregisters one big
+instanced mesh (1,000-2,500 bodies) per frame, and each body costs the step ~1.8 us to disable and ~3.4 us to take apart
+(1.44 us deleting its proxy object, 0.35 us rebuilding the particle views). Over the flight the destruction was 31 % of
+the EndPhysics waits above a calm frame's.
+
+**Measured.** 480p, one held game, four runs each way: 3.46 -> 1.88 us per body; at the stone bridge (outbound) the
+EndPhysics wait in frames waiting 5 ms or more 120 -> 73 ms. At the test PC's own play settings (4K, FSR Performance,
+frame generation, 60 fps cap; showcase flight, one held game, two A-B-B-A blocks, four flights each way): 3.67 -> 2.02 us
+per body; EndPhysics waits 950 -> 767 ms per flight (878-1080 vs 738-795); their part in frames of 25 ms or more
+365 -> 260 ms (328-442 vs 243-275), about 5.6 % of those frames' time over 16.7 ms; stone bridge (outbound): frames of
+25 ms or more 14.0 -> 11.5, worst 41 -> 32 ms. Frame totals: time over 16.7 ms 6,119 -> 5,851 ms, frames of 25 ms or
+more 149 -> 134 (within the run-to-run noise: one block showed the gain, the other none).
+
 ## Travelling: characters and cells
 
 <a id="npcfadeinnorebuild"></a>
@@ -701,6 +864,89 @@ within the run-to-run noise. No change on the Brotch walk.
   regression. On the Silver Road climb (3 runs) a flow waited 5 frames with one create per frame (19.8-22.8 ms
   frames): the two creates the old bound would have drained into one ~29 ms frame ran in frames of 20.1 and 21.7 ms. The order of every command between the threads is unchanged; the OT waits up to 8 GT frames instead of
   3 (it waits for the stock game's single long frame the same way).
+
+<a id="clothregisterlite"></a>
+
+### Robes built once instead of up to three times (`ClothRegisterLite`)
+
+[Explanation](how-it-works.md#clothregisterlite).
+
+- **Found (2026-10-08 to 10-20, NPC creation profiles):** inside one `EquipBodyPart` call (exe+0x484CCD0) a robe's
+  `UChaosClothComponent` builds `FClothSimulationProxy` at registration (`OnRegister` -> `RecreateClothSimulationProxy`,
+  UE 5.3 ChaosClothAsset ClothComponent.cpp) and its Blueprint's `OnAttachedToPhenotype` rebuilds it once or twice; each
+  rebuild starts with `ClothSimulationProxy.Reset`, so the earlier proxies are never ticked or rendered. Most of a build
+  is `FClothingSimulationCloth::FLODData::Add`'s `FClothConstraints::AddRules`. A first attempt that left the
+  registration build out altogether was not identical: the registration itself reads its bounds (`UpdateBounds`).
+- **The change:** every build inside the call is made without `AddRules` ("lite"). Each lite build records its `AddRules`
+  calls (the constraints object and arguments, the LOD's particle X / InvM at that moment) and the constructor's
+  `FClothConstraints::Update` calls. At the end of the call the proxy that is left is completed in place: X put back for
+  `AddRules` (InvM must be unchanged), the rules added per LOD in order, `FClothConstraints::Enable` for the active particle
+  ranges, the Update calls replayed. Records of proxies dropped inside the call (`OnUnregister`, a second registration)
+  are retired; anything unexpected rebuilds that cloth in full. Hooks: the native table's exec thunks, `OnRegister`'s and
+  `SetSkinnedAssetAndUpdate`'s calls, two vtable slots, `EquipBodyPart`, the `AddRules` and `Update` call sites; layout
+  offsets checked against the code that uses them. Start-up install (the native table is read at class registration).
+- **Why identical:** the bounds a lite proxy shows come from the particles' positions (`AddParticles` / `ResetStartPose`
+  before `AddRules`, and `Solver->Update(0)`, which with a zero time step never steps the evolution, the only place rules
+  act); `FClothConstraints::Update` / `Enable` test every constraint pointer, so a rule-less cloth runs through the same
+  code. The completed proxy gets rules from the same inputs in the same order (the evolution's constraint ranges get the
+  same offsets). Verified with the maintainers' build: every completed proxy compared bit for bit with a full build made
+  beside it, on routes with hundreds of robes: no mismatch, no fallback.
+- **Results:** cheaper NPC equipment steps and fewer hitch frames where many robed characters appear at once, measured
+  at the test PC's play settings together with the three keys below; the routes are not in the public benchmark yet, so
+  no numbers are quoted here. Self-test: every site, the install, and lite builds and completions against fakes (key
+  switched off mid-call, 12 LODs, spoiled constraints, unregistration).
+
+<a id="rigvmhashmemo"></a>
+
+### Animation rig set-up remembered (`RigVmHashMemo`, `RigLogicMapCache`)
+
+[Explanation](how-it-works.md#rigvmhashmemo).
+
+- **Found (2026-10-20, NPC creation profiles):** every `UControlRig` an NPC's anim graph creates (2-3 per humanoid) calls
+  `URigVM::ComputeVMHash` (exe+0x49A95D0, RigVM.cpp:327) four times (`PostInitInstance` and `InstantiateVMFromCDO`, on
+  the instance and on the class default object). The head rig's `FRigUnit_RigLogic` (RigUnit_RigLogic.cpp:85) on its
+  first run maps every DNA joint, control, blend shape and animated-map name to a hierarchy index through `FString`
+  building, `FName` creation (name pool lock) and the hierarchy lookup, on a worker the game thread waits for.
+- **The change:** `ComputeVMHash`'s entry jumps to a memo keyed on everything the function reads (function names, byte
+  code with its alignment, branch infos, external variables' names and types, the memory storage classes' hashes computed
+  with the game's own functions), compared in full. `InitializeRigLogic`'s four map calls go to a cache that keeps, per
+  DNA content, the `FName`s the stock function created (captured at its own `FName` call site) and the reader-side
+  values, keyed on everything it read from the DNA reader in its order; a later head with the same reads replays the
+  same `TArray` operations and does every hierarchy lookup live. Reader classes are checked once (the `Unwrap` code shape,
+  the dna getters) and every captured dna string must equal the stock `FString` getter's result, else that class is left
+  to the game. Both functions' bytes are checked in full; start-up install, then live.
+- **Why identical:** `ComputeVMHash` is a pure function of its inputs; an `FName` of a given string never changes once
+  it exists and the lookups are live, so the indices are the stock ones. Verified with the maintainers' build (a mode
+  that runs the game's function beside the cache and compares): thousands of hashes and hundreds of heads per map,
+  Argonian and Khajiit heads included, no mismatch.
+- **Results:** see `ClothRegisterLite` above (measured together). Self-test: the sites, the memo against a fake hash over
+  every input (any change misses, a copy at another address hits), the map replay against reference functions written
+  from the UE 5.3 source, refused reader classes, verify mode.
+
+<a id="npcbodiesonelock"></a>
+
+### A character's physics bodies made under one lock (`NpcBodiesOneLock`)
+
+[Explanation](how-it-works.md#npcbodiesonelock).
+
+- **Found (2026-10-20, NPC creation profiles):** `USkeletalMeshComponent::InitArticulated` (exe+0x36E3100,
+  SkeletalMeshComponentPhysics.cpp:665) -> `InstantiatePhysicsAsset_Internal` (exe+0x36E8080) creates ~37 bodies per
+  humanoid and their constraints; every `FBodyInstance::InitBody` and `InitConstraint` goes through
+  `FPhysicsCommand::ExecuteWrite`, whose lock scope takes the solver's recursive SRW write lock (~550 lock scopes per
+  humanoid create); the game thread waited in those acquires behind scene queries on other threads.
+- **The change:** `InitArticulated`'s call of `InstantiatePhysicsAsset_Internal` is redirected to a wrapper that takes
+  the same lock once, the game's way (write count in the lock's TLS slot, `AcquireSRWLockExclusive` for the first hold),
+  and releases it after; the nested `ExecuteWrite`s only count. `InitArticulated`, `InstantiatePhysicsAsset_Internal`,
+  `InstantiatePhysicsAssetBodies_Internal` and `InitConstraint` must equal build 19115871's bytes (FNV-1a over each whole
+  function); the solver and lock offsets are read from `ExecuteWrite` and its lock scope.
+- **Why equivalent:** the game thread runs the same code with the same arguments in the same order. Other threads see the
+  scene before the first body or after the last constraint, both states the stock game can show them (lock order between
+  threads is not fixed), so the outcomes are a subset of the stock ones. Nothing inside the hold waits for another
+  thread (5.3 source), so it cannot deadlock. The hold also covers shape creation, which readers now wait for: measured
+  in the maintainers' build with a lock-wait probe, the extra reader waits were a very small share of the workers' time;
+  holds are logged every minute (count, mean, longest).
+- **Results:** see `ClothRegisterLite` above (measured together). Self-test: the sites and pinned functions, then the
+  wrapper with a fake: off, on (one hold, released after), nested inside a hold, no solver, no scene.
 
 <a id="animteardownparallel"></a>
 
@@ -877,6 +1123,66 @@ switched live on/off/off/on, four opens each):** the frame that opens the invent
 170 ms -> ~121 ms, screen still ~115 ms -> ~70 ms. Pictures of the inventory and of the world after closing look the
 same with and without. Closing the menu is not affected (that hitch is the world's first frame being drawn again).
 
+## Saving
+
+Measured 2026-10-19 in a held save-free scene (quicksaves by `Altar.QuickSave` through the benchmark bridge, also
+`Altar.AutoSave`, the quicksave input handler and door autosaves with `Altar.SaveOnLoading 1`), frames from the hitch
+ledger, keys switched live in A-B-B-A order.
+
+<a id="savebytesbulk"></a>
+
+### `SaveBytesBulk`
+
+[Explanation](how-it-works.md#savebytesbulk).
+
+- **Found:** stack samples of a save frame: `UGameplayStatics::SaveGameToSlot` for `saves_meta.sav` on the game thread,
+  twice per save, inside `SaveGameToMemory`; ~1.6 MB of the list are `TArray<uint8>` thumbnails, and a tagged (not
+  unversioned) archive sends them through `FArrayProperty::SerializeItem` -> `FByteProperty::SerializeItem` ->
+  `Ar.Serialize(&b, 1)` per byte (UE 5.3 PropertyArray.cpp / PropertyByte.cpp): 14-17 ms per list write at any resolution.
+- **Result:** per write 14-17 -> 1.7-2.7 ms; the save frame at 4K (user's settings) 91-109 ms (median 104) -> 80-88 ms
+  (median 84) with this key alone.
+- **Identity:** for an archive whose `Serialize(p, n)` equals n calls of `Serialize(p + i, 1)` (memory writer behind the
+  name-as-string proxy, as `SaveGameToMemory` builds it) the bytes are the same; the self-test runs the game's
+  function and the hook on random arrays into a recording archive; the test build's verify mode wrote every save both
+  ways in game and compared (identical, 21/21). Call sites: an SSE2 scan for `E8` calls to `SaveGameToMemory` (4 in
+  build 19115871), each checked to lie in a `.pdata` function and be followed by `test al,al` within 8 bytes.
+
+<a id="savethumbnailasync"></a>
+
+### `SaveThumbnailAsync`
+
+[Explanation](how-it-works.md#savethumbnailasync).
+
+- **Found:** `UGameViewportClient::ProcessScreenShots` reads the save's screenshot with `GetViewportScreenShot` ->
+  `FRenderTarget::ReadPixels` (a render command with `ImmediateFlush(FlushRHIThread)` + `RHIReadSurfaceData`, then
+  `FlushRenderingCommands`): 42-50 ms of game-thread wait at 4K, 17-25 ms at 480p. Its broadcast reaches the save's
+  thumbnail callback (copy, remove, trigger the JPEG task's event) and the save system's permanent screenshot cache.
+- **Result (all three keys):** 4K, 60 cap, frame generation: save frame 90-113 ms (median 110) + a 30-43 ms second frame
+  -> 25-32 ms (median 28), no second frame above ~28 ms; 480p 70-77 (median 75) -> 27-30 ms. The picture is delivered
+  50-80 ms after the request at 4K (25-45 ms at 480p).
+- **Identity:** the same render command's copy point (`FRHIGPUTextureReadback::EnqueueCopy`), the same conversion as
+  `ScreenshotReadbackConvert`; the test build's verify mode compared every pixel with the game's own read-back: 12/12
+  identical (480p and 4K with frame generation; quick, auto, input-handler and door autosaves). Delivery order: the
+  cache listener first, then the save callbacks (the save callback's event lets the save continue, which reads the
+  cache). Taken over only when every listener is the save's callback or the cache; others (pause-menu save, rest/wait)
+  run the game's way.
+
+<a id="saverefidindex"></a>
+
+### `SaveRefIdIndex`
+
+[Explanation](how-it-works.md#saverefidindex).
+
+- **Found:** stack samples of the old engine thread during saves: `TESSaveLoadGame::SaveGame` spends its time in formID
+  -> refID lookups, a linear search over the save's formID table (inline in `SaveFormIDs` and `GetRefID`) with an append
+  on a miss. A fresh game: ~4,000 entries, 32,000-40,000 lookups, 22-28 million entries read per save; the table only
+  grows over a game.
+- **Result:** the old engine's `SaveGame` 30-36 -> 23-31 ms at 480p, 28-35 -> 19-23 ms at 4K (new game). The gain on a
+  long game's save is larger but not measured (it needs a long-game save; the benchmark is save-free).
+- **Identity:** the index returns the first position, as the linear search does; self-test over a million random
+  lookups with repeats, clears, outside appends and reallocations; the test build compared every lookup in game:
+  0 differences in ~300,000.
+
 ## Frame generation
 
 <a id="framegenasynccompute"></a>
@@ -978,6 +1284,82 @@ Game bugs (they also happen without OblivionPerfFix). Bugs in our own fixes are 
 
 - **Results:** self-test with the real vtables and the crash's freed header; installed live (Kvatch plane runs).
 
+<a id="objectreplacecrashguard"></a>
+
+### A rare object-list crash turned into a log line (`ObjectReplaceCrashGuard`)
+
+[Explanation](how-it-works.md#objectreplacecrashguard).
+
+- **Found (crash dumps of 2026-10-12 and 2026-10-21):** "LowLevelFatalError UObjectArray.cpp:234 Attempting to add
+  CombatMovement_IDLE (ProcedureExecution_WANDER) at index ... but another object exists at that index". The object being
+  added is the "other object": `StaticAllocateObject` (exe+0x111F2D0) replacing an existing object in place (find by
+  outer and name, BeginDestroy / FinishDestroy, then under `GUObjectArray`'s lock `~UObject()` with index recycling off,
+  then the same memory constructed again at the old index). The AI's combat-movement setter (exe+0x47E5690) drops its
+  old movement object and calls `NewObject(controller, "CombatMovement_<mode>")`, so re-entering a mode before the next
+  garbage collection re-creates the old object in place: routine in fights. In both dumps the slot held the state after
+  FinishDestroy with the free never done; `~UObjectBase` (exe+0x110BEE0) skips `FreeUObjectIndex` when the class pointer
+  reads null (or `GIsCriticalError` is set, ruled out). Why the header changed in that window is not known. None of the
+  DLL's code was on the stack or in that path; both crashes were with the DLL installed, so a cause on our side is not
+  ruled out.
+- **The change:** the 8 bytes `mov rcx,rdi; mov rax,[rdi]; call [rax]` at that destructor call become `mov rcx,rdi; call`
+  a near jump to a function that makes the same call, reads the old index from the caller's frame and checks that slot.
+  Freed (every normal case): nothing else. Still holding the destroyed object: the slot is cleared as `FreeUObjectIndex`
+  does with recycling off, and the object's header before and after is logged. Patterns: the destroy sequence (the lock
+  and recycling targets must be `GUObjectArray`+0x30 / +0xB4), the old index's store and `AddObject`'s read at the same
+  frame offset, and `~UObjectBase` with the same `GUObjectArray`; any mismatch: not installed, with a log line. Start-up
+  install, then live (0 = count only, the stock fatal).
+- **Results:** self-test (the sites, a normal destroy untouched, a kept slot released or only counted, another object's
+  slot and bad indices untouched). In the game: in-place re-creations are routine (about 40 a second in a kept battle),
+  all untouched; a test that cleared the class pointer of the next three re-created objects got three "slot released by
+  the guard" lines and the game played on; with the guard only counting, the same test stopped the game with the same
+  "UObjectArray.cpp:234" message as the player's crash. Kept on in the maintainers' own play since 2026-10-21: it never
+  had to act.
+
+<a id="taskwaitdeadlockguard"></a>
+
+### Task threads that wait for each other woken up (`TaskWaitDeadlockGuard`)
+
+[Explanation](how-it-works.md#taskwaitdeadlockguard).
+
+- **Found (2026-10-23, a stock crash dump with a cold driver cache, then live stack samples):** every task worker asleep in
+  `~FScopedEvent` inside `WaitUntilTasksComplete`'s worker branch (exe+0xDD66B0), called from the
+  `FD3D12RayTracingPipelineState` constructor (waiting for its shader-collection compiles); every reserve worker idle; the
+  render thread waiting for tasks, the game thread for the render thread, until UE's `RenderingThread.cpp:1272` fatal
+  error after 120 s. UE 5.3 `TaskGraph.cpp` (old front end): a waiting worker hands its slot to a reserve worker
+  (`DoReserveWorkUntil`, condition "tasks done") and sleeps on an event set by an `FTriggerEventGraphTask`; the reserve
+  returns to sleep as soon as the condition holds, which is exactly when the trigger task becomes ready, so with all
+  workers waiting nobody runs the trigger tasks.
+- **Fix:** the worker-wait vtable slot (found by byte pattern, layout of the stock condition checked at run time) points to
+  the same steps, with a condition that also wakes the waiter when it sees the tasks done; the trigger task gets a
+  reference-counted stand-in event; whichever comes first wakes. Start-up install only (`version.dll`; not on the OBSE64
+  route, logged). Self-test: addresses, protocol with fake reserve/trigger threads, a 6-lane stress test.
+- **Results:** 8-core cold start: no deadlock (2026-10-23). The test PC limited to 4 cores (a Job object, one logical
+  processor per core, and `-corelimit=4 -physicalcorelimit=4`; 2026-10-24), warm cache: the stock game (no DLL) froze in
+  the first teleport and ended with the `RenderingThread.cpp:1272` fatal error after 120 s; the DLL with the guard off froze
+  at the main menu (same stacks); with the guard on (and the pool) no freeze, also cold at 4 and 6 cores. Not tested on
+  NVIDIA (the bug is in UE's task system, not the driver).
+
+<a id="psocompilethreadpool"></a>
+
+### Graphics pipelines prepared on the engine's own pipeline threads (`PsoCompileThreadPool`)
+
+[Explanation](how-it-works.md#psocompilethreadpool).
+
+- **Found (2026-10-23, cold driver cache, UE sized for 6 cores):** the first teleport froze 33-36 s: the game thread in
+  `FlushAsyncLoading`, every task worker inside the driver compiling graphics pipelines (`FCompilePipelineStateTask`),
+  the loader's shader-preload tasks queued behind them.
+- **Fix:** `r.pso.PrecompileThreadPoolSize` (UE 5.3's `FPSOPrecacheThreadPool`, off in this game) set at start-up to the
+  logical processors minus 2: precompile and precache pipelines compile on that pool at UE's below-normal priority. Only
+  with `TaskWaitDeadlockGuard` installed in mode 1 (the pool alone hung 125 s in the deadlock above); the player's own
+  Engine.ini pool setting wins.
+- **Results (cold driver cache):** 6 cores (UE-sized, 16 CPUs): no freeze, longest stall 4.2 s (stock: froze >= 33 s); 8
+  cores: inn door 5.2 / 4.7 s instead of 6.4 / 16.2 s. Real CPU limit (Job object, 2026-10-24): 4 cores, stock code paths:
+  never got from the main menu into the world (stalls up to 176 s); with the pool and guard: into the world, teleport
+  (longest frame 26 s) and door done; 6 cores: teleport's longest frame 18 s, no freeze. Warm cache: no difference
+  (5 runs, 2026-10-23); 4K, FSR performance, frame generation, 60 fps cap, Imperial City slices, both keys on vs off in
+  alternating fresh games (ABBA, 2026-10-24): game thread 6.82 / 6.47 vs 6.89 / 6.61 ms per frame, render thread 3.54 / 3.54
+  vs 3.70 / 3.71 ms, stutter 202 / 332 vs 430 / 394 ms: no difference beyond noise. Not tested on NVIDIA.
+
 <a id="viewrenameguard"></a>
 
 ### Views kept up to date when the graphics card's memory is tidied (`ViewRenameGuard`)
@@ -1070,6 +1452,32 @@ Game bugs (they also happen without OblivionPerfFix). Bugs in our own fixes are 
   Also checked: Esc, Tab, closing from another page, the wait menu, a conversation, a loading screen and the main menu;
   sharpness of screenshots confirms the render scale (FSR on 545, off 263, back 548). `Save_Settings.sav` was
   byte-identical before and after every test.
+
+<a id="frameratelimitatstart"></a>
+
+### The saved frame-rate cap works from the start with frame generation (`FrameRateLimitAtStart`)
+
+[Explanation](how-it-works.md#frameratelimitatstart).
+
+- **Found (2026-10-22, game bug, also without the DLL):** with frame generation on, the saved Frame Rate Limit (60 on
+  the test PC) was not in effect after a launch: `t.MaxFPS` 0 from the start-up videos through the main menu and the
+  world, while the settings page showed 60; showing the Graphics page set it to 60; switching frame generation off kept
+  60, on again 0. The same without the DLL in the game folder.
+- **Cause:** at start-up the game applies the saved options (`Save_Settings.sav`, `UAltarGameUserSetting::SavedSettings`,
+  console commands run through Altar's command setter exe+0x48F7F10). Frame generation's switch (exe+0x495F610) is called
+  by the FSR and DLSS console-variable sinks; on "on" it stores V-Sync and the Frame Rate Limit and sets both to 0 (it
+  restores them on "off"). Replaying the saved options switches frame generation on after the limit was applied, so
+  every launch with frame generation on starts uncapped. The Graphics page applies every row's saved value when it is
+  built (the Frame Rate Limit row is not locked while frame generation is on), which is why viewing it fixes it.
+- **The change:** the switch's entry gets a 5-byte jump (one atomic 8-byte write). After its first switch from off to on
+  in the process, with no menu open, the saved `Altar.GraphicsOptions.FrameRateLimit` is read from `SavedSettings` with
+  the game's own lookup and run once through the game's setter with the same name and force off, as the page does; the
+  game's own sink then sets the cap. Every later switch is left to the game. Installed only while the switch's state is
+  still off: from `DllMain` on the version.dll route, and from OBSE64's start-up hook (after the static initialisers,
+  before `WinMain`) on the OBSE64 route.
+- **Result:** with the fix, `t.MaxFPS` was 60 from the first sample through the main menu and the world; a Graphics page
+  visit changed nothing; frame generation off: 60; on again in play: 0, as stock (left to the game; the next page visit
+  restores it).
 
 <a id="frozenclothstretchfix"></a>
 

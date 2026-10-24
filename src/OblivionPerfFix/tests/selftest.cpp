@@ -5,9 +5,13 @@
 // Usage: selftest.exe [path\to\OblivionRemastered-Win64-Shipping.exe]
 #include "common.h"
 
+#include <audioclient.h>
+#include <audiopolicy.h>
 #include <d3d12.h>
 #include <dxgi1_4.h>
 #include <unknwn.h>
+#include <mmdeviceapi.h>
+#pragma comment(lib, "ole32.lib")
 
 #include <atomic>
 #include <cmath>
@@ -531,13 +535,27 @@ static uint64_t HashWords(uint64_t seed, const void* data, size_t bytes)
 #include "selftest_bulkinsert.h"  // BulkIndexInsert's tree model and checks
 #include "selftest_push.h"        // PhysicsPushParallel's sites and push-loop model
 #include "selftest_shrink.h"      // PhysicsQueueShrinkOnce's site and catch-up model
+#include "selftest_savebytes.h"     // SaveBytesBulk's sites and the game's array serialization vs the hook; SaveThumbnailAsync
+#include "selftest_saverefid.h"     // SaveRefIdIndex's sites and the helper vs the linear search
+#include "selftest_rigsetup.h"      // RigVmHashMemo / RigLogicMapCache: sites, memo and map replay with fakes
+#include "selftest_npcbodies.h"     // NpcBodiesOneLock: sites and the one-hold wrapper with a fake scene lock
+#include "selftest_rtscene.h"       // RtSceneBufferKeep: sites, patch and the stub's decisions
+#include "selftest_nanite.h"        // NaniteInitialRootPages (lab: NaniteStreamProbe / Nanite*MinMB with a fake resize)
+#include "selftest_waterinfo.h"     // the water-info capture keys (lab: and WaterInfoProbe): sites and patches
+#include "selftest_fpscap.h"        // FrameRateLimitAtStart: sites, install and the hook's decisions with fakes
+#include "selftest_navlink.h"       // NavLinkFast: sites, the fast search and the skip rule against the game's search
 #include "selftest_readback.h"     // ScreenshotReadbackConvert's site and the game's conversion vs the fast one
 #include "selftest_parallel.h"     // ScreenshotParallel's sites, stubs and row bands
 #include "selftest_oscache.h"      // OsPageCache's sites and the cache core with fake OS functions
 #include "selftest_pso.h"          // PsoPrecompileFast's sites, trampoline and mode choices with fakes
+#include "selftest_destroybatch.h" // PhysicsDestroyBatch: sites and the wrapper with fakes
+#include "selftest_clothreg.h"    // ClothRegisterLite: sites, lite builds and their completion with fakes
 #include "selftest_animpar.h"      // AnimTeardownParallel's shapes and the helper queue with fakes
 #include "selftest_cellbuf.h"      // CellBufferPacedEvict's shapes, the clamp stub and the buffer LRU with and without the fix
 #include "selftest_ledger.h"       // diagnostic HitchLedger: sites, record/ring/csv format, cost per frame
+#include "selftest_objreplace.h"   // ObjectReplaceCrashGuard: the in-place destroy site and the stub with a fake GUObjectArray
+#include "selftest_taskwait.h"     // TaskWaitDeadlockGuard: the task graph's worker wait, the wake-up protocol against fakes
+#include "selftest_scan.h"         // FindAll: the fast pattern search against the reference search
 
 // ---- fakes for the parallel flush test (physics_flush.cpp, PhysicsFlushParallel) ----
 namespace pfl {
@@ -994,10 +1012,74 @@ int wmain(int argc, wchar_t** argv)
         printf("cannot map %ls (error %lu)\n", exe, GetLastError());
         return 2;
     }
+    // [General] LogFile: 1 (default) = the log is written as before; 0 = nothing is created, renamed or written at start-up
+    // and the log appears only with the first [gpucrash] line. Run in its own folder before selftest.log is opened.
+    {
+        CreateDirectoryW(L"logfile", nullptr);
+        auto put = [](const wchar_t* path, const char* text) {
+            if (FILE* f = _wfsopen(path, L"wb", _SH_DENYNO)) { fputs(text, f); fclose(f); }
+        };
+        auto read = [](const wchar_t* path) {
+            std::string s;
+            if (FILE* f = _wfsopen(path, L"rb", _SH_DENYNO)) {
+                char buf[512];
+                size_t n;
+                while ((n = fread(buf, 1, sizeof buf, f)) > 0) s.append(buf, n);
+                fclose(f);
+            }
+            return s;
+        };
+        const wchar_t* ini = L"logfile\\t.ini";
+        put(ini, "[General]\r\nLogFile=0\r\n");
+        Check(!LoadConfig(ini).logFile, "LogFile=0 is read");
+        put(ini, "[General]\r\nLogFile=1\r\n");
+        Check(LoadConfig(ini).logFile, "LogFile=1 is read");
+        put(ini, "[General]\r\nStatsIntervalSeconds=60\r\n");
+        Check(LoadConfig(ini).logFile, "LogFile: a missing key means on");
+        Check(Config().logFile, "LogFile: on by default");
+        const wchar_t* l0 = L"logfile\\OblivionPerfFix.log";
+        const wchar_t* l1 = L"logfile\\OblivionPerfFix.1.log";
+        const wchar_t* l2 = L"logfile\\OblivionPerfFix.2.log";
+        // off: earlier logs untouched, other lines dropped, the first crash report creates the log (rotating as usual)
+        put(l0, "OLD0"); put(l1, "OLD1"); put(l2, "OLD2");
+        LogOpen(l0, 2, false);
+        Check(!LogEnabled(), "LogFile=0: LogEnabled is false");
+        Log("loaded as test");
+        Log("[mem] a statistics line");
+        Check(read(l0) == "OLD0" && read(l1) == "OLD1" && read(l2) == "OLD2",
+              "LogFile=0: start-up and ordinary lines touch no file (earlier logs stay where they are)");
+        Log("[gpucrash] device removed reason 0x887A0006");
+        Log("[mem] after the crash report");
+        Log("[gpucrash] DRED command lists: 1 stopped");
+        const std::string crash = read(l0);
+        Check(crash.find("device removed reason") != std::string::npos && crash.find("DRED command lists") != std::string::npos &&
+                  crash.find("LogFile=0") != std::string::npos,
+              "LogFile=0: a GPU crash report creates the log with the report and a one-line note");
+        Check(crash.find("loaded as test") == std::string::npos && crash.find("statistics line") == std::string::npos &&
+                  crash.find("after the crash report") == std::string::npos,
+              "LogFile=0: only the crash report is in that log");
+        Check(read(l1) == "OLD0" && read(l2) == "OLD1", "LogFile=0: the crash log rotates the earlier logs like a normal start");
+        LogClose();
+        // on: as before
+        put(l0, "OLD0"); put(l1, "OLD1"); put(l2, "OLD2");
+        LogOpen(l0, 2, true);
+        Check(LogEnabled(), "LogFile=1: LogEnabled is true");
+        Log("loaded as test");
+        Log("[mem] a statistics line");
+        const std::string normal = read(l0);
+        Check(normal.find("loaded as test") != std::string::npos && normal.find("statistics line") != std::string::npos &&
+                  read(l1) == "OLD0" && read(l2) == "OLD1",
+              "LogFile=1: the log is written and the earlier ones rotate (unchanged behaviour)");
+        LogClose();
+        DeleteFileW(l0); DeleteFileW(l1); DeleteFileW(l2); DeleteFileW(ini);
+        RemoveDirectoryW(L"logfile");
+    }
     LogOpen(L"selftest.log");
 
     GameModule game;
     Check(InitGameModule(game, module), "game module sections found");
+    scantest::Begin();  // every search below is checked against the reference search
+    scantest::RandomTests(game);
 
     // Runtime helpers: long-uptime clocks and affinity-limited helper counts.
     Check(QpcToMicroseconds(184467440737095ULL, 10000000) == 18446744073709ULL,
@@ -3090,6 +3172,12 @@ int wmain(int argc, wchar_t** argv)
         AllocatorTrimTick();  // no device seen: does nothing
         SetAllocatorTrim(false, 20);
         LogAllocatorTrimStats();
+        {
+            // The give-back decides every wrapper's place before any goes back (an obtain between the passes must not
+            // make it reset or return a wrapper the engine uses), and an exception keeps the trim off (1.1.3).
+            const char* why = AllocatorTrimSelfTest();
+            Check(why == nullptr, why ? why : "allocators: give-back safe against an obtain between the passes; off after an exception stays off");
+        }
     }
 
     // PhysicsTreeTimeSlicing: p.Chaos.AccelerationStructureTimeSlicingMaxQueueSizeBeforeForce (1000 in build 19115871).
@@ -3257,6 +3345,8 @@ int wmain(int argc, wchar_t** argv)
         InstanceClearTestCall(cmd);
         Check(icr::g_resets == 1 && icr::g_resizes == 0, "instance clear off: the game's Reset only");
     }
+
+    clr::ClothRegSelfTest(game);  // ClothRegisterLite (lab: also ClothRegisterSkip, ClothRegisterVerify)
 
     // ParallelStaticBodies: InitStaticBodies' call of CreateShapesAndActors (build 19115871), then the split against a fake.
     if (Installed(FindParallelStaticBodies(), "static bodies: InitStaticBodies' call found")) {
@@ -3460,6 +3550,18 @@ int wmain(int argc, wchar_t** argv)
     Check(InstallBulkIndexInsert(true), "BulkIndexInsert: the physics step's swap, FlushInternalAccelerationQueue and its switch found, detour placed");
     BulkInsertSelfTest();
     ShrinkSelfTest(game);  // PhysicsQueueShrinkOnce (rides on BulkIndexInsert's catch-up detour)
+    svb::SaveBytesSelfTest(game);   // SaveBytesBulk / SaveThumbnailAsync
+    srid::SaveRefIdSelfTest(game);  // SaveRefIdIndex
+    rsu::RigSetupSelfTest(game);    // RigVmHashMemo / RigLogicMapCache
+    nbl::NpcBodiesSelfTest(game);   // NpcBodiesOneLock
+    rts::RtSceneSelfTest(game);     // RtSceneBufferKeep
+    nsb::NaniteSelfTest(game);      // NaniteInitialRootPages (lab: NaniteStreamProbe / Nanite*MinMB)
+    wtr::WaterInfoSelfTest(game);   // WaterCaptureFsrSkip / NoRhiFlush / NoOcclusionWait / FastMeshScan (lab: WaterInfoProbe)
+    fpc::FpsCapSelfTest(game);      // FrameRateLimitAtStart
+    nlf::NavLinkSelfTest(game);     // NavLinkFast
+    objrep::ObjectReplaceSelfTest(game);  // ObjectReplaceCrashGuard
+    tw::TaskWaitSelfTest(game);           // TaskWaitDeadlockGuard
+    dbt::DestroyBatchSelfTest(game);      // PhysicsDestroyBatch
 
     // ParallelStaticBodies and PhysicsFlushParallel's helpers: FMallocBinned2::SetupTLSCachesOnCurrentThread (exe+0xE0D650, slot exe+0x900B928, build 19115871),
     // then the live switch against a fake set-up on a thread of its own.
@@ -4155,6 +4257,7 @@ int wmain(int argc, wchar_t** argv)
             DeleteCriticalSection(Lock());
         }
     }
+    scantest::Report();
     printf("\n--- selftest.log ---\n");
     if (FILE* f = _wfsopen(L"selftest.log", L"r", _SH_DENYNO)) {
         char line[1024];

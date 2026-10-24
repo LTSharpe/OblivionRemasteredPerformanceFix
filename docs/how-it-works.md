@@ -191,6 +191,28 @@ switch on a stand-in value (on, off, a player's own value).
 
 **Effect.** At the chapel square the copies dropped from about 2,000 to under 1 per second (99.98% skipped). Cloth went from 8-11% of the game thread to 3.4-4.7%, which includes the comparison itself. The game thread's CPU time dropped by about 0.5-0.6 ms per frame (about 4-5%). The fps gain was small and within the run-to-run noise (+1% to +10%).
 
+---
+
+<a id="watercapture"></a>
+
+### Water pictures redrawn without work nobody sees (`WaterCaptureFsrSkip`, `WaterCaptureNoRhiFlush`, `WaterCaptureNoOcclusionWait`, `WaterCaptureFastMeshScan`)
+
+[Evidence](research.md#watercapture).
+
+**The problem.** Every lake and river zone keeps a small "water info" picture: the height of the ground and the water seen from above, which the water's shading reads (shore depth, flow). Whenever an area with land or water streams in or out next to such a zone, the engine's Water plugin redraws that picture with three small extra renders on the render thread. Riding through the world that happens more than once a second, several zones at once near the Imperial City's lakes, and every redraw has new contents (a piece of land came or went), so it cannot simply be skipped. But each small render also did work that only makes sense for the main picture, and the render thread often made the frame wait for it:
+- AMD's FSR copies every render's scene into a full-screen texture of its own. For a 256 x 256 water render it re-created that texture at the tiny size, and the next main frame re-created it at full size again. FSR never upscales these renders and never reads that copy.
+- Each small render counted as "the first render of a frame", so the render thread waited for the graphics driver thread to catch up with everything queued, as the main render does once per frame.
+- Each one then waited for the previous render's visibility tests (occlusion queries) to be sent to the graphics card. These renders never read such results: only views with their own visibility history do, and the water renders have none.
+- Twice per redraw the plugin looked through every object in the scene (thousands of them) to switch on the few water meshes it draws.
+
+*Analogy:* sketching a small map of the lake on a notepad, and each time reprinting the full-size poster frame for it, waiting for the print shop to empty its queue, and walking through the whole warehouse to find three pencils.
+
+**What we did.** The DLL marks the time the render thread spends inside the water-info redraw. Inside it, and only there: FSR's copy step is left out (`WaterCaptureFsrSkip`), the driver-thread catch-up is left out as the engine already does for every render after a frame's first (`WaterCaptureNoRhiFlush`), and the wait for the visibility tests is left out (`WaterCaptureNoOcclusionWait`; the main view still waits on the latest one, as before). The mesh search (`WaterCaptureFastMeshScan`) uses the scene's compact list of object ids, which the engine keeps in the same order as its object list, and hands the matching objects to the game's own code, which switches them on exactly as before; if the two lists ever do not line up, the game's own search runs.
+
+**Why the image can't change.** The FSR copy is never read for these renders, and the main view copies its own scene over the whole texture before FSR reads it. The catch-up and the visibility wait only make the render thread wait; no drawing depends on them, and the main render still does both. The mesh search finds the same meshes in the same order. The water pictures were compared bit for bit: with and without the keys, every zone's picture had the same raw values. Each key can be switched on and off while the game runs; on the OBSE64 route they stay off (they are installed while the game starts).
+
+**Measured (2026-10-22, the Imperial City showcase flight at the test PC's own play settings: 4K, FSR Performance, frame generation, 60 fps cap; one held game, keys switched live):** with `WaterCaptureFsrSkip` and `WaterCaptureNoRhiFlush` (four flights, alternating): the time over 16.7 ms of the frames that waited for the render thread 889 / 588 -> 411 / 368 ms per flight, frames of 33 ms or more 67 / 37 -> 37 / 28, all frames' time over 16.7 ms 3,731 / 2,958 -> 2,886 / 2,558 ms. `WaterCaptureNoOcclusionWait` on top (five flights): the render thread's time per water redraw 7.5 -> 5.1 ms (1.2 -> 0.8 s per flight), render-thread-bound time over 16.7 ms 318 -> 223 ms; the frame totals moved within the run-to-run noise. `WaterCaptureFastMeshScan` saves a little more render-thread time per redraw, too little to show in frame times.
+
 ## Travelling: memory and threads
 
 <a id="lumenkeeparraycapacity"></a>
@@ -254,6 +276,40 @@ The cost is a little more system memory (+0.04-0.46 GB committed in a route plus
 **What we did.** A list keeps its size when what it needs drops by one step, and only shrinks when the need falls to a quarter (for example when you go indoors). Lists under 4 MB never shrink, which ends the per-frame flip. And when a list grows again past an eighth of the largest it has been this session (after a fast travel or a door), it goes straight to that size instead of doubling several times. For the instance list the size is also how far apart its columns lie for the shaders, so the fix changes the size where the engine computes it, before both are taken from it; checked in the game by making every list twice its size: the pictures matched the unmodified game.
 
 **Why the image can't change.** Nothing you see: the same data in a list with room to spare. The cost is at most one step of extra video memory for these lists (typically 50-100 MB). **What it does not fix:** the first time in a session that a list grows to a size it never had, which is what the 118 ms frame on the Roxey road was. Every size change is written to the log.
+
+---
+
+<a id="rtscenebufferkeep"></a>
+
+### The ray-traced scene's list keeps its memory (`RtSceneBufferKeep`)
+
+[Evidence](research.md#rtscenebufferkeep).
+
+**The problem.** With ray tracing on, the engine builds a list of everything in the ray-traced scene every frame (the "top-level acceleration structure") into a block of video memory sized in 16 MB steps. When the scene needs more than the block holds, or less than half of it, the engine makes a new block of the right size. Riding through the world the number of objects goes up and down, so the block shrank and grew again at the same places on every pass, and after a fast travel or a door it grows back in several steps. A new block normally takes a few milliseconds, but with video memory nearly full (4K) Windows first has to make room, and the render thread waits for it: a freeze of a fraction of a second, usually followed by a second slow frame.
+
+*Analogy:* moving into a smaller flat every time half the rooms are empty, and back into a bigger one a few days later.
+
+**What we did.** The "less than half" case keeps the block: a block that is big enough stays. Growing works as before.
+
+**Why the image can't change.** The engine builds the list into the start of whatever block it is given, and everything that reads it uses the list's own offsets, so it is the same list; only the spare room behind it differs. The cost is video memory: at most the largest size this session already needed. **What it does not fix:** on a loading screen the engine drops the block altogether, so the first growth after a door or a fast travel still happens (in one step instead of several). Each change of the block's size is written to the log.
+
+---
+
+<a id="naniteinitialrootpages"></a>
+
+### Nanite's page block starts big enough (`NaniteInitialRootPages`)
+
+[Evidence](research.md#naniteinitialrootpages).
+
+**The problem.** Nanite (the engine's detailed geometry) keeps the pieces it streams in one block of video memory, 576 MB at the start: a 512 MB pool plus room for 2,048 "root pages" that stay loaded. The first time a session needs more root pages, the engine makes a new, bigger block (608 MB) beside the old one, copies everything over in one frame and lets the old one go. On the Imperial City flight that happens at the same place every time, just past the Talos bridge. With video memory nearly full (4K) the new block has to wait until Windows has made room, and the game froze for up to about 1.7 seconds there.
+
+*Analogy:* a library that, the first time it runs out of shelf space, builds a new hall next door and moves every book across in one night, while the doors stay shut.
+
+**What we did.** At start-up the DLL sets the engine's own starting size, `r.Nanite.Streaming.NumInitialRootPages`, from 2,048 to 3,072 root pages: exactly the size of that first step. The block starts at 608 MB, so the step is never taken; if a session needs even more, the engine grows it as before. It is the same as the line `r.Nanite.Streaming.NumInitialRootPages=3072` under `[SystemSettings]` in Engine.ini, and such a line in your own Engine.ini still wins. It works on both routes (`version.dll` and OBSE64: both run before the engine reads its settings).
+
+**Why the image can't change.** Where each page lies in the block depends only on the pool's size, not on the block's size; the bigger block only has unused room at its end, which nothing reads. Screenshots with and without the change matched. **The cost:** 32 MB more video memory from the first area on (the size a session reaches anyway past the bridge). `4096` would also cover the next step, for 64 MB.
+
+**Measured (2026-10-22, the Imperial City showcase flight at the test PC's own play settings, each run a fresh game):** without the change, four of five runs froze past the bridge (long frames adding up to 121, 952, 1,333 and 1,739 ms; in the fifth the new block took 19 ms); with it (two runs, 4,096 and 3,072) the block was never re-made and there was no freeze (the worst frames of those flights 119 and 66 ms).
 
 ---
 
@@ -373,6 +429,22 @@ and switches them on and off.
 `BusyWaitFlagCheck=1` in the shipped ini; it can be switched while the game runs.
 
 **Measured:** Imperial City flight, small profile: tiles built inside a wait 6 in 10 flights without the fix (frame stalls of 82 ms to 2.6 s), 0 in 7 with it (largest tick-group-0 wait 29 ms); 4K FG test completed without a crash.
+
+---
+
+<a id="navlinkfast"></a>
+
+### Navigation tiles linked with less searching (`NavLinkFast`)
+
+[Evidence](research.md#navlinkfast).
+
+**The problem.** The navigation map streams in as chunks; each chunk's tiles are fitted to their neighbours in one go, inside one frame. For every pair of neighbouring tiles (the other layers in its cell and the tiles of the four cells around it, both ways) the engine walks the tile's border edges, and for each one looks through all the polygons of the other tile for the ones that touch it. Most pairs have no border between them at all, and of the other tile's polygons only the few on the shared border can match. On roads where many chunks stream in, one chunk took several milliseconds, at the same places every time.
+
+*Analogy:* checking every house on the next street for a shared garden wall, including the streets that are not next to yours.
+
+**What we did.** For each tile the DLL notes once per chunk which sides its border edges face and which of its polygons lie on each side. A pair that cannot make a link (no border edge facing the other tile, or no polygon of the other tile facing back) is left out. For the other pairs, the game's own search runs once for each polygon on the shared border instead of over the whole tile, and the links it makes are numbered exactly as the game numbers them.
+
+**Why the game can't change.** The game's own code makes every link, in the same order and with the same values, so the navigation map is the same and characters walk the same paths. The left-out pairs are exactly the ones where the game's search finds nothing. The maintainers' test build compared every search with the game's own one, byte for byte, in the game on long rides (no difference); the self-test does the same on random tiles. It changes nothing you see. On the OBSE64 route it stays off (it is installed while the game starts).
 
 ## Travelling: physics, when a new area arrives
 
@@ -683,6 +755,53 @@ frames that carry them 21-27 ms instead of 24-32 ms. At the test PC's own play s
 runs each way) the main thread's hand-overs at C 1.3-1.4 ms in all instead of 9.5-15.1 ms; the frame totals there are
 within the run-to-run noise. No change on the Brotch walk.
 
+<a id="physicsdestroybatch"></a>
+
+### Removed collision taken apart faster (`PhysicsDestroyBatch`)
+
+[Evidence](research.md#physicsdestroybatch).
+
+**The problem.** When the cells behind the player unload, World Partition takes their big instanced meshes (fields of
+rocks and trees with 1,000-2,500 collision bodies each) out of the physics world, one mesh per frame. The physics side
+removes each body in two pieces: the next physics step first disables it, and at the end of that step the engine's
+`DestroyPendingProxies` takes it apart, about 3.4 microseconds per body. The main thread waits for that step before it
+can finish its frame, so where a lot unloads at once (the Imperial City's stone bridge) several frames in a row wait
+8-14 ms for physics. Of those 3.4 microseconds, 1.4 go to deleting the body's leftover objects (its main-thread copy,
+shapes and physics object) and 0.35 to rebuilding the physics lists' indexes ("views") after every single removal.
+
+*Analogy:* a removal crew that, after taking out each shelf, also carries the packing to the bin and re-prints the
+floor plan, one shelf at a time.
+
+**What we did.** Only inside that function, and only when 256 or more bodies are waiting: the leftover objects are
+deleted by one helper thread while the step goes on with the next body, and all of them are gone before the function
+returns (still inside the physics step); the indexes are rebuilt once after the loop instead of after every body. With
+fewer than 8 logical processors there is no helper (only the single rebuild), and if the helper ever holds the step up
+(three waits over 1 ms, e.g. on a PC busy with something else) its part switches itself off for the session.
+
+**Why the game can't change.** The objects handed to the helper can no longer be reached by anything: the main thread
+dropped them when it unregistered the bodies, the physics command cleared their handles, and the stock game deletes
+them at exactly this point, so nothing later can touch them. Deleting one touches only its own parts, thread-safe
+reference counts and, in one place, the physics side's list of changed bodies, which it leaves at once when the body is
+no longer on it (checked before handing it over; otherwise it is deleted as before) and which is guarded by the game's
+own lock, as for the stock deletion. The indexes are rebuilt from the physics lists alone and nothing in the loop reads
+them, so one rebuild at the end gives the same indexes as the last of the stock rebuilds. Not used when other kinds of
+physics objects (geometry collections, cluster unions) are waiting, whose clean-up reads them. Only the order and the
+thread of the memory frees change, which already vary from run to run. The fix finds its three call sites, the offsets
+it reads and the destructor it hands over by their code shape; anything unexpected leaves it off with a log line. The
+self-test runs the function with fake bodies in every mode, with two and three physics scenes at once, a sleeping and a
+missing helper and the switch-off: every object deleted exactly once, before the function returns.
+`PhysicsDestroyBatch=3` turns it on (2 = the single rebuild only, 1 = the helper only); installed when the game starts,
+then it can be switched while the game runs.
+
+**Measured (2026-10-23, the Imperial City showcase flight at the test PC's own play settings: 4K, FSR Performance,
+frame generation, 60 fps cap; one held game, switched live, four flights each way in two A-B-B-A blocks):** taking a
+body apart 3.7 -> 2.0 microseconds; the longest single call 12 -> 6 ms; the main thread's waits for physics 950 -> 770 ms
+per flight, and their part in frames of 25 ms or more 365 -> 260 ms (every run with the fix below every run without). At
+the stone bridge (outbound) frames of 25 ms or more 14 -> 11.5 per flight, the worst one 41 -> 32 ms. Over the whole
+flight that is about 5 % of the time slow frames cost; the frame totals (time over 16.7 ms, frames of 25 ms or more)
+moved the same way but stay within the run-to-run noise. The same image: the change is inside the physics step and
+leaves the same physics state.
+
 ## Travelling: characters and cells
 
 <a id="npcfadeinnorebuild"></a>
@@ -737,6 +856,54 @@ within the run-to-run noise. No change on the Brotch walk.
 **What it does not fix (yet).** Some single steps cannot be split: applying a character's real body and head (18-20 ms) or putting on a robe (13-21 ms) still take one frame each, so a burst becomes a series of shorter hitches rather than none.
 
 **Keeping area loading in order.** Each newly loaded area's set-up must wait for all earlier world-logic messages. It waits up to three frames rather than forcing the waiting characters through at once. While each held frame completes a create or head unit from the same world-logic frame, it may wait up to eight frames; without that progress the three-frame limit applies. The game thread's frame-done message waits too, pausing the old engine just as the long frame would. Every message stays in order. On the Silver Road the shorter wait avoided 2-3 creates in a single 25-40 ms frame; on the Echo Mine walk at 4K, allowing continued progress avoided two creates being drained into one ~30 ms frame instead of ~20 ms frames.
+
+---
+
+<a id="clothregisterlite"></a>
+
+### Robes built once instead of up to three times (`ClothRegisterLite`)
+
+[Evidence](research.md#clothregisterlite).
+
+**The problem.** When a character puts on a robe, tabard or cape, the engine builds the piece's cloth simulation as soon as the piece is registered: its own solver, the cloth's particles, its constraint rules (how each particle is held to its neighbours: stretch, bending, tethers, distance limits) and a collision tree. Then the robe's own set-up (its Blueprint) asks for the cloth simulation to be built again, in the same dressing call and often twice. Each earlier build is thrown away without ever having been simulated or drawn. Most of a build is the constraint rules, all on the main thread, and where many robed characters are dressed at once (a town, a shrine, a chapel) it was a large part of each character's dressing.
+
+*Analogy:* a tailor who fully sews a robe, has it unpicked and sewn again, sometimes twice, while the customer waits.
+
+**What we did.** Every cloth build inside one dressing call is made without its constraint rules ("lite"). The DLL records what the rules would have been built from: the arguments of the rule-building call and the particles' positions and masses at that moment, plus the later update calls the build makes. When the dressing call ends, the build that is left gets its rules added in place from those records: the particle positions are put back to their recorded values while the rules are made, the rules are added level of detail by level of detail in the game's order, switched on for the particles that are active, the update calls are replayed, and the positions are restored. If anything is not as recorded (the masses changed, the rules are no longer empty, the cloth was replaced or unregistered), that cloth is built again in full, the game's way.
+
+**Why the image can't change.** Everything a thrown-away build shows before it is thrown away is the same without rules: that a simulation exists, its bounds (the box around its particles, which come before the rules), and its empty simulation data; a lite build is never simulated. The build that stays ends up with rules made from the same inputs in the same order, so with the same constraint data as in the game. The maintainers' test build can also make a full build beside each lite one and compare the two bit for bit: on several routes with many robed characters, no difference.
+
+---
+
+<a id="rigvmhashmemo"></a>
+
+### Animation rig set-up remembered (`RigVmHashMemo`, `RigLogicMapCache`)
+
+[Evidence](research.md#rigvmhashmemo).
+
+**The problem.** Each character has two or three animation rigs (body, head, hair), small programs the engine runs to move the skeleton. (1) When a rig is created the engine works out a checksum of its program four times: it turns the program's function names into text and walks every instruction, its variables and its memory layout. Characters of a kind run the same programs, so the result is the same every time. (2) The head's face rig, the first time it runs, matches every name in the character's face data (joints, controls, expressions, animated maps) to the skeleton: per name it builds a piece of text, turns it into an engine name (behind a lock all threads share) and looks it up. This runs on a helper thread that the main thread waits for while the character is created.
+
+*Analogy:* re-reading the whole recipe book to check it is the same edition, every time you cook from it.
+
+**What we did.** (1) The checksum is remembered together with everything it reads, compared in full; an exact match gives back the remembered result. (2) For the face rig the DLL keeps the engine names the game itself made for a given face data content, with everything the game read from the face data as the key. A later head whose face data reads the same replays the game's steps: the same list operations in the same order (with the game's own functions), and every name looked up on this head's own skeleton, exactly as the game does it.
+
+**Why the image can't change.** (1) The checksum depends only on what is compared, so the same inputs give the same result. (2) An engine name for a given text never changes once it exists, and the lookups are still made live, so every head gets the same indices as without the fix. A face data reader whose text does not match what the game reads through it is left to the game. The maintainers' test build can run the game's code beside both and compare: thousands of checksums and hundreds of heads, beast races included, with no difference.
+
+---
+
+<a id="npcbodiesonelock"></a>
+
+### A character's physics bodies made under one lock (`NpcBodiesOneLock`)
+
+[Evidence](research.md#npcbodiesonelock).
+
+**The problem.** A new person brings about 37 physics bodies (one per body part) and the joints between them. The engine adds them to the physics world one by one, and each one takes the physics world's lock on its own: several hundred lock calls per person. Whenever another thread is reading the physics world at that moment (traces, line-of-sight checks), the main thread waits for it, again and again for the same character.
+
+*Analogy:* signing a visitor's book once per item when you bring a whole box into an office.
+
+**What we did.** The lock is taken once, the game's way, around the step that makes all of a character's bodies and joints, and released right after it. Inside, the game's own locking of each body just counts up (the lock lets the thread that holds it take it again). The checks before that step and the work after it run as before, outside the lock.
+
+**Why the game can't change.** The game's own code makes the same bodies and joints in the same order with the same values; the physics world ends in the same state. Another thread now sees the physics world either before the character's first body or after its last joint, never in between; both are states it could see in the game, which never fixes who gets the lock first. Nothing inside that step waits for another thread, so holding the lock cannot cause a deadlock. Readers wait a little longer at those moments (the hold also covers making the bodies' shapes); the log reports the longest hold every minute. The code it relies on is pinned to this game build by a checksum of four whole functions: after a game update it switches itself off with a log line.
 
 ---
 
@@ -877,7 +1044,21 @@ is still closed, so the first guests wait at the door until prep is finished.
 runs and the player is not playing (start-up videos, main menu, loading screens, menus: the game's own freeze state,
 which every menu and loading screen sets) it gives Unreal Fast instead of Background. A timer on the game thread looks
 four times a second and hands the game's own Background back the moment play starts or the precompile ends. Fast and
-Precompile requests of the game pass unchanged, and pausing or resuming stays the game's.
+Precompile requests of the game pass unchanged, and pausing or resuming stays the game's. Menus opened while playing
+(inventory, map, dialogue, pause) keep the game's pace (since 1.1.5; `PsoPrecompileFastInGameMenus=1` = Fast there
+too): after a driver update the precompile runs for minutes into play, and the Fast pace made those menus lag.
+Since the release after 1.1.0-beta the faster pace is bounded in menus: Unreal's Fast gives the render thread 16 ms per frame for handing out
+pipelines, which made the main menu stutter (p99 26 ms frames, up to 168 ms), so in the main menu it gets 4 ms per frame
+(`PsoPrecompileFastBudgetMs`) and starts with small batches (p99 6 ms; the build still ends ~40 s after launch instead
+of ~120 s); loading screens keep Unreal's Fast. And when the graphics driver has no shader cache (a new install, a driver
+update) it must compile every pipeline for real, so going faster only queues work in front of what the game needs right
+now (measured: the first door 52 s instead of 6 s, freezes of 15-30 s). The fix watches Unreal's queue of fetched,
+not yet handed-out pipelines (20-200 when the cache is warm, thousands when it is cold) and how busy the driver's
+compile threads are (D3D12's background threads, which the AMD driver compiles on: idle when the cache is warm); at 1,000
+queued (`PsoPrecompileColdQueue`), half a core of driver compiling for 2 s, or after 60 s at the faster pace in that
+build, it keeps the game's own pace until the build ends (`PsoPrecompileColdQueue=0` turns all three checks off). The
+driver's threads are looked up once per build; where there are none (likely NVIDIA and Intel) the search is tried three
+times, 10 s apart, and the log says which it was.
 
 **Why the game can't change.** Only when the pipelines are built: the same ones, by the same
 code, sooner. Nothing else is touched. In play the pace is the game's own; with a cold driver cache (after a driver
@@ -1026,6 +1207,56 @@ switched live on/off/off/on, four opens each):** the frame that opens the invent
 170 ms -> ~121 ms, screen still ~115 ms -> ~70 ms. Pictures of the inventory and of the world after closing look the
 same with and without. Closing the menu is not affected (that hitch is the world's first frame being drawn again).
 
+## Saving
+
+<a id="savebytesbulk"></a>
+
+### The save list's pictures written in one piece (`SaveBytesBulk`)
+
+[Evidence](research.md#savebytesbulk).
+
+**The problem.** Every save (quicksave, an autosave at a door, on fast travel, resting or waiting, a save from the menu) also rewrites the list of saves, on the game's main thread, twice: when the save starts and when it has been written. The list holds a small picture of every save, and Unreal writes each picture one byte at a time: one trip through its property code and one into the file buffer per byte. With 60 saves that is about 1.5 MB, 14-17 ms per list write, so about 30 ms of a save's frames.
+
+*Analogy:* copying a page by photocopying each letter on its own.
+
+**What we did.** Only while the list is being turned into bytes (`SaveGameToMemory`), and only for a plain byte array written to an ordinary saving archive, the DLL writes the array the way Unreal writes it, but the bytes in one call: the count, the size note, then the whole array. Anything else (other arrays, other archives, loading) goes to the game's own code. The calls of `SaveGameToMemory` are found by one pass over the game's code; each hit must lie inside a function of the exe's unwind table and be followed by the game's check of the result, or it is left alone.
+
+**Why the game can't change.** The archive appends what it is given, so one call with the whole array writes exactly the bytes the per-byte loop wrote: the same file. The self-test runs the game's own function and the DLL's on the same arrays (0 to a million bytes) and compares every byte and call; the maintainers' test build also wrote every save both ways in the game and compared them (identical). Installed while the game starts, only when the key is on (not on the OBSE64 route).
+
+---
+
+<a id="savethumbnailasync"></a>
+
+### The save's picture copied back without stopping the game (`SaveThumbnailAsync`)
+
+[Evidence](research.md#savethumbnailasync).
+
+**The problem.** A quicksave or autosave takes a screenshot for the save's picture. To read it, the game's main thread waited for the render thread, and the render thread waited until the graphics card had finished all its work and the picture was copied back: 40-50 ms at 4K, inside the save's frame. Only then did the save continue.
+
+*Analogy:* stopping the whole kitchen until one plate has been photographed.
+
+**What we did.** When the only ones waiting for that screenshot are the save and the save system's own picture store (a save from the pause menu, or while resting or waiting, has other listeners: the game's way runs there), the DLL asks for the same copy of the same frame, at the same point of the frame's work, but without waiting for it. A helper thread waits for the graphics card's signal, converts the picture with the same conversion as the game (byte for byte) and hands it to the save system's picture store first and then to the save, which writes its file after it as before. The picture arrives one to four frames later. If the copy could not be read (never seen), the save gets a black picture instead of waiting forever; if memory for the picture is short, the helper waits until there is.
+
+**Why the game can't change.** The same frame is copied and converted the same way: the maintainers' test build read every picture the game's way as well and compared every pixel (identical in all saves checked: quicksaves, autosaves, door autosaves; 480p and 4K with frame generation). Saves load back to the saved spot. The save system's store gets the picture before the save is allowed to go on, as in the game, where both happen before anything else runs. Installed while the game starts, only when the key is on (not on the OBSE64 route).
+
+---
+
+<a id="saverefidindex"></a>
+
+### The old engine's save looks references up in an index (`SaveRefIdIndex`)
+
+[Evidence](research.md#saverefidindex).
+
+**The problem.** The old engine part of a save (on its own thread, while the game's main thread waits for it) writes every reference to another object as a number: that object's place in a list. It found the place by reading the list from the start every time, and appended the object when it was not there. A new game has about 4,000 entries and 30,000-40,000 lookups per save; the list only grows, so a long game pays more.
+
+*Analogy:* finding a name in a guest book by reading it from the first page each time.
+
+**What we did.** During a save the DLL keeps an index of that list (each object's first place), updated as the list grows; a lookup asks the index and checks the list entry it points to. Not found: the game's own append, as before. Outside a save the game's search runs.
+
+**Why the game can't change.** The index returns the first place, which is what reading from the start returns, so the save holds the same numbers. The self-test compares the two on over a million random lookups; the maintainers' test build compared every lookup in the game (no difference in about 300,000). Installed while the game starts, only when the key is on (not on the OBSE64 route).
+
+**Effect (all three together).** Quicksaves in a held, save-free scene at 4K with frame generation and a 60 fps cap: the save's frame went from 90-113 ms (median 110) plus a second frame of 30-43 ms to 25-32 ms (median 28), with no second slow frame; at 480p from 70-77 ms (median 75) to 27-30 ms.
+
 ## Frame generation
 
 <a id="framegenasynccompute"></a>
@@ -1173,6 +1404,58 @@ with exactly the recorded crash; with the guard it carried on, and the log count
 
 ---
 
+<a id="objectreplacecrashguard"></a>
+
+### A rare object-list crash turned into a log line (`ObjectReplaceCrashGuard`)
+
+[Evidence](research.md#objectreplacecrashguard).
+
+**The problem.** A crash, not a slowdown: the game stops with "LowLevelFatalError UObjectArray.cpp:234 Attempting to add ... at index ... but another object exists at that index". The game's AI makes small helper objects with fixed names (a combat movement mode, a procedure) many times a minute; when an old one with the same name still exists, the engine destroys it and makes the new one in the same memory and the same slot of its object list. Destroying it should free that slot. In the two crash dumps we have, it had not been freed: at that moment the old object's class pointer read empty, so the engine's clean-up skipped the free, and the engine then stopped because the slot was taken. Why the pointer read empty is not known. The crash happens in the engine's own code with none of ours involved, so it is most likely a game bug, but both crashes were on PCs with OblivionPerfFix installed.
+
+*Analogy:* a hotel that re-lets a room to a guest of the same name and finds the old key was never handed in.
+
+**What we did.** The DLL makes that one clean-up call itself (the same call), then looks at the slot. If the game freed it, as in every normal case, nothing else happens. If the slot still holds the destroyed object, it is cleared the way the engine's own free clears it at that point, and the log gets a line describing the object.
+
+**Why the game can't change.** The normal path is exactly the game's (thousands of these re-creations a minute in a fight). In the rare case the game would stop; instead the new object gets the slot as if the free had run. In a test that forced the empty class pointer, the game played on; with the guard only watching, the same test reproduced the crash message exactly.
+
+---
+
+<a id="taskwaitdeadlockguard"></a>
+
+### Task threads that wait for each other woken up (`TaskWaitDeadlockGuard`)
+
+[Evidence](research.md#taskwaitdeadlockguard).
+
+**The problem.** A freeze of the stock game that ends after 2 minutes with "GameThread timed out waiting for RenderThread". When a task thread has to wait for other tasks, the engine puts a helper ("reserve") thread to work in its place and sends the waiting thread a wake-up call as a small task of its own once the tasks are done. The helper goes back to sleep the moment the tasks are done, which is exactly when that wake-up task becomes ready to run. If every task thread is waiting like this at once, nobody is left to run the wake-up tasks and all of them sleep for good. It happens when the game builds ray-tracing pipelines on several task threads at the same time: after a graphics driver update or on a new install (nothing in the driver's shader cache), and on 4-core CPUs even with everything cached (the stock game on 4 cores froze at the first teleport and ended itself 2 minutes later).
+
+*Analogy:* everybody in an office waits for a note saying "your papers are ready", and the temp who covers for them leaves as soon as the papers are done, before anyone has carried the notes round.
+
+**What we did.** The DLL replaces the engine's waiting step for task threads with the same steps plus one: the helper thread, when it sees the tasks done, also wakes the waiting thread itself. Whichever wake-up comes first ends the wait; the other one finds nothing left to do.
+
+**Why the game can't change.** The same tasks run in the same way; only a thread that would have slept forever (or a few milliseconds too long) wakes up when its tasks are done. It is installed at start-up as `version.dll` only (the task system is already running when OBSE64 loads plugins: there the log says it is not installed and the game's own wait is kept).
+
+**Measured (2026-10-24, the test PC limited to 4 cores, everything cached):** the stock game froze at the first teleport and ended itself 120 s later; with the mod but the guard off it froze at the main menu; with the guard on there was no freeze, also with the driver's cache emptied (4 and 6 cores). The log counts how often the guard woke a thread first.
+
+---
+
+<a id="psocompilethreadpool"></a>
+
+### Graphics pipelines prepared on the engine's own pipeline threads (`PsoCompileThreadPool`)
+
+[Evidence](research.md#psocompilethreadpool).
+
+**The problem.** Before it draws something new, the game prepares a "pipeline" for it, and the graphics driver compiles it. With nothing in the driver's shader cache (after a driver update, a new install) each one takes from a tenth of a second to seconds. The game does this on the same task threads that loading needs, so loading waits behind a queue of compiles: on a 6-core CPU the first teleport froze for over 30 s, on a 4-core CPU the game did not get from the main menu into the world at all within several minutes.
+
+*Analogy:* the kitchen's cooks all busy sharpening knives for next week while the plates for tonight wait.
+
+**What we did.** The engine has its own thread pool for exactly this work, switched off in this game. At start-up the DLL switches it on (`r.pso.PrecompileThreadPoolSize`, the number of logical processors minus 2, at the engine's own lower priority), so the pipelines prepared ahead of use are compiled there and the task threads stay free for loading. It is only switched on together with `TaskWaitDeadlockGuard` (with more task threads free, the freeze above becomes more likely), and only at start-up (the engine treats the size as fixed). Your own Engine.ini setting for the pool wins.
+
+**Why the image can't change.** The same pipelines are created from the same inputs; only the threads that compile them change. Pipelines needed right now are compiled where they always were.
+
+**Measured (2026-10-23/24, driver shader cache emptied):** 6-core: the first teleport's longest frame 6-18 s instead of a freeze of over 30 s; 4-core: into the world, teleport and door done (longest frame 26 s) instead of never reaching the world. With everything cached no difference: at 4K with frame generation and a 60 fps cap in the Imperial City, main-thread and render-thread time and stutter were the same with and without it (four alternating runs). Untested on NVIDIA.
+
+---
+
 <a id="viewrenameguard"></a>
 
 ### Views kept up to date when the graphics card's memory is tidied (`ViewRenameGuard`)
@@ -1251,6 +1534,20 @@ Either way the game runs at native resolution without frame generation until you
 | pause menu open after the alt-tab (FSR off, as the game ships) | 60 / 60 |
 | pause menu closed, with the fix | 82.6 / 39.8 (frame generation back) |
 
+<a id="frameratelimitatstart"></a>
+
+### The saved frame-rate cap works from the start with frame generation (`FrameRateLimitAtStart`)
+
+[Evidence](research.md#frameratelimitatstart).
+
+**The problem.** A game bug, also without the DLL: with frame generation on, the Frame Rate Limit you saved in the Graphics settings is not in effect after the game starts. The frame rate is uncapped, although the Graphics page shows your limit; it comes into effect only when you open that page, and is gone again after the next start. Switching frame generation on puts the game's limit to "none" (and back when you switch it off). At start-up the game applies your saved settings, which replays that switch after your limit was set.
+
+*Analogy:* a thermostat that is set back to "off" every morning because the heating switch is flipped after the dial is set; looking at the dial puts it right again.
+
+**What we did.** Right after that first switch at start-up (and only if no menu is open), the DLL applies your saved Frame Rate Limit once, through the same setting and in the same way as opening the Graphics page does. Later switches of frame generation (in the settings) are left to the game. Your saved settings are not changed.
+
+**Why the game can't change.** It only puts in effect what your settings already say and what the game shows; the game reaches the same state as soon as you open the Graphics page. It works on both routes (`version.dll` and OBSE64).
+
 <a id="frozenclothstretchfix"></a>
 
 ### Frozen cloth keeps its shape (`FrozenClothStretchFix`)
@@ -1285,6 +1582,8 @@ No fix is switched off for video memory. Windows moves excess video memory into 
 
 When the game reports a GPU crash, `GpuCrashReport` finds its graphics device on the crashing thread and logs why the device was removed, the render passes reached by unfinished command lists, any memory page fault, and the last 30 seconds of memory use.
 
+`LogFile=0` (under `[General]`, default 1, read at start-up) turns the log off for people who do not want the files: at start-up nothing is created, renamed or deleted, ordinary lines are dropped, and logs from earlier sessions stay where they are. The one exception is the GPU crash report: its first line creates `OblivionPerfFix.log` (the earlier logs rotate to `.1` / `.2` as usual) with a one-line note, so a GPU crash still leaves its report. The caps are unchanged: 8 MB per file, three files, 24 MB at most.
+
 **Why the image can't change.** Nothing you see. While RAM is short, the traversal-stutter gains of `LumenKeepArrayCapacity` and `UploadMemoryKeep` are given up. The crash report only reads and writes the log.
 
 ---
@@ -1302,6 +1601,8 @@ When the game reports a GPU crash, `GpuCrashReport` finds its graphics device on
 **What we did.** The DLL watches how many allocators of each queue are in use (the most at once over the last 20 seconds) and how close the game is to the video memory Windows gives it. Once the game is within 2 GB of that budget, it gives the copy queue's spare allocators back about 20 seconds after a load: it takes them out of the stock with the engine's own functions and releases them in the driver, 32 a second, four at a time with short pauses (a long run of releases held up the game's own GPU submissions: frames of 160-220 ms at 1440p; four at a time: frames at their normal length). The emptied places in the stock stay, holding a harmless stand-in; if the engine takes one out again, it gets a fresh allocator made by the engine's own code, exactly as when its stock runs empty (about 0.03 ms each). The other queues (the main one and compute) always keep their peak as in the game: their need comes back with every busy scene, and when the game was over its budget, trimming them made the engine take ~960 new ones from a driver that was already busy moving memory, and the scenes ran slower. Once the game has been over its budget for 10 seconds, the copy pool is trimmed to what the last few seconds needed. With plenty of memory to spare it does nothing.
 
 **Why the image can't change.** Nothing you see: the same commands reach the GPU. When memory is tight, about 0.3-0.5 GB less video memory once an area has loaded (single trims freed 0.27 and 0.50 GB; mean use over six 720p scenes 8.25-8.31 GB instead of 8.48-8.87), which is about what parallel translation costs, and lower peaks after doors (1440p, 12 GB budget: 11.61 instead of the stock game's 11.97 GB at the inn exit).
+
+**Our bug, fixed after 1.1.0-beta.** The spare entries go back into the stock in two rounds (stand-ins first, so the real ones are taken first). The second round used to look at every entry again, including ones the first round had already put back; if the engine had taken one of those out in between and was giving it a fresh allocator, the trim reset and put back an entry in use, which could crash the game. Each entry's round is now decided before any goes back, and after an error the trim stays off until the game restarts. What is released is unchanged.
 
 ---
 
