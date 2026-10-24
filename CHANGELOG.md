@@ -9,6 +9,11 @@ Downloads, checksums and build attestations: https://github.com/LTSharpe/Oblivio
 Bug fixes say whose bug it was: **game bug** = also happens without OblivionPerfFix (in the game, its engine or a
 driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 
+## Unreleased
+- Self-test: the `PhysicsInternalFlushParallel` overlap check no longer fails when the freshly created helper thread
+  is scheduled more than 5 ms late (2 of 6 runs on a 20-thread PC); the simulated FlushAsync now lasts until the
+  helper has started. No change to the fix itself.
+
 ## 1.1.0-beta
 For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Thanks to everyone who reported results on
 NVIDIA, Linux and Mac.
