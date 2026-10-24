@@ -916,6 +916,38 @@ local function Refs(radius)
         n > 0 and nearest or -1, n > 0 and sx / n or 0, n > 0 and sy / n or 0, l.X / S, -l.Y / S, Grid(l.X / S, -l.Y / S), table.concat(names, ","))
 end
 
+-- "flytest doors [radius]": the door refs around the player (class name contains "Door"), nearest first, with the
+-- heading from the player to each one: for placing a door scene so the Activate ray meets the door.
+local function Doors(radius)
+    local pawn = Pawn()
+    if not pawn then error("no player pawn") end
+    local l = pawn:K2_GetActorLocation()
+    local px, py, pz = l.X / S, -l.Y / S, l.Z / S
+    local found = {}
+    for _, c in ipairs(FindAllOf("VTESObjectRefComponent") or {}) do
+        pcall(function()
+            if not c:IsValid() then return end
+            local o = c:GetOwner()
+            if not (o and o:IsValid()) then return end
+            local cls = o:GetClass():GetFName():ToString()
+            if not cls:find("Door") then return end
+            local p = o:K2_GetActorLocation()
+            local x, y, z = p.X / S, -p.Y / S, p.Z / S
+            local d = Dist3(p.X, p.Y, p.Z, l.X, l.Y, l.Z) / S
+            if d <= radius then
+                local yaw = 0
+                pcall(function() yaw = o:K2_GetActorRotation().Yaw end)
+                found[#found + 1] = { d = d, s = string.format("%s d=%.0f at=%.0f,%.0f,%.0f heading=%.1f yaw=%.1f", cls, d, x, y, z,
+                    (math.deg(math.atan(x - px, y - py)) + 360) % 360, (yaw + 90) % 360) }
+            end
+        end)
+    end
+    table.sort(found, function(a, b) return a.d < b.d end)
+    local out = {}
+    for i = 1, math.min(8, #found) do out[i] = found[i].s end
+    return string.format("player=%.0f,%.0f,%.0f doors=%d: %s", px, py, pz, #found, table.concat(out, " | "))
+end
+
 -- ---------------------------------------------------------------- cinematic camera ("spectator")
 -- The game's view target is its own VAltarCameraActor, which the camera system moves with the head
 -- (head bob, idle sway, the flying pose) and with the velocity pursuit of a flight. For a steady,
@@ -1166,6 +1198,7 @@ function V.flytest(rest)
     if verb == "probe" or verb == "" then return Probe() end
     if verb == "result" then return lastTest end
     if verb == "refs" then return Refs(tonumber(a) or 6000) end
+    if verb == "doors" then return Doors(tonumber(a) or 1500) end
     if verb == "off" then return "off" .. FlyStop("stopped") end
     if verb == "hover" then
         return StartTest("hover", tonumber(a) or 10)
@@ -1190,7 +1223,7 @@ function V.flytest(rest)
         return V.fly(string.format("default %s %s 0 lift=0 %.1f,%.1f,%.1f %.1f,%.1f,%.1f %.1f,%.1f,%.1f", speed, pitch,
             x, y, z, x + math.sin(h) * dist / 2, y + math.cos(h) * dist / 2, z, x + math.sin(h) * dist, y + math.cos(h) * dist, z))
     end
-    error("usage: flytest probe|hover [secs]|lift [dz] [secs]|coast [speed] [heading] [secs]|line [dist] [speed] [heading] [pitch]|refs [radius]|off|result")
+    error("usage: flytest probe|hover [secs]|lift [dz] [secs]|coast [speed] [heading] [secs]|line [dist] [speed] [heading] [pitch]|refs [radius]|doors [radius]|off|result")
 end
 
 -- "cam on [show]" | "cam off" | "cam snap" | "cam": the cinematic camera (see above). "show" keeps the player's body visible.

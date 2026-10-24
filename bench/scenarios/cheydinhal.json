@@ -9,6 +9,8 @@
 
   "places": {
     "chapel-square": {"world": "CheydinhalWorld", "pos": [122787.4, 90721.4, 7290.0], "heading": 149.8, "pitch": 0},
+    "chapel-door": {"world": "CheydinhalWorld", "pos": [122787.4, 90721.4, 7290.0], "heading": 171.6, "pitch": 0, "comment": "chapel-square's spot, but turned round it faces the chapel door (BP_CathedralDoorBruma at 122777,90792: heading 351.6); from chapel-square's 149.8 the Activate ray met the porch column and the leg never started (issue #2, and two PCs on 2026-10-19)"},
+    "chapel-inside-door": {"cell": "CheydinhalChapelOfArkay", "pos": [-877.1, -4.7, -580.0], "heading": 121.3, "pitch": 0, "comment": "where the chapel door leaves the player; turned round it faces the left leaf of the double door out (BP_CathedralDoor01 at -959,0; aimed at the actor itself, heading 273.3, the Activate ray meets the post between the leaves and nothing opens)"},
     "canal": {"world": "CheydinhalWorld", "pos": [120983.5, 93025.3, 7180.0], "heading": 288.8, "pitch": 4.6},
     "inn-front": {"world": "CheydinhalWorld", "pos": [115778.9, 91669.2, 7185.0], "heading": 357.1, "pitch": 0},
     "west-gate-in": {"world": "CheydinhalWorld", "pos": [114776.0, 92015.0, 7160.0], "heading": 92.6, "pitch": 0},
@@ -23,7 +25,7 @@
     {"id": "inn-front-noon", "type": "static", "at": "inn-front", "hour": 12, "weather": "Clear", "tags": ["city"]},
     {"id": "inn-door", "type": "door", "at": "inn-front", "hour": 12, "enter": "00031BA3", "exit": "000302CD", "tags": ["city", "transition"]},
     {"id": "inn-room", "type": "static", "at": "inn-room", "hour": 12, "visual": true, "tags": ["interior"]},
-    {"id": "chapel-door", "type": "door", "at": "chapel-square", "hour": 12, "enter": "00031BB5", "exit": "00030C19", "tags": ["city", "transition"]},
+    {"id": "chapel-door", "type": "door", "at": "chapel-door", "hour": 12, "enter": "00031BB5", "exit": "00030C19", "legs": [{"name": "enter", "door": "00031BB5"}, {"name": "exit", "door": "00030C19", "at": "chapel-inside-door"}], "tags": ["city", "transition"]},
     {"id": "chapel-nave", "type": "static", "at": "chapel-nave", "hour": 12, "visual": true, "tags": ["interior"]},
     {"id": "west-gate", "type": "door", "at": "west-gate-in", "hour": 12, "enter": "00007A6A", "exit": "0000799C", "tags": ["transition", "gate"]},
     {"id": "west-road-noon", "type": "static", "at": "west-road", "hour": 12, "weather": "Clear", "visual": true, "tags": ["outdoor"]},

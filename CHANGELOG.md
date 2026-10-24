@@ -10,17 +10,11 @@ Bug fixes say whose bug it was: **game bug** = also happens without OblivionPerf
 driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 
 ## Unreleased
-- Benchmark: `result.json` recorded the previous run's `OblivionPerfFix.ini` when that run's game was still parked
-  (a "fix" run's record showed every switch at 0, as in issue #2's attachment); the ini is now read after the passes,
-  with this run's settings in place. The measurement itself was right.
-- Benchmark: `Bench-Report.ps1` left "Fix version" blank when the first run had no fix-log excerpt; it now looks at
-  every fix run, then at the installed fix's own log, and says "unknown" otherwise. The log is also found when the fix
-  runs as an OBSE64 plugin (`OBSE\Plugins`).
-- Benchmark: the profile's ray-tracing switches get 60 s for the game's answer instead of 8 s. The first time a PC
-  enabled hardware ray tracing (fresh install, Radeon RX 9070) the game took 11 s to apply it, and the run ended at
-  the main menu with "no answer ... within 8000 ms".
-- Benchmark: `Bench-Report.ps1` keeps each run's runner output as `runner.log` in the run's folder (it was discarded;
-  a warning such as "chapel-door/enter: no arrival detected" could not be traced afterwards).
+- Benchmark: the `chapel-door` scene (cheydinhal, full, transitions) never entered the chapel ("no arrival detected",
+  90 s arrival in issue #2's report and on two more PCs): from `chapel-square`'s heading the Activate ray met the
+  porch column. The scene now starts from its own `chapel-door` spot, the same place turned to face the door.
+- Benchmark mod: `flytest doors [radius]` lists the door refs around the player with the heading to each, for
+  placing door scenes.
 
 ## 1.1.0-beta
 For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Thanks to everyone who reported results on
