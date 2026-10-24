@@ -204,7 +204,9 @@ function Get-ProfileExpect($p) {
 }
 
 function Invoke-ProfileCommands($cmds) {
-    foreach ($c in $cmds) { Send-Bench $c | Out-Null }
+    # The ray-tracing switches rebuild render state; the first time a PC enables hardware ray tracing that took 11 s
+    # (2026-10-19, RX 9070, fresh install), past the 8 s answer limit, and the run ended at the main menu.
+    foreach ($c in $cmds) { Send-Bench $c -TimeoutMs $(if ($c -match 'Raytracing') { 60000 } else { 8000 }) | Out-Null }
 }
 
 # Differences between what the profile wants and what the game has: @{ part = 'res'|'rt'|'upscaler'; text }
@@ -823,8 +825,9 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
         }
         $hwnd = [OblvBench.GameWatch]::FindGameWindow($game.Id)   # not MainWindowHandle: it skips owned windows (-Record)
         if ($hwnd -eq [IntPtr]::Zero) { $hwnd = $game.MainWindowHandle }
-        $fixLog = Join-Path $script:GameWin64 'OblivionPerfFix.log'
-        if (Test-Path $fixLog) { $session.perfFixLog = @(Read-SharedLines $fixLog | Select-Object -First 20) }
+        # next to the DLL: Win64 as version.dll, OBSE\Plugins as an OBSE64 plugin
+        $fixLog = @('OblivionPerfFix.log', 'OBSE\Plugins\OblivionPerfFix.log' | ForEach-Object { Join-Path $script:GameWin64 $_ } | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1)
+        if ($fixLog) { $session.perfFixLog = @(Read-SharedLines $fixLog | Select-Object -First 20) }
 
         # ---- settings: scenario defaults, the profile, then the change under test; record what is in effect
         $effective = [ordered]@{}
@@ -1869,8 +1872,7 @@ for ($run = 1; $run -le $Runs; $run++) {
             perfFix = [ordered]@{
                 installed = (Test-Path $fixDll)
                 dllTime = if (Test-Path $fixDll) { (Get-Item $fixDll).LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }
-                # .NET read: strings from Get-Content carry provider properties that ConvertTo-Json would serialise
-                ini = if (Test-Path $fixIniPath) { @(Read-SharedLines $fixIniPath | Where-Object { $_ -match '^\s*\w+\s*=' }) } else { @() }
+                ini = @()   # filled in after the passes: the previous run's -FixIni may still be in place here (its game parked)
             }
             system = [ordered]@{ cpu = (Get-CimInstance Win32_Processor | Select-Object -First 1).Name.Trim(); gpu = $gpu.Name; gpuDriver = $gpu.DriverVersion }
             sessions = @()
@@ -1884,6 +1886,10 @@ for ($run = 1; $run -le $Runs; $run++) {
         }
         $result.sessions = $sessions
         $result.restarts = $script:restartCount
+        # The ini as this run's games had it: Start-BenchGame has put this run's -FixIni in place by now (Restore-Config
+        # runs only after the result is written). .NET read: strings from Get-Content carry provider properties that
+        # ConvertTo-Json would serialise.
+        if (Test-Path -LiteralPath $fixIniPath) { $result.perfFix.ini = @(Read-SharedLines $fixIniPath | Where-Object { $_ -match '^\s*\w+\s*=' }) }
         $result | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $runDir 'result.json') -Encoding utf8
         Write-Report $result $runDir | Out-Host
         # ok: every pass ran to its end and no scene failed; partial: some results; failed: none
