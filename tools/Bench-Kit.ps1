@@ -90,7 +90,7 @@ foreach ($d in 'tools', 'bench', 'mods', 'fix') {
 
 if ($VerdictFrom) { $Mode = 'GpuCheck' } else {
 # ---------------------------------------------------------------- the game
-try { $game = Get-OblivionGame } catch { Stop-Kit "Oblivion Remastered was not found: $($_.Exception.Message)`nThe benchmark needs the Steam version of the game." }
+try { $game = Get-OblivionGame } catch { Stop-Kit "Oblivion Remastered was not found: $($_.Exception.Message)`nFor a non-Steam install, set OBLIVION_GAME_DIR to the game root folder." }
 $win64 = $game.Win64
 $running = Get-Process OblivionRemastered-Win64-Shipping -ErrorAction SilentlyContinue
 if ($running) {
@@ -152,11 +152,11 @@ if ($Mode -ne 'GpuCheck') {
         if ($same) { Say "  OblivionPerfFix $kitVer is installed (the version of this kit)." }
         else {
             if ((Test-Path -LiteralPath $dll) -and -not $haveVer) {
-                Stop-Kit "$dll belongs to another mod, not to OblivionPerfFix. The benchmark starts the game through Steam and needs the fix as version.dll: remove or rename that mod's version.dll for the benchmark, or measure by hand (docs\benchmark.md)."
+                Stop-Kit "$dll belongs to another mod, not to OblivionPerfFix. The benchmark needs OblivionPerfFix as version.dll: remove or rename that mod's version.dll for the benchmark, or measure by hand (docs\benchmark.md)."
             }
             $what = if ($haveVer -eq $kitVer) { "Another build of OblivionPerfFix $haveVer is installed (not the one in this kit)." }
                     elseif ($haveVer) { "OblivionPerfFix $haveVer is installed; this kit is for $kitVer." }
-                    elseif (Test-Path -LiteralPath $obse) { "OblivionPerfFix is installed as an OBSE64 plugin. The benchmark starts the game through Steam, where OBSE64 does not load, so it needs the fix as version.dll as well (with both, the fix loads once)." }
+                    elseif (Test-Path -LiteralPath $obse) { "OblivionPerfFix is installed as an OBSE64 plugin. The benchmark needs it as version.dll for its launch path (with both, the fix loads once)." }
                     else { 'OblivionPerfFix is not installed.' }
             Say "  $what"
             $answer = $InstallFix

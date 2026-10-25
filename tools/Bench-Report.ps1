@@ -122,7 +122,10 @@ if (-not $Base -and -not $Test) {
                 if ($Plain -and $s -match '^\[(\d\d:\d\d):\d\d\] (.*)$') {
                     $t = $Matches[1]; $m = $Matches[2]
                     $say = switch -Regex ($m) {
-                        '^starting the game' { 'Steam starts the game; it opens by itself (no save is loaded, your characters are not touched)' }
+                        '^starting the game' {
+                            if ((Get-OblivionGame).LaunchMethod -eq 'Steam') { 'Steam starts the game; it opens by itself (no save is loaded, your characters are not touched)' }
+                            else { 'the game opens by itself (no save is loaded, your characters are not touched)' }
+                        }
                         '^waiting for the main menu' { 'skipping the start-up videos' }
                         "^main menu: waiting for the game's PSO precompile" { 'at the main menu the game prepares its shaders: normal, about 2 minutes without the fix, less with it; the game looks idle meanwhile' }
                         '^waited \d+ s at the main menu' { 'shaders ready: starting a new game' }

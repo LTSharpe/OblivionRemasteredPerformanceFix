@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-  Unattended benchmark. Gets the game into the world (starting it through Steam, or reusing a healthy
+    Unattended benchmark. Gets the game into the world (starting through Steam or launching the explicit game path directly, or reusing a healthy
   game the benchmark left at the main menu), applies a display/graphics profile (bench\profiles.json),
   switches to spectator mode (cinematic camera, no HUD, no head bob, god mode, nobody notices the
   player), runs the selected scenes (bench\scenarios\*.json) through the OblvBench UE4SS mod and writes
@@ -76,7 +76,7 @@ param(
     [switch]$Record,                                     # promo: record each flight scene with OBS (tools\Obs.ps1, docs\promo-video.md) into <run>\video\: from the hover in black to after the fade-out
     [switch]$Pin,                                        # the same conditions in every run: weather (scene -> scenario default -> Clear) held with the weather override, hour (-> 12), timescale (-> 1); a scene opts out with "keep". On by default since 2026-10-20 (user); a scenario's "pin": false turns it off (docs\benchmark.md "Identical runs")
     [switch]$NoPin,                                      # the old behaviour: only what a scene names is set (same as -Pin:$false)
-    [switch]$NoFixedSeed,                                # launch the game without UE's -FixedSeed (on by default since 2026-10-20: the engine's random generators start from the same seed in every benchmark game; passed to this launch only, never to the player's own Steam launch options)
+    [switch]$NoFixedSeed,                                # launch the game without UE's -FixedSeed (on by default since 2026-10-20: the engine's random generators start from the same seed in every benchmark game; passed to this launch only, never saved to store launch settings)
     [switch]$SkipPsoWait,                                # lab only: do not wait for the game's PSO precompile after a launch (to measure what it costs)
     [switch]$NoWarmup,                                   # lab only: start the scenes without the shader warm-up wait (driver compilation quiet) either (start-up measurements, 2026-10-23)
     [double]$MenuHoldSec = 0,                            # lab only: after a launch, stay this long at the main menu before entering the world (a player looking at the menu while the precompile runs)
