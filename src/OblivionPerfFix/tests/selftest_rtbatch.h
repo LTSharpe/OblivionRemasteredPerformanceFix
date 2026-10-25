@@ -34,6 +34,8 @@ inline void RtBatchSelfTest(const opf::GameModule& game)
         if (Installed(RayTracingBuildBatchInfo(&rtb), "ray tracing build batch: info")) {
             Check(rtb.callSite == call && rtb.request == request && rtb.slot == slot && rtb.render == slotBefore,
                   "ray tracing build batch: found at exe+0x266FD26 (the request call), exe+0x26C47C0 and Render's slot exe+0x70EEB50");
+            Check(rtb.immediate == game.base + 0x9206608,
+                  "ray tracing build batch: the immediate command list exe+0x9206608 (the \"build at once\" path's, for the early batches)");
             int32_t rc;
             memcpy(&rc, rtb.callSite + 1, 4);
             Check(rtb.callSite[0] == 0xE8 && rtb.callSite + 5 + rc == rtb.region, "ray tracing build batch: the build request goes to the gate");
@@ -46,6 +48,42 @@ inline void RtBatchSelfTest(const opf::GameModule& game)
             Check(*rtb.slot == rtb.hook && rtb.render != rtb.hook, "ray tracing build batch: Render's vtable slot holds the wrapper");
         }
     }
+    // The queue as the manager keeps it (RequestBuild's queue path): entries of 0x18 bytes with the geometry at +8,
+    // allocation bits inline at +0x38 or behind the pointer at +0x48, count +0x30, free count +0x5C; a geometry's RHI
+    // geometry (+0x90) holds its build scratch size (+0x18)
+    {
+        alignas(16) static uint8_t rhi[3][0x20]{}, geo[3][0xA0]{}, entries[3 * 0x18]{}, manager[0x60]{};
+        const uint64_t sizes[3] = {10, 20, 40};
+        for (int i = 0; i < 3; ++i) {
+            const uint8_t* r = rhi[i];
+            const uint8_t* g = geo[i];
+            memcpy(rhi[i] + 0x18, &sizes[i], 8);
+            memcpy(geo[i] + 0x90, &r, 8);
+            memcpy(entries + i * 0x18 + 8, &g, 8);
+        }
+        const uint8_t* e = entries;
+        const int32_t num = 3, oneFree = 1, allFree = 3;
+        const uint32_t inlineBits = 0x5;   // entries 0 and 2 queued, 1 free
+        static uint32_t heapBits = 0x2;    // only entry 1
+        const uint32_t* hb = &heapBits;
+        memcpy(manager + 0x28, &e, 8);
+        memcpy(manager + 0x30, &num, 4);
+        memcpy(manager + 0x38, &inlineBits, 4);
+        memcpy(manager + 0x5C, &oneFree, 4);
+        int32_t n = -1;
+        uint64_t s = 0;
+        Check(RayTracingBuildBatchQueueForTest(manager, &n, &s) && n == 2 && s == 50,
+              "ray tracing build batch: the engine's queue counted from its allocation bits (inline), the queued builds' scratch summed");
+        memcpy(manager + 0x48, &hb, 8);
+        Check(RayTracingBuildBatchQueueForTest(manager, &n, &s) && n == 1 && s == 20,
+              "ray tracing build batch: the engine's queue with its allocation bits on the heap");
+        memcpy(manager + 0x5C, &allFree, 4);
+        Check(RayTracingBuildBatchQueueForTest(manager, &n, &s) && n == 0 && s == 0,
+              "ray tracing build batch: an empty queue (every request dropped) counts nothing");
+    }
+    Check(!RayTracingBuildBatchFlushFirst(60ull << 20, 5, 3ull << 20) && RayTracingBuildBatchFlushFirst(62ull << 20, 5, 3ull << 20) &&
+              !RayTracingBuildBatchFlushFirst(100ull << 20, 0, 1),
+          "ray tracing build batch: a request that would take the queue past 64 MiB of scratch builds it first; an empty queue never");
     Check(RayTracingBuildBatchDecide(true, 2, 0, true, true, false, -1, 0, 0),
           "ray tracing build batch: InitRHI's Normal build of a static geometry on the render thread is queued");
     Check(!RayTracingBuildBatchDecide(false, 2, 0, true, true, false, -1, 0, 0), "ray tracing build batch: off builds at once");

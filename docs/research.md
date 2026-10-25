@@ -358,9 +358,16 @@ loading itself is unchanged (arrival 2.7-3.1 s after the door is used, both).
   Image check (`water-visual`: the climb flight, then two hovering views of the Niben; switch off twice and on twice,
   WaterRebuildSpread on in all four): the same as the off-versus-off floor (niben-bridge SSIM 0.99; niben-above 0.79
   against 0.78 between the two off runs, which differ by fine outlines along every edge of the frame).
-- **Memory:** a world load's batch is ~1,700 builds sharing one 172 MB scratch buffer (the engine's batch splits only at
-  2 GB); without the switch the same frame creates ~1,700 small scratch buffers that live until the GPU has finished, so
-  the peak is about the same. Not measured on an 8 GB card.
+- **Memory, and a cap:** with no scene render (a loading screen) the queue held a whole load for one call: 2,445
+  builds and 1.23 GB of scratch at an Anvil dock exit, one 52-117 ms call on the render thread (measured by LTSharpe on
+  an RX 9070 XT, where the video memory peak stayed 11.5-11.6 GB and the stock game ran those builds' GPU work in one
+  frame as well, ~450 ms against ~55 ms batched). So a request that would take the queued builds' scratch past 64 MiB
+  first has the queue built: in the gate, before it is queued (the request index Create stores in the geometry at
+  +0x9C then stays the queued one), with the game's `ProcessBuildRequests` on the immediate command list that the
+  "build at once" path uses there. The queue is the manager's own request array (count +0x30, free count +0x5C,
+  entries +0x28 of 0x18 bytes with the geometry at +8, allocation bits +0x38 / +0x48, as the queue path writes them,
+  checked at install): a request the engine drops is not counted. A batch's scratch is one buffer (the engine splits a
+  batch only at 2 GB); stock makes one per build, each living until the GPU has finished. Not measured on an 8 GB card.
 - **Results** (1.2.1 base + this switch only, stock Engine.ini, the runner's pinned runs, profile `promo-dlss`: 4K,
   DLSS Performance, ray tracing mode 3; RTX 4090): `showcase`, a fresh game per run, off / on, three rounds (the first
   side alternating; `tools\Run-Benchmark.ps1 -Scenario showcase -Profile promo-dlss -Pass perf -FixIni @{

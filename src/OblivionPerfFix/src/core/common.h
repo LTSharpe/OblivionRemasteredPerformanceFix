@@ -291,8 +291,11 @@ struct RayTracingBuildBatchInfoOut {
     void* hook = nullptr;          // the wrapper
     uint8_t* request = nullptr;    // the game's RequestBuildAccelerationStructure
     void* render = nullptr;        // the game's Render
+    void* immediate = nullptr;     // the immediate command list (the early batches')
 };
 bool RayTracingBuildBatchInfo(RayTracingBuildBatchInfoOut* out);   // self-test
+bool RayTracingBuildBatchFlushFirst(uint64_t queuedScratch, int32_t queued, uint64_t scratch);  // the cap's decision (pure)
+bool RayTracingBuildBatchQueueForTest(const void* manager, int32_t* count, uint64_t* scratch);  // self-test: the queue reading
 
 
 // ---- view_rename_guard.cpp (ViewRenameGuard: closes UE-217692, view creation vs pool defragmentation) ----

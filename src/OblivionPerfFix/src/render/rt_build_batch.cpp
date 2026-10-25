@@ -26,7 +26,13 @@
 // engine's batch would run), enters the function past its "build at once" test, on its queue path; everything else goes
 // to the game's function unchanged. (2) The scene renderer's Render gets a wrapper (its vtable slot): when requests are
 // queued, it first calls ProcessBuildRequests (build all) on the frame's command list, then renders. So the queued
-// geometries are built before the frame's ray-tracing gather; no reader ever sees one still queued.
+// geometries are built before the frame's ray-tracing gather; no reader ever sees one still queued. (3) A cap: with no
+// scene render (a loading screen) the queue would hold a whole load for one call (2,445 builds, 1.23 GB of scratch at
+// an Anvil dock exit, measured by LTSharpe on an RX 9070 XT). A request that would take the queued builds' scratch past
+// 64 MiB first has the queue built, in the gate, with the game's ProcessBuildRequests on the immediate command list (the
+// list the "build at once" path uses there); before queueing, so the new request's index, which Create stores in the
+// geometry (+0x9C), is the one that stays queued. The queue is the manager's own (its request array, read as its queue
+// path writes it): a request the engine drops (a geometry released while queued) is simply no longer in it.
 //
 // Why the same picture: the same geometries get the same builds (same inputs, flags and build mode), in the same frame,
 // before the frame's ray-tracing scene or anything else uses them. Only their place in the frame's GPU work moves: from
@@ -40,7 +46,10 @@
 //     manager its return address is 0x28 above rsp); ... xor r9d,r9d; lea rcx,[manager]; mov r8d,ebp; mov rdx,rbx;
 //     call RequestBuild; mov [rbx+9Ch],eax (the request index)
 //   RequestBuild: push rsi; sub rsp,40h; cmp dword [budget],0; mov rsi,rcx; jle now; test r8d,r8d; je now; (queue path,
-//     +0x1F) ... now: mov rdx,[rdx+90h]; lea rcx,[immediate list]; call BuildAccelerationStructure; mov eax,-1; ret
+//     +0x1F) call [lock] (the manager's request lock at +0); mov edx,[rsi+5Ch] (free count); ... mov r8,[rsi+28h]
+//     (entries, 0x18 bytes each: index, priority, geometry at +8, mode); ... mov edi,[rsi+30h] (count) ...; (+0x120)
+//     mov rax,[rbp+10h] (rbp = +0x38, the allocation bits inline; +0x48 their heap pointer when set) ... now: mov
+//     rdx,[rdx+90h]; lea rcx,[immediate list]; call BuildAccelerationStructure; mov eax,-1; ret
 //   the ray-tracing update: ... cmp byte [rcx+10E0h],bl; jne; mov rdx,[rdx+50h] (the builder's command list); lea
 //     rcx,[manager]; xor r8d,r8d; call ProcessBuildRequests
 //   Render: push rbp; push rbx; push r12; ... mov r12,rdx; mov rbx,rcx; ... (+0x2FF2) mov rdx,r12; mov rcx,rbx; call
@@ -66,8 +75,16 @@ constexpr size_t kCreateRequestManager = 0x11, kCreateRequestCall = 0x1E;
 constexpr size_t kCreateFrame = 0x28;  // Create's rsp below its entry: push rdi + sub rsp,20h
 constexpr char kRequest[] =
     "40 56 48 83 EC 40 83 3D ?? ?? ?? ?? 00 48 8B F1 0F 8E ?? ?? ?? ?? 45 85 C0 0F 84 ?? ?? ?? ?? 48 89 5C 24 50";
-constexpr size_t kRequestQueuePath = 0x1F, kRequestNow = 0x199;
+constexpr size_t kRequestQueuePath = 0x1F, kRequestNow = 0x199, kRequestNowList = 7;  // the now path's lea rcx,[immediate list]
 constexpr char kRequestNowCode[] = "48 8B 92 90 00 00 00 48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? B8 FF FF FF FF 48 83 C4 40 5E C3";
+// The queue path's use of the manager's request array (the layout QueueState reads), at +0x87, +0xC5 and +0x120
+constexpr char kQueueFree[] = "8B 56 5C 41 BE 01 00 00 00 85 D2 74 ?? 48 63 7E 58 8D 42 FF 4C 8B 46 28 48 8D 0C 7F";
+constexpr char kQueueAdd[] = "8B 7E 30 8D 47 01 89 46 30 8B 46 34";
+constexpr char kQueueBits[] = "48 8B 45 10 8B CF 48 85 C0 48 0F 45 E8";
+constexpr size_t kQueueFreeAt = 0x87, kQueueAddAt = 0xC5, kQueueBitsAt = 0x120;
+constexpr size_t kQueueEntries = 0x28, kQueueCount = 0x30, kQueueBitsInline = 0x38, kQueueBitsHeap = 0x48, kQueueFreeCount = 0x5C;
+constexpr size_t kQueueEntrySize = 0x18, kQueueEntryGeometry = 8;
+constexpr uint64_t kFlushScratch = 64ull << 20;  // a request that would take the queued scratch past this builds the queue first
 constexpr char kWorldUpdate[] =
     "40 55 53 41 55 41 57 48 8D AC 24 28 FF FF FF 48 81 EC D8 01 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 B0 00 00 00 33 DB "
     "4C 89 44 24 60 49 89 18 4C 8B FA 4C 8B E9 48 89 4C 24 68 38 99 ?? ?? 00 00 75 ?? 48 8B 52 50 48 8D 0D ?? ?? ?? ?? 45 33 C0 "
@@ -98,6 +115,7 @@ RenderFn g_render = nullptr;     // the game's Render (the slot's old value)
 void* g_manager = nullptr;
 const volatile int32_t* g_budget = nullptr;
 const void* g_initRhiReturn = nullptr;
+void* g_immediate = nullptr;     // the immediate RHI command list (the "build at once" path's)
 uint8_t* g_region = nullptr;
 uint8_t* g_callSite = nullptr;
 void** g_slot = nullptr;
@@ -105,8 +123,10 @@ bool g_installed = false;
 std::atomic<bool> g_on{false};
 std::atomic<DWORD> g_renderThread{0};
 int g_inRender = 0;              // render thread only
-std::atomic<uint64_t> g_pending{0}, g_pendingScratch{0};
-std::atomic<uint64_t> g_queued{0}, g_triangles{0}, g_batches{0}, g_largest{0}, g_largestScratch{0}, g_largestUs{0},
+// render thread: requests queued by the gate since the last batch (a flag for the render hook; whether they are still
+// queued is the engine's queue), and an upper bound of their scratch (the exact sum is read when it reaches the cap)
+uint64_t g_pending = 0, g_pendingScratch = 0;
+std::atomic<uint64_t> g_queued{0}, g_triangles{0}, g_batches{0}, g_early{0}, g_largest{0}, g_largestScratch{0}, g_largestUs{0},
     g_atOnceThread{0}, g_atOnceRender{0}, g_atOnceUpdatable{0};
 
 void Max(std::atomic<uint64_t>& m, uint64_t v)
@@ -122,6 +142,54 @@ void LogGeometry(const char* what, const uint8_t* geometry)
     for (int i = 0; i < 12; ++i) sprintf_s(hex + 3 * i, 4, "%02X ", geometry[0x6C + i]);
     Log("[rtbatch] first %s geometry: initializer bytes +0x6C..+0x77 %s(%u primitives)", what, hex,
         *reinterpret_cast<const uint32_t*>(geometry + kPrimitives));
+}
+
+// The manager's queued requests (render thread: with the budget <= 0 only the render thread changes the queue): their
+// number and the scratch their geometries' builds need. False if the memory could not be read.
+bool QueueState(const void* manager, int32_t* count, uint64_t* scratch)
+{
+    *count = 0;
+    *scratch = 0;
+    __try {
+        const uint8_t* m = static_cast<const uint8_t*>(manager);
+        const int32_t num = *reinterpret_cast<const int32_t*>(m + kQueueCount);
+        const int32_t numFree = *reinterpret_cast<const int32_t*>(m + kQueueFreeCount);
+        if (num <= 0 || num - numFree <= 0) return true;
+        const uint8_t* entries = *reinterpret_cast<const uint8_t* const*>(m + kQueueEntries);
+        const uint32_t* heap = *reinterpret_cast<const uint32_t* const*>(m + kQueueBitsHeap);
+        const uint32_t* bits = heap ? heap : reinterpret_cast<const uint32_t*>(m + kQueueBitsInline);
+        for (int32_t i = 0; i < num; ++i) {
+            if (!(bits[i >> 5] & (1u << (i & 31)))) continue;  // a free entry
+            ++*count;
+            const uint8_t* geometry = *reinterpret_cast<const uint8_t* const*>(entries + i * kQueueEntrySize + kQueueEntryGeometry);
+            const uint8_t* rhi = geometry ? *reinterpret_cast<const uint8_t* const*>(geometry + kRhiGeometry) : nullptr;
+            if (rhi) *scratch += *reinterpret_cast<const uint64_t*>(rhi + kBuildScratch);
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// Builds what is queued with the game's ProcessBuildRequests (all of it) on the given command list.
+void BuildQueued(void* commandList, bool early)
+{
+    int32_t n = 0;
+    uint64_t scratch = 0;
+    const bool known = QueueState(g_manager, &n, &scratch);
+    g_pending = 0;
+    g_pendingScratch = 0;
+    if (known && n <= 0) return;  // every queued request was dropped meanwhile
+    LARGE_INTEGER a, b, f;
+    QueryPerformanceCounter(&a);
+    g_process(g_manager, commandList, true);
+    QueryPerformanceCounter(&b);
+    QueryPerformanceFrequency(&f);
+    g_batches.fetch_add(1, std::memory_order_relaxed);
+    if (early) g_early.fetch_add(1, std::memory_order_relaxed);
+    Max(g_largest, static_cast<uint64_t>(n));
+    Max(g_largestScratch, scratch);
+    Max(g_largestUs, QpcToMicroseconds(static_cast<uint64_t>(b.QuadPart - a.QuadPart), static_cast<uint64_t>(f.QuadPart)));
 }
 
 int32_t Gate(void* manager, void* geometry, int32_t priority, int32_t mode)
@@ -159,29 +227,27 @@ int32_t Gate(void* manager, void* geometry, int32_t priority, int32_t mode)
         return g_request(manager, geometry, priority, mode);
     }
     if (!g_loggedQueued.exchange(true)) LogGeometry("batched", static_cast<const uint8_t*>(geometry));
+    // The cap: past kFlushScratch the queue is built first (before this request is queued). The running sum is an upper
+    // bound; the engine's queue gives the exact one.
+    if (g_pending && g_pendingScratch + scratch > kFlushScratch) {
+        int32_t n = 0;
+        uint64_t queued = 0;
+        if (!QueueState(g_manager, &n, &queued)) queued = g_pendingScratch;
+        if (RayTracingBuildBatchFlushFirst(queued, n, scratch)) BuildQueued(g_immediate, true);
+        else g_pendingScratch = queued;
+    }
     g_queued.fetch_add(1, std::memory_order_relaxed);
     g_triangles.fetch_add(primitives, std::memory_order_relaxed);
-    g_pending.fetch_add(1, std::memory_order_relaxed);
-    g_pendingScratch.fetch_add(scratch, std::memory_order_relaxed);
+    ++g_pending;
+    g_pendingScratch += scratch;
     return g_queue(manager, geometry, priority, mode);
 }
 
 void RenderHook(void* renderer, void* graphBuilder)
 {
     g_renderThread.store(GetCurrentThreadId(), std::memory_order_relaxed);
-    if (g_pending.load(std::memory_order_relaxed)) {
-        const uint64_t n = g_pending.exchange(0), scratch = g_pendingScratch.exchange(0);
-        void* const commandList = *reinterpret_cast<void**>(static_cast<uint8_t*>(graphBuilder) + kCommandListInBuilder);
-        LARGE_INTEGER a, b, f;
-        QueryPerformanceCounter(&a);
-        g_process(g_manager, commandList, true);
-        QueryPerformanceCounter(&b);
-        QueryPerformanceFrequency(&f);
-        g_batches.fetch_add(1, std::memory_order_relaxed);
-        Max(g_largest, n);
-        Max(g_largestScratch, scratch);
-        Max(g_largestUs, QpcToMicroseconds(static_cast<uint64_t>(b.QuadPart - a.QuadPart), static_cast<uint64_t>(f.QuadPart)));
-    }
+    if (g_pending)
+        BuildQueued(*reinterpret_cast<void**>(static_cast<uint8_t*>(graphBuilder) + kCommandListInBuilder), false);
     ++g_inRender;
     g_render(renderer, graphBuilder);
     --g_inRender;
@@ -228,6 +294,11 @@ bool InstallRayTracingBuildBatch(bool beforeGameCode)
         return Fail("RequestBuildAccelerationStructure's \"build at once\" path differs");
     if (memcmp(request, kRequestPrologue, sizeof kRequestPrologue) != 0 || memcmp(request + 0xD, kMovRsiRcx, sizeof kMovRsiRcx) != 0)
         return Fail("unexpected RequestBuildAccelerationStructure prologue");
+    if (!MatchesAt(request + kQueueFreeAt, ParsePattern(kQueueFree)) || !MatchesAt(request + kQueueAddAt, ParsePattern(kQueueAdd)) ||
+        !MatchesAt(request + kQueueBitsAt, ParsePattern(kQueueBits)))
+        return Fail("RequestBuildAccelerationStructure's queue (the manager's request array) differs");
+    void* const immediate = RipTarget(request + kRequestNow + kRequestNowList, 3, 7);
+    if (!game.data.Contains(static_cast<const uint8_t*>(immediate))) return Fail("the immediate command list is not in the game's data");
     auto* const budget = reinterpret_cast<const volatile int32_t*>(RipTarget(request + 6, 2, 7));
     if (!game.data.Contains(const_cast<const int32_t*>(budget))) return Fail("the build budget is not in the game's data");
     uint8_t* const manager = RipTarget(site + kCreateRequestManager, 3, 7);
@@ -248,6 +319,11 @@ bool InstallRayTracingBuildBatch(bool beforeGameCode)
 
     g_region = AllocNearGame(64);
     if (!g_region) return Fail("no memory near the game");
+    auto failFree = [](const char* why) {   // nothing points at the region yet: give it back
+        VirtualFree(g_region, 0, MEM_RELEASE);
+        g_region = nullptr;
+        return Fail(why);
+    };
     // [0] jmp [rip] -> Gate; [16] the queue path: RequestBuild's prologue and mov rsi,rcx, then jmp [rip] -> +0x1F
     const uint8_t jmpAbs[6] = {0xFF, 0x25, 0, 0, 0, 0};
     void* const gate = reinterpret_cast<void*>(&Gate);
@@ -259,10 +335,10 @@ bool InstallRayTracingBuildBatch(bool beforeGameCode)
     memcpy(g_region + 25, jmpAbs, 6);
     memcpy(g_region + 31, &resume, 8);
     DWORD old;
-    if (!VirtualProtect(g_region, 64, PAGE_EXECUTE_READ, &old)) return Fail("trampoline protection");
+    if (!VirtualProtect(g_region, 64, PAGE_EXECUTE_READ, &old)) return failFree("trampoline protection");
     FlushInstructionCache(GetCurrentProcess(), g_region, 64);
     const int64_t rel = g_region - (call + 5);
-    if (rel != static_cast<int32_t>(rel)) return Fail("out of reach");
+    if (rel != static_cast<int32_t>(rel)) return failFree("out of reach");
 
     g_request = reinterpret_cast<RequestFn>(request);
     g_queue = reinterpret_cast<RequestFn>(g_region + 16);
@@ -271,14 +347,15 @@ bool InstallRayTracingBuildBatch(bool beforeGameCode)
     g_manager = manager;
     g_budget = budget;
     g_initRhiReturn = initRhi + kInitRhiCall + 5;
+    g_immediate = immediate;
     // The flush first, so a queued request always has its batch; then the gate.
-    if (!WritePointer(slot, reinterpret_cast<void*>(&RenderHook))) return Fail("could not write Render's vtable slot");
+    if (!WritePointer(slot, reinterpret_cast<void*>(&RenderHook))) return failFree("could not write Render's vtable slot");
     uint8_t c[5] = {0xE8};
     const int32_t r32 = static_cast<int32_t>(rel);
     memcpy(c + 1, &r32, 4);
     if (!WriteCode(call, c)) {
         WritePointer(slot, render);
-        return Fail("call patch failed");
+        return failFree("call patch failed");
     }
     g_callSite = call;
     g_slot = slot;
@@ -302,14 +379,17 @@ void SetRayTracingBuildBatch(bool on)
 void LogRayTracingBuildBatchStats()
 {
     if (!g_installed) return;
-    const uint64_t q = g_queued.exchange(0), t = g_triangles.exchange(0), b = g_batches.exchange(0), l = g_largest.exchange(0),
+    const uint64_t q = g_queued.exchange(0), t = g_triangles.exchange(0), b = g_batches.exchange(0), e = g_early.exchange(0),
+                   l = g_largest.exchange(0),
                    ls = g_largestScratch.exchange(0), lu = g_largestUs.exchange(0), th = g_atOnceThread.exchange(0),
                    r = g_atOnceRender.exchange(0), u = g_atOnceUpdatable.exchange(0);
     if (q || th || r || u)
         Log("[rtbatch] %llu new meshes' builds (%llu triangles) in %llu batches, largest %llu builds / %.1f MB scratch, longest "
-            "batch call %.2f ms; built at once: %llu on other threads, %llu during a render, %llu updatable",
+            "batch call %.2f ms, %llu of them early (the queue at 64 MiB of scratch); built at once: %llu on other threads, %llu "
+            "during a render, %llu updatable",
             static_cast<unsigned long long>(q), static_cast<unsigned long long>(t), static_cast<unsigned long long>(b),
-            static_cast<unsigned long long>(l), ls / 1048576.0, lu / 1000.0, static_cast<unsigned long long>(th),
+            static_cast<unsigned long long>(l), ls / 1048576.0, lu / 1000.0, static_cast<unsigned long long>(e),
+            static_cast<unsigned long long>(th),
             static_cast<unsigned long long>(r), static_cast<unsigned long long>(u));
 }
 
@@ -322,7 +402,18 @@ bool RayTracingBuildBatchInfo(RayTracingBuildBatchInfoOut* out)
     out->hook = reinterpret_cast<void*>(&RenderHook);
     out->request = reinterpret_cast<uint8_t*>(g_request);
     out->render = reinterpret_cast<void*>(g_render);
+    out->immediate = g_immediate;
     return true;
+}
+
+bool RayTracingBuildBatchFlushFirst(uint64_t queuedScratch, int32_t queued, uint64_t scratch)
+{
+    return queued > 0 && queuedScratch + scratch > kFlushScratch;
+}
+
+bool RayTracingBuildBatchQueueForTest(const void* manager, int32_t* count, uint64_t* scratch)
+{
+    return QueueState(manager, count, scratch);
 }
 
 }  // namespace opf
