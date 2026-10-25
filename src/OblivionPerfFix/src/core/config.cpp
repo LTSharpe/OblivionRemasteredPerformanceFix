@@ -119,6 +119,7 @@ Config LoadConfig(const wchar_t* iniPath)
     c.pacingUseSlack = get(L"Fixes", L"PacingUseSlack", c.pacingUseSlack) != 0;
     c.pacingFlowWait = get(L"Fixes", L"PacingFlowWait", c.pacingFlowWait) != 0;
     c.pacingFlowWaitFrames = get(L"Fixes", L"PacingFlowWaitFrames", c.pacingFlowWaitFrames);
+    c.pacingLeanFlowDrain = get(L"Fixes", L"PacingLeanFlowDrain", c.pacingLeanFlowDrain) != 0;
     c.memoryRelief = get(L"Fixes", L"MemoryRelief", c.memoryRelief) != 0;
     c.memoryReliefRamMB = get(L"Fixes", L"MemoryReliefRamMB", c.memoryReliefRamMB);
     c.memoryReliefCommitMB = get(L"Fixes", L"MemoryReliefCommitMB", c.memoryReliefCommitMB);

@@ -921,6 +921,21 @@ more 149 -> 134 (within the run-to-run noise: one block showed the gain, the oth
   frames): the two creates the old bound would have drained into one ~29 ms frame ran in frames of 20.1 and 21.7 ms. The order of every command between the threads is unchanged; the OT waits up to 8 GT frames instead of
   3 (it waits for the stock game's single long frame the same way).
 
+- **The bound's drain runs the main queue only (`PacingLeanFlowDrain`, 2026-10-20):** at y -56660 on the Imperial City
+  flight one level flow (its RunSession called from exe+0x4881C55) reaches its 3-frame bound in most runs, the queue
+  owing 4-6 older OT frames with 13-21 delegates waiting, and `Drain` then ran the owed queue and every waiting
+  delegate in one frame. A flow on a complete queue already leaves the delegates queued (in the game the flows run
+  before the frame's delegates); at the bound the flow needs only the main queue before it, so `Drain(manager, false)`
+  leaves the delegates to the frame's replay. Travel and other sessions drain as before. 1.2.2-beta + this switch,
+  stock Engine.ini (`showcase`, `promo`, fresh games, 3 rounds, the first side alternating; `-FixIni @{
+  PacingLeanFlowDrain = 0 }` / `1`): the flow reached its bound in 4 of the 6 runs (not in one off and one on run).
+  Off, the drain frame ran 18 / 24 units (14 / 13 delegates), 32.6 / 42.9 ms; on, it ran the main queue only (3 / 2
+  units, 21.7 / 16.8 ms) and the 20 / 21 delegates followed 1-7 frames later in two frames: the most NPC unit time in
+  one frame there 32.6 / 42.9 -> 30.4 / 21.4 ms. In PresentMon the second around that spot is slow in every run for
+  other reasons (frames up to 47-72 ms off, 50-54 ms on), with the same time lost either way. Whole flight, no gain:
+  worst frame 62.5 / 72.2 / 58.4 -> 60.4 / 61.1 / 56.4 ms, hitches 37 / 40 / 29 -> 39 / 35 / 31, 1% low 27.8 / 26.9 /
+  28.0 -> 27.3 / 27.5 / 27.5 fps.
+
 <a id="clothregisterlite"></a>
 
 ### Robes built once instead of up to three times (`ClothRegisterLite`)

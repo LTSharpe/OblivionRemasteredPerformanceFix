@@ -223,6 +223,8 @@ struct Config {
     int pacingMaxLagFrames = 15;       // not in the shipped ini: work older than this many frames runs regardless
     bool pacingUseSlack = true;        // not in the shipped ini: under a frame-rate cap, use the cap's sleep as budget
     bool pacingFlowWait = true;        // not in the shipped ini: a level flow waits for the main queue instead of draining it
+    bool pacingLeanFlowDrain = true;   // PacingLeanFlowDrain: a level flow at its wait bound drains the owed main queue only;
+                                       // the waiting delegates stay queued (live)
     int pacingFlowWaitFrames = 8;      // not in the shipped ini: ... up to this many frames while the queue progresses (3 = 0.17)
     bool memoryRelief = true;          // MemoryRelief: when Windows runs short of memory, LumenKeepArrayCapacity and UploadMemoryKeep (and 4 for VRAM) give theirs back
     int memoryReliefRamMB = 1024;      // not in the shipped ini: UploadMemoryKeep gives back while available RAM is under this (3 s)
@@ -1020,6 +1022,7 @@ bool FindNpcPacing();                 // locate everything (no patching); false 
 bool InstallNpcPacing();              // vtable slot writes, safe at any time
 void SetNpcPacing(bool enabled, int budgetMs, int minDistance, int maxLagFrames, bool useSlack, bool flowWait = true,
                   int flowWaitFrames = 8);  // switchable live
+void SetNpcPacingLeanFlowDrain(bool on);  // PacingLeanFlowDrain (live)
 void LogNpcPacingStats();
 bool NpcPacingInfo(NpcPacingInfoOut* out);
 void NpcPacingTestSetup(const NpcPacingTestFakes& fakes);  // self-test only

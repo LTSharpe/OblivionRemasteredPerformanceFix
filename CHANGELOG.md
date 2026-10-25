@@ -9,6 +9,12 @@ Downloads, checksums and build attestations: https://github.com/LTSharpe/Oblivio
 Bug fixes say whose bug it was: **game bug** = also happens without OblivionPerfFix (in the game, its engine or a
 driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 
+## Unreleased
+- NpcCreationPacing: when a newly loaded area's set-up has waited its three frames for far-away characters, only their
+  creation runs first; their clothes, hair and body steps no longer all run in that frame but stay paced
+  (`PacingLeanFlowDrain`, on; 0 = as before). Imperial City flight, at the spot where this happens: the most character
+  work in one frame there 33-43 -> 21-30 ms; over the whole flight no measurable change.
+
 ## 1.2.2-beta
 For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Thanks to mkusm for pull requests #20 and #21,
 to luisAzcuaga for pull request #11, to hexaae for the frame-rate report and ScorpioKing for a similar one, and to
