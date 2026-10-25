@@ -278,6 +278,15 @@ render/parallel_translate.cpp:kRdgPattern:008befe82f	1	render/parallel_translate
 render/parallel_translate.cpp:kGetTotalSizePattern:7a94e42f18	9+	render/parallel_translate.cpp:177
 render/parallel_translate.cpp:kOpenPattern:f5f4bdb1c5	2	render/parallel_translate.cpp:178
 render/parallel_translate.cpp:kRollOverPattern:1925eb68e6	2	render/parallel_translate.cpp:179
+render/rt_build_batch.cpp:kInitRhi:94655abff0	1	render/rt_build_batch.cpp:59
+render/rt_build_batch.cpp:kCreateHead:20dec5ca9b	1	render/rt_build_batch.cpp:62
+render/rt_build_batch.cpp:kCreateRequest:6b1ca4210e	1	render/rt_build_batch.cpp:64
+render/rt_build_batch.cpp:kRequest:8eda822b6c	1	render/rt_build_batch.cpp:68
+render/rt_build_batch.cpp:kRequestNowCode:847cabfb01	1	render/rt_build_batch.cpp:70
+render/rt_build_batch.cpp:kWorldUpdate:c0e03a2d88	1	render/rt_build_batch.cpp:72
+render/rt_build_batch.cpp:kProcess:9e8fd73ce2	1	render/rt_build_batch.cpp:76
+render/rt_build_batch.cpp:kRender:44cd70959b	1	render/rt_build_batch.cpp:78
+render/rt_build_batch.cpp:kRenderCallCode:0f9fd4c99e	9+	render/rt_build_batch.cpp:81
 render/submit_batch.cpp:kSubmitListsPattern:661eb46a6d	1	render/submit_batch.cpp:44
 render/submit_batch.cpp:kMergeGatePattern:9b70cd1855	1	render/submit_batch.cpp:49
 render/submit_batch.cpp:kMergeLoopPattern:f98b737d3b	1	render/submit_batch.cpp:52

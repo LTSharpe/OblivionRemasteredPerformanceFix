@@ -182,6 +182,7 @@ DWORD WINAPI MonitorThread(LPVOID)
         if (g_rigSetup) SetRigSetup(cfg.rigVmHashMemo, cfg.rigLogicMapCache);  // RigVmHashMemo / RigLogicMapCache: live once installed
         if (g_npcBodies) SetNpcBodiesOneLock(cfg.npcBodiesOneLock);  // NpcBodiesOneLock: live once installed
         SetRtSceneKeep(cfg.rtSceneBufferKeep);  // RtSceneBufferKeep: live once installed (no-op otherwise)
+        SetRayTracingBuildBatch(cfg.rayTracingBuildBatch);  // RayTracingBuildBatch: live once installed (no-op otherwise)
         SetOsPageCache(cfg.osPageCache, cfg.osPageCacheMB, cfg.osPageCacheTrimSeconds, relief.osCache);  // OsPageCache: no-op unless installed
         SetPsoPrecompileFast(cfg.psoPrecompileFast);  // PsoPrecompileFast: no-op unless installed at start-up
         SetPsoPrecompileFastInGameMenus(cfg.psoPrecompileFastInGameMenus);
@@ -221,6 +222,7 @@ DWORD WINAPI MonitorThread(LPVOID)
             if (g_rigSetup) LogRigSetupStats();
             if (g_npcBodies) LogNpcBodiesOneLockStats();
             LogRtSceneKeepStats();
+            LogRayTracingBuildBatchStats();
             LogWaterCaptureStats();
             if (g_navLinkHooked) LogNavLinkFastStats();
             LogEditorIdLookupGuardStats();
@@ -615,6 +617,11 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
             SetPhysicsDestroyBatch(cfg.physicsDestroyBatch, cfg.physicsDestroyBatchMin);
         }
     } else Log("[destroybatch] off in OblivionPerfFix.ini (takes a restart to switch on)");
+    // RayTracingBuildBatch: CreateRayTracingGeometry's build request and Render's vtable slot, only if on at start-up
+    // (version.dll route; the OBSE64 route logs why not); then live.
+    if (cfg.rayTracingBuildBatch) {
+        if (InstallRayTracingBuildBatch(beforeGameCode)) SetRayTracingBuildBatch(true);
+    } else Log("[rtbatch] RayTracingBuildBatch off in OblivionPerfFix.ini (takes a restart to switch on)");
 
     {
         // Start-up cost: the whole Init and its pattern searches (OBSE route: the game's main thread waits for it).

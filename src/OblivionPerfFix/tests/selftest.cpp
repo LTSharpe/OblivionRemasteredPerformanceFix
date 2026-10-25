@@ -540,6 +540,7 @@ static uint64_t HashWords(uint64_t seed, const void* data, size_t bytes)
 #include "selftest_rigsetup.h"      // RigVmHashMemo / RigLogicMapCache: sites, memo and map replay with fakes
 #include "selftest_npcbodies.h"     // NpcBodiesOneLock: sites and the one-hold wrapper with a fake scene lock
 #include "selftest_rtscene.h"       // RtSceneBufferKeep: sites, patch and the stub's decisions
+#include "selftest_rtbatch.h"       // RayTracingBuildBatch: sites, patch and the queue decision
 #include "selftest_nanite.h"        // NaniteInitialRootPages (lab: NaniteStreamProbe / Nanite*MinMB with a fake resize)
 #include "selftest_waterinfo.h"     // the water-info capture keys (lab: and WaterInfoProbe): sites and patches
 #include "selftest_fpscap.h"        // FrameRateLimitAtStart: sites, install and the hook's decisions with fakes
@@ -4257,6 +4258,7 @@ int wmain(int argc, wchar_t** argv)
             DeleteCriticalSection(Lock());
         }
     }
+    rtb::RtBatchSelfTest(game);     // RayTracingBuildBatch (last: it patches a call other searches might read)
     scantest::Report();
     printf("\n--- selftest.log ---\n");
     if (FILE* f = _wfsopen(L"selftest.log", L"r", _SH_DENYNO)) {
