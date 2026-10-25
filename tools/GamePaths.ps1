@@ -116,6 +116,22 @@ function Get-OblivionSavedDir {
         Others = @($candidates | Where-Object { $_.Path -ne $pick.Path -and (Test-Path -LiteralPath $_.Path) } | ForEach-Object { $_.Path }) }
 }
 
+function Get-PresentMonAccess {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    $isMember = @($identity.Groups | ForEach-Object { $_.Value }) -contains 'S-1-5-32-559'
+    $isElevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    $member = $identity.Name.Replace("'", "''")
+    [pscustomobject]@{
+        Allowed = ($isMember -or $isElevated)
+        IsMember = $isMember
+        IsElevated = $isElevated
+        Message = if ($isMember -or $isElevated) { $null } else {
+            "PresentMon is installed, but this session cannot start its ETW trace: it needs an elevated token or membership in Performance Log Users.`nIn an elevated PowerShell opened as $($identity.Name), run:`n  Add-LocalGroupMember -Group 'Performance Log Users' -Member '$member'`nThen sign out and back in before running the benchmark again. You can also run the benchmark from an elevated PowerShell session."
+        }
+    }
+}
+
 # Run directly (not dot-sourced): print what was found.
 if ($MyInvocation.InvocationName -ne '.') {
     $g = Get-OblivionGame

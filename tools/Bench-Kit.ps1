@@ -64,6 +64,10 @@ $title = switch ($Mode) { 'Benchmark' { 'Imperial City flight: the game without 
 # on screen, in front, with sound (default) or hidden and muted (-Hidden); the runner's -Watch = -Visible -Audible -Profile own
 $show = if ($Hidden) { '-Profile own' } else { '-Watch' }
 Say "OblivionPerfFix benchmark kit$(if ($kitVersion) { " $kitVersion" }): $title"
+if (-not $VerdictFrom -and (Test-Path -LiteralPath (Join-Path $root 'third_party\PresentMon-2.6.0-x64.exe'))) {
+    $access = Get-PresentMonAccess
+    if (-not $access.Allowed) { Stop-Kit $access.Message }
+}
 # What is about to happen, in plain words (the README's "Check it on your PC" has the same numbered steps)
 if ($Mode -eq 'Benchmark' -and -not $VerdictFrom) {
     $n = 2 * $Rounds
@@ -108,6 +112,8 @@ Head "$(if ($Mode -eq 'Benchmark') { '1. ' })Benchmark tools (PresentMon, UE4SS:
 $setup = & (Join-Path $tools 'Setup-Bench.ps1') 2>&1 | ForEach-Object { "$_" }
 $setup | Where-Object { $_.Trim() -and $_ -notlike 'SETUP-RESULT ok*' } | ForEach-Object { Say "  $_" }
 if (-not ($setup | Where-Object { $_ -like 'SETUP-RESULT ok*' })) { Stop-Kit 'The benchmark tools are not ready (see "Needs attention" above).' }
+$access = Get-PresentMonAccess
+if (-not $access.Allowed) { Stop-Kit $access.Message }
 
 # ---------------------------------------------------------------- 2. the fix
 function Get-FixVersion([string]$dll) {

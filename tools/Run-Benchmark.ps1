@@ -103,6 +103,10 @@ $guardDir = Join-Path $script:BenchRun 'save-guard'
 $fixIniPath = Join-Path $script:GameWin64 'OblivionPerfFix.ini'
 $idlePidFile = Join-Path $script:BenchRun 'bench-idle.pid'
 if (-not ($List -or $Close -or $Park -or $Stop) -and -not (Test-Path $presentMon)) { throw "PresentMon not found at $presentMon (run tools\Setup-Bench.ps1 first)" }
+if (-not ($List -or $Close -or $Park -or $Stop)) {
+    $access = Get-PresentMonAccess
+    if (-not $access.Allowed) { throw $access.Message }
+}
 
 # Plain strings from a file another process holds open for writing (Get-Content would also do, but its
 # strings carry provider properties that ConvertTo-Json serialises)
