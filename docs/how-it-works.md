@@ -947,6 +947,24 @@ leaves the same physics state.
 
 ---
 
+<a id="clothbuilddefer"></a>
+
+### A far-away robe's cloth built a few frames later (`ClothBuildDefer`)
+
+[Evidence](research.md#clothbuilddefer).
+
+**The problem.** A robed character created in the distance (`NpcCreationPacing` spreads such characters over frames) still built its robe's cloth simulation in the middle of its creation step, often more than once: the robe's own set-up asks for it again a few milliseconds later, and again after the cloth has run a frame or two. Each build is a few milliseconds on the main thread, and where several robed characters appear at once (a shrine's worshippers, a chapel) those steps were the frames that went over the budget.
+
+*Analogy:* tailoring each customer's robe while they are still a mile away and walking towards you, three times over, instead of once when they are about to arrive.
+
+**What we did.** When a far-away character that nobody can see asks for its robe's first cloth build (the robe has no simulation yet), the build waits. Further requests while it waits become part of the same build. It is made a few frames later, with the game's own function and the robe as it is at that moment, as a piece of the frame's pacing budget, like the character's other creation steps. It is made at once when the character comes near or into view, when the character's own logic asks whether its cloth is simulating, on a loading screen or in a menu, when the switch goes off, and after at most 60 frames. A robe whose character is removed while its build waits is never built.
+
+**Why the picture is the same.** Only the moment of the build moves, and only while the character is far away and unseen: the same robe is built from the same state by the game's own code. Until then the robe behaves as one that was just put on: no cloth movement yet, drawn as the plain skinned mesh, which nobody sees at that distance. When the character comes into view the cloth is built first. Screenshots of the shrine's robed worshippers after they come near match within the run-to-run variation (the grass in the wind and the characters' poses vary between any two runs). A timing change of the same kind as `NpcCreationPacing`'s, with the same bounds: a few frames, off-screen, an off switch. Installed when the game starts (not on the OBSE64 route), then live; it needs `NpcCreationPacing`.
+
+**Measured (2026-10-28, 1.2.3, Peryite's Shrine flight, 4K, FSR Performance, RTX 4090; a fresh game per run, the switch off and on in turn, five rounds):** where the robed worshippers appear, the slowest frame 41.0 / 44.9 / 46.5 / 44.9 / 43.0 -> 35.3 / 35.4 / 35.4 / 33.8 / 40.9 ms, lower in every run with it than in every run without. Over the whole flight the 1% low did not clearly change.
+
+---
+
 <a id="rigvmhashmemo"></a>
 
 ### Animation rig set-up remembered (`RigVmHashMemo`, `RigLogicMapCache`)

@@ -1061,6 +1061,60 @@ more 149 -> 134 (within the run-to-run noise: one block showed the gain, the oth
   no numbers are quoted here. Self-test: every site, the install, and lite builds and completions against fakes (key
   switched off mid-call, 12 LODs, spoiled constraints, unregistration).
 
+<a id="clothbuilddefer"></a>
+
+### A far-away robe's cloth built a few frames later (`ClothBuildDefer`)
+
+[Explanation](how-it-works.md#clothbuilddefer).
+
+- **Found (2026-10-19/20, stack samples and a build log at Peryite's Shrine, `npcburst`):** most of a robed NPC's creation
+  unit is `UChaosClothComponent::RecreateClothSimulationProxy` (exe+0x53CD090) building a whole `FClothSimulationProxy`,
+  a few ms per robe; per robe an `OnRegister` build, a script rebuild ~5 ms later and another 40-90 ms later after the
+  proxy ran 1-3 ticks, each inside the NPC's creation unit (15 builds, 78.5 ms on the 27 s flight). Every rebuild starts
+  from nothing, so only the last build's result survives.
+- **The change:** `RecreateClothSimulationProxy`'s entry is detoured. A request on the game thread inside a
+  `NpcCreationPacing` unit whose actor may wait (far, not rendered recently, a frame that defers; the unit's owner is
+  passed from `TimeUnit`), for a registered component with no proxy yet, is held. A robe is built in an equipment unit,
+  whose owner is the character's `VCharacterBodyPairingComponent`: its word at the actor's root-component offset holds
+  data, not a pointer, so pacing's owner walk faults there and runs the unit as near. This question walks on past such
+  an object to the character (`ActorLocationGuarded`; pacing's own walk is unchanged): without it 1 robe build was held
+  per `npcburst` run, with it 9. Later requests from such units merge into it; a request from anywhere else builds at
+  once (dropping the held one). Held builds run at pacing's frame start with the game's function and the component's
+  state then: when quiet for `ClothDeferQuietFrames` frames (6) or 30
+  frames after the first request, inside the frame's pacing budget (which grows with the wait as pacing's does), and
+  counted as a unit; at once when the actor is near or rendered, the frame does not defer, or 60 frames after the first
+  request. `execIsSimulationSuspended`'s call and `execIsSimulationEnabled` (both answer from the proxy) build a held
+  build first, so Blueprint logic sees the stock answer. `OnUnregister`'s vtable slot (exe+0x803EF20; in front of
+  ClothRegisterLite's hook there, found through `ClothRegisterUnregisterSlot`) drops a held build. A held build runs only
+  if the component is still the same registered object (vtable, object index) with no proxy.
+- **Why the result is the same:** the same component state is built by the game's own function, a few frames later and
+  only off-screen. Until then the component is as stock right after registration: `TickComponent` skips the proxy tick
+  (null check), `CalcBounds` gives the registration's empty bounds, the render data falls back to plain skinning,
+  `OnUnregister` resets nothing. With ClothRegisterLite a held build leaves no proxy, so its completion at the
+  `EquipBodyPart` call's end has nothing to complete, and the later build is a full one.
+- **Checked before writing:** `RecreateClothSimulationProxy`'s prologue and its proxy field, `OnUnregister`'s single
+  vtable slot (or ClothRegisterLite's hook in it), both Blueprint readers' code; anything else: not installed, one log
+  line (the self-test changes one byte of the entry and checks that nothing is written). Installed at start-up on the
+  version.dll route, after ClothRegisterLite; on the OBSE64 route it stays off with one log line. Then live.
+- **Image check** (`npcburst-visual`: the shrine flight, then two frozen views of the five worshippers, near and from
+  above; off, on, on, off, fresh games, `-Profile promo -Pass all`, this build on 1.2.3; every on run held the same 9
+  builds): near view "same" (SSIM 0.961, MAD 2.16, 4.0 % changed; the two off runs 0.971 / 1.74 / 2.2 %, the two on runs
+  0.964 / 1.98 / 2.7 %). The view from above is flagged against the off/off floor (MAD 6.11, 28.3 % changed against 4.16
+  / 18.1 % off/off), but the two on runs differ as much from each other (5.97 / 28.2 %, and 5.95 / 27.0 % between the
+  1.2.2 off runs); the difference map is the foreground grass in the wind. Every robe present, draped and of normal
+  length; the worshippers stand and pose differently, as between any two runs.
+- **Results** (1.2.3-beta with this switch, stock Engine.ini, the runner's pinned runs, profile `promo`, RTX 4090):
+  `npcburst`, a fresh game per run, off / on, five rounds (the first side alternating; `tools\Run-Benchmark.ps1 -Scenario
+  npcburst -Profile promo -Pass perf -FixIni @{ ClothBuildDefer = 0 }`, then `= 1`; no run had a game restart). Every
+  on run held the same 9 builds: 4 in the new game's first minute (2 of them dropped at unregister) and 5 on the flight,
+  with 15 later requests merged into them, all built when quiet (30-39 ms of builds, at most 6.5-10.7 ms in one frame).
+  Where the worshippers appear (+27.6-29.0 s of the flight): the slowest frame 41.0 / 44.9 / 46.5 / 44.9 / 43.0 -> 35.3
+  / 35.4 / 35.4 / 33.8 / 40.9 ms (every on run below every off run), the time over 16.7 ms there 172 -> 147 ms (mean).
+  Over the flight: 1% low 44.3 / 46.4 / 41.2 / 45.6 / 48.3 -> 46.2 / 46.0 / 44.7 / 46.2 / 47.3 fps, no clear change;
+  hitches 6 -> 2 in all (one on run's worst frame, 58.6 ms, is 3 s after that spot with no pacing work over 16 ms
+  logged there). On 1.2.2 with #25 the same spot gave 40.0 / 41.5 / 41.8 / 40.6 / 37.0 -> 32.7 / 38.2 / 31.0 / 34.8 /
+  33.8 ms.
+
 <a id="rigvmhashmemo"></a>
 
 ### Animation rig set-up remembered (`RigVmHashMemo`, `RigLogicMapCache`)

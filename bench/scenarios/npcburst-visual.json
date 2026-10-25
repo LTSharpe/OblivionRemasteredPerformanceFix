@@ -1,0 +1,144 @@
+{
+  "name": "npcburst-visual",
+  "description": "Image check for ClothBuildDefer (2026-10-20): the npcburst-short flight (Peryite's Shrine's five robed worshippers are created ~16k UE units away, unseen: their first cloth builds wait), then two frozen views of the worshippers at the shrine (UE ~225450, 27610; old engine ~157815, -19327), near and from above. Compare defer off vs on with a noise floor from two off runs: the robes' cloth also differs run to run.",
+  "settings": {},
+  "record": [
+    "r.ScreenPercentage",
+    "Altar.UpscalingMethod",
+    "r.FidelityFX.FI.Enabled",
+    "t.MaxFPS",
+    "sg.ShadowQuality",
+    "r.Lumen.HardwareRayTracing",
+    "r.Lumen.HardwareRayTracing.LightingMode",
+    "r.Streaming.PoolSize"
+  ],
+  "masks": [
+    [
+      0.94,
+      0.0,
+      0.06,
+      0.035
+    ]
+  ],
+  "defaults": {
+    "hour": 12,
+    "weather": "Clear",
+    "settle": 8,
+    "measure": 20,
+    "hold": 12
+  },
+  "weathers": {
+    "Clear": "00038EEE"
+  },
+  "places": {
+    "shrine-near": {
+      "world": "Tamriel",
+      "pos": [
+        157315.0,
+        -19827.0,
+        1300.0
+      ],
+      "heading": 45.0,
+      "pitch": -10.0
+    },
+    "shrine-above": {
+      "world": "Tamriel",
+      "pos": [
+        157015.0,
+        -20127.0,
+        1700.0
+      ],
+      "heading": 45.0,
+      "pitch": -28.0
+    }
+  },
+  "scenes": [
+    {
+      "id": "peryite-short",
+      "type": "fly",
+      "world": "Tamriel",
+      "hour": 12,
+      "weather": "Clear",
+      "speed": 340,
+      "pitch": -3,
+      "flyopt": "ease=1.5 easeout=1.5",
+      "comment": "peryite-flight's waypoints from y = -33000 to -23692 (height interpolated at the first point). Control crossing at y ~ -30.7k, burst at y ~ -26.6k.",
+      "tags": [
+        "traversal",
+        "outdoor",
+        "npcburst"
+      ],
+      "path": [
+        [
+          148800,
+          -33000,
+          2277
+        ],
+        [
+          148800,
+          -32308,
+          2284
+        ],
+        [
+          148800,
+          -31077,
+          2268
+        ],
+        [
+          148800,
+          -29846,
+          2297
+        ],
+        [
+          148800,
+          -28615,
+          2404
+        ],
+        [
+          148800,
+          -27385,
+          2436
+        ],
+        [
+          148800,
+          -26154,
+          2228
+        ],
+        [
+          148800,
+          -24923,
+          2001
+        ],
+        [
+          148800,
+          -23692,
+          1820
+        ]
+      ]
+    },
+    {
+      "id": "shrine-near",
+      "type": "static",
+      "at": "shrine-near",
+      "hour": 12,
+      "weather": "Clear",
+      "visual": true,
+      "measure": 5,
+      "tags": [
+        "npcburst"
+      ]
+    },
+    {
+      "id": "shrine-above",
+      "type": "static",
+      "at": "shrine-above",
+      "hour": 12,
+      "weather": "Clear",
+      "visual": true,
+      "measure": 5,
+      "tags": [
+        "npcburst"
+      ]
+    }
+  ]
+}
