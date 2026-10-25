@@ -3966,6 +3966,7 @@ int wmain(int argc, wchar_t** argv)
         const auto createFactory =
             dxgi ? reinterpret_cast<HRESULT(WINAPI*)(REFIID, void**)>(GetProcAddress(dxgi, "CreateDXGIFactory1")) : nullptr;
         static const GUID kDredClsid = {0x4a75bbc4, 0x9ff4, 0x4ad8, {0x9f, 0x18, 0xab, 0xae, 0x84, 0xdc, 0x5f, 0xf2}};
+#ifdef __ID3D12DeviceRemovedExtendedDataSettings2_INTERFACE_DEFINED__
         ID3D12DeviceRemovedExtendedDataSettings2* dred = nullptr;
         if (getInterface && SUCCEEDED(getInterface(kDredClsid, IID_PPV_ARGS(&dred))) && dred) {
             dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
@@ -3974,6 +3975,12 @@ int wmain(int argc, wchar_t** argv)
             dred->UseMarkersOnlyAutoBreadcrumbs(TRUE);
             dred->Release();
         }
+#else
+        // Windows SDKs before 10.0.26100 don't declare DRED settings 2 (markers-only breadcrumbs).
+        printf("SKIP  crash report: Windows SDK without ID3D12DeviceRemovedExtendedDataSettings2, DRED set-up not tested\n");
+        (void)getInterface;
+        (void)kDredClsid;
+#endif
         IDXGIFactory4* factory = nullptr;
         IDXGIAdapter* warp = nullptr;
         ID3D12Device* device = nullptr;

@@ -9,6 +9,11 @@ Downloads, checksums and build attestations: https://github.com/LTSharpe/Oblivio
 Bug fixes say whose bug it was: **game bug** = also happens without OblivionPerfFix (in the game, its engine or a
 driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 
+## Unreleased
+- Self-test: builds with Windows SDKs before 10.0.26100 (10.0.22621 and older), which do not declare
+  `ID3D12DeviceRemovedExtendedDataSettings2`; the crash-report check's DRED set-up is then skipped with a `SKIP` line
+  and the rest of that check runs as before. No change to the fix itself.
+
 ## 1.2.1-beta
 For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Thanks to luisAzcuaga for pull requests #6-#8,
 and to everyone who reported results and problems.
