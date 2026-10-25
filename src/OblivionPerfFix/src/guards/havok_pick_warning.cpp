@@ -21,6 +21,7 @@
 #include <atomic>
 #include <cstring>
 #include <intrin.h>
+#include <windows.h>
 
 namespace opf {
 namespace {
@@ -70,7 +71,8 @@ std::atomic<bool> g_enabled{true};
 std::atomic<uint64_t> g_heldBack{0}, g_forwarded{0};
 uint64_t g_heldBackLogged = 0;
 int g_textLogs = 0;
-char g_lastText[kTextKeep];
+char g_lastText[kTextKeep];           // written by the OblivionThread (Keep), read by the monitor thread for the stats line:
+                                      // an unsynchronised read can at worst print a mix of two texts; nothing acts on it
 
 void Keep(const char* text)
 {
@@ -78,22 +80,59 @@ void Keep(const char* text)
     strncpy_s(g_lastText, text, _TRUNCATE);
 }
 
+// Same signature as the game's handler; the argument order follows the call site: rcx = the caption ("WARNING"),
+// rdx = the text, r8 = a third value the handler ignores.
 uint64_t Hook(const char* caption, const char* text, uint64_t a3)
 {
     const void* ret = g_testReturn ? g_testReturn : _ReturnAddress();
     if (ret == g_return && g_enabled.load(std::memory_order_relaxed)) {
-        const uint64_t n = g_heldBack.fetch_add(1, std::memory_order_relaxed) + 1;
+        g_heldBack.fetch_add(1, std::memory_order_relaxed);
         Keep(text);
         if (g_textLogs < 3) {
             ++g_textLogs;
             Log("[picks] the old engine's warning box held back (the game would have stopped until it was closed): \"%s\" "
                 "(iMaxPicks %u: the game's pick cap still applies)", g_lastText, g_max ? *g_max : 0u);
         }
-        (void)n;
         return 0;  // what the game's handler returns
     }
     g_forwarded.fetch_add(1, std::memory_order_relaxed);
     return g_original(caption, text, a3);
+}
+
+// True if `slot` is the exe's import-table entry for user32's MessageBoxA: the import directory names it (that holds for a
+// mapped copy too, where the imports are not resolved), and, once the loader has filled the slot in, the value is the
+// function user32 exports.
+bool ImportIsMessageBoxA(const GameModule& game, const uint8_t* slot)
+{
+    if (slot < game.base || slot + sizeof(void*) > game.base + game.sizeOfImage) return false;
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(game.base);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(game.base + dos->e_lfanew);
+    const IMAGE_DATA_DIRECTORY& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!dir.VirtualAddress || dir.VirtualAddress + dir.Size > game.sizeOfImage) return false;
+    bool named = false;
+    for (const auto* desc = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(game.base + dir.VirtualAddress);
+         desc->Name && !named; ++desc) {
+        if (desc->Name >= game.sizeOfImage || _stricmp(reinterpret_cast<const char*>(game.base + desc->Name), "USER32.dll") != 0) continue;
+        const DWORD namesRva = desc->OriginalFirstThunk ? desc->OriginalFirstThunk : desc->FirstThunk;
+        if (namesRva >= game.sizeOfImage || desc->FirstThunk >= game.sizeOfImage) continue;
+        const auto* names = reinterpret_cast<const IMAGE_THUNK_DATA64*>(game.base + namesRva);
+        const auto* entries = reinterpret_cast<const IMAGE_THUNK_DATA64*>(game.base + desc->FirstThunk);
+        for (size_t i = 0; names[i].u1.AddressOfData; ++i) {
+            if (IMAGE_SNAP_BY_ORDINAL64(names[i].u1.Ordinal) || names[i].u1.AddressOfData >= game.sizeOfImage) continue;
+            const auto* byName = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(game.base + names[i].u1.AddressOfData);
+            if (strcmp(byName->Name, "MessageBoxA") == 0) {
+                named = reinterpret_cast<const uint8_t*>(entries + i) == slot;
+                break;
+            }
+        }
+    }
+    if (!named) return false;
+    // The slot's value: unresolved (still an offset into the image: a mapped copy) or the function user32 exports.
+    const auto value = *reinterpret_cast<const uint8_t* const*>(slot);
+    if (value >= game.base && value < game.base + game.sizeOfImage) return true;
+    const HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (!user32) return true;  // not loaded yet: the loader has not filled the slot in either
+    return value == reinterpret_cast<const uint8_t*>(GetProcAddress(user32, "MessageBoxA"));
 }
 
 bool StartsWith(const GameModule& game, const uint8_t* s, const char* prefix)
@@ -143,8 +182,8 @@ bool ApplyHavokPickWarningGuard()
         return false;
     }
     const uint8_t* import = RipTarget(handler + kHandlerImport, 2, 6);
-    if (import < game.base || import >= game.base + game.sizeOfImage) {
-        Log("[picks] the warning handler's import slot is outside the game: guard not installed");
+    if (!ImportIsMessageBoxA(game, import)) {
+        Log("[picks] the warning handler's import is not user32's MessageBoxA: guard not installed");
         return false;
     }
     g_original = reinterpret_cast<HandlerFn>(current);

@@ -2120,6 +2120,19 @@ int wmain(int argc, wchar_t** argv)
 
     // HavokPickWarningGuard: the old engine's "Havok picks" warning box (a modal MessageBoxA on the OblivionThread) held back.
     {
+        // A changed handler first (the pointer at exe+0x8FB7CC8 aimed at another function): the guard refuses and leaves the
+        // pointer alone. (The "pattern not found" path needs a different exe: the self-test on another build shows it.)
+        {
+            auto** slot = reinterpret_cast<void**>(game.base + 0x8FB7CC8);
+            void* const saved = *slot;
+            void* const elsewhere = game.base + 0x699E850;  // another caller of the handler, not the handler
+            *slot = elsewhere;
+            Check(!ApplyHavokPickWarningGuard(), "a changed handler: guard not installed");
+            Check(*slot == elsewhere, "a changed handler: the pointer is left alone");
+            HavokPickGuardInfo none{};
+            Check(!HavokPickWarningGuardInfo(&none), "a changed handler: no guard to report");
+            *slot = saved;
+        }
         Check(ApplyHavokPickWarningGuard(), "pick warning guard installed");
         HavokPickGuardInfo pg{};
         Check(HavokPickWarningGuardInfo(&pg), "pick warning guard info");
