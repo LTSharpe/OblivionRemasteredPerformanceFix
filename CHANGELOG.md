@@ -9,7 +9,6 @@ Downloads, checksums and build attestations: https://github.com/LTSharpe/Oblivio
 Bug fixes say whose bug it was: **game bug** = also happens without OblivionPerfFix (in the game, its engine or a
 driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 
-## Unreleased
 - Self-test: builds with Windows SDKs before 10.0.26100 (10.0.22621 and older), which do not declare
   `ID3D12DeviceRemovedExtendedDataSettings2`; the crash-report check's DRED set-up is then skipped with a `SKIP` line
   and the rest of that check runs as before. No change to the fix itself.
@@ -21,6 +20,13 @@ driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
   Imperial City flight: 32-67 -> 19-24 ms (4K, DLSS Performance, RTX 4090). Installed at start-up with the
   version.dll route. During loading screens the builds are made in parts of at most 64 MiB of build memory. New key
   `RayTracingBuildBatch` (1; 0 = off).
+- **Game bug fixed: the game stopping in big fights behind a "Havok picks" box** (`HavokPickWarningGuard`; happens
+  without OblivionPerfFix too): in fights with many characters the game's old engine can pop up a leftover debug
+  message, "42 Havok picks (6 path, 36 LOS, 0 ViewCaster) used this frame.", on its own thread. The whole game then
+  stands still, often behind its own window, until someone finds and closes the box (our battle benchmark lost 2 of
+  10 runs to it). The box only reports that the engine skipped some sight and path checks that frame, which it does
+  with or without the box, so the message now goes to the log instead and the game keeps running. Nothing else
+  changes: the engine's limit on those checks (`iMaxPicks` in Oblivion.ini) is left alone.
 
 ## 1.2.1-beta
 For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Thanks to luisAzcuaga for pull requests #6-#8,

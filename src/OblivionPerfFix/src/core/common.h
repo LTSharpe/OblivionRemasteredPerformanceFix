@@ -82,6 +82,7 @@ struct Config {
     bool prepareCollisionBehindLoadingScreen = true;   // PrepareCollisionBehindLoadingScreen: hand a transition's new area to physics while still frozen (A-B clean, 2026-10-05)
     bool editorIdLookupGuard = true;   // NameLookupCrashGuard: name lookups skip freed name-table entries instead of crashing (game bug)
     bool trapCrashGuard = true;        // TrapCrashGuard: traps drop actors that no longer exist instead of crashing (game bug)
+    bool havokPickWarningGuard = true; // HavokPickWarningGuard: the old engine's "Havok picks" warning box no longer stops the game (game bug)
     bool frameGenCrashGuard = true;    // FrameGenCrashGuard: FSR 3 frame generation waits for a free command list instead of crashing (AMD library)
     int objectReplaceGuard = 1;        // ObjectReplaceCrashGuard: an in-place object re-creation whose destroy kept its slot releases it instead of
                                        // the UObjectArray.cpp:234 fatal (game bug; start-up install, then live): 0 off, 1 on (lab: 2 log only)
@@ -603,6 +604,22 @@ struct TrapGuardInfo {
 bool ApplyTrapTargetGuard();                       // safe at any time (one vtable slot)
 void SetTrapTargetGuardEnabled(bool enabled);      // switchable live; off = the game's update unguarded
 void LogTrapTargetGuardStats();
+// havok_pick_warning.cpp (HavokPickWarningGuard: the old engine's "Havok picks" warning box, a modal MessageBoxA on the OblivionThread
+// that stops the game, is held back; the pick cap iMaxPicks stays)
+struct HavokPickGuardInfo {
+    void** slot;                // the warning handler pointer in .data (now the guard)
+    void* original;             // the game's handler (MessageBoxA)
+    void* hook;
+    const uint8_t* callReturn;  // the pick warning's return address: the one caller held back
+    const uint32_t* picks;      // the per-frame pick counter
+    const uint32_t* max;        // iMaxPicks
+    uint64_t heldBack, forwarded;
+};
+bool ApplyHavokPickWarningGuard();                    // safe at any time (one pointer)
+void SetHavokPickWarningGuardEnabled(bool enabled);   // switchable live; off = the box as in the stock game
+void LogHavokPickWarningGuardStats();
+bool HavokPickWarningGuardInfo(HavokPickGuardInfo* out);
+void HavokPickWarningGuardTestFunctions(void* fakeHandler, const void* returnAddress);  // self-test only
 bool TrapTargetGuardInfo(TrapGuardInfo* out);
 void TrapTargetGuardTestFunctions(void* fakeUpdate, void* fakeRemove);  // self-test only
 bool TrapTargetGuardTestIsActor(const void* object);                   // self-test only: the guard's liveness check

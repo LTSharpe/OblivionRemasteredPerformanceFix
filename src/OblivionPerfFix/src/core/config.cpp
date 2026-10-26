@@ -26,6 +26,7 @@ Config LoadConfig(const wchar_t* iniPath)
         get(L"Fixes", L"PrepareCollisionBehindLoadingScreen", c.prepareCollisionBehindLoadingScreen) != 0;
     c.editorIdLookupGuard = get(L"Fixes", L"NameLookupCrashGuard", c.editorIdLookupGuard) != 0;
     c.trapCrashGuard = get(L"Fixes", L"TrapCrashGuard", c.trapCrashGuard) != 0;
+    c.havokPickWarningGuard = get(L"Fixes", L"HavokPickWarningGuard", c.havokPickWarningGuard) != 0;
     c.frameGenCrashGuard = get(L"Fixes", L"FrameGenCrashGuard", c.frameGenCrashGuard) != 0;
     c.objectReplaceGuard = get(L"Fixes", L"ObjectReplaceCrashGuard", c.objectReplaceGuard);
     c.taskWaitDeadlockGuard = get(L"Fixes", L"TaskWaitDeadlockGuard", c.taskWaitDeadlockGuard);
