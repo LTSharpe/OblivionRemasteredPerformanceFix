@@ -155,6 +155,9 @@ struct Config {
     int rtSceneBufferKeep = 1;         // RtSceneBufferKeep: streaming/rt_scene_keep.cpp, the ray tracing scene's TLAS buffer is not
                                        // re-created smaller (1), or installed but the game's way, creations timed (2); start-up
                                        // install when != 0, then live 1/2
+    bool rayTracingBuildBatch = true;  // RayTracingBuildBatch: render/rt_build_batch.cpp, new meshes' ray-tracing builds as one
+                                       // batch at the start of the frame's render instead of one at a time (same builds, same
+                                       // frame; start-up install on the version.dll route, then live)
     bool waterCaptureFsrSkip = true;   // WaterCaptureFsrSkip: render/water_info.cpp, no FSR3 pre-alpha copy in water-info renderers
     bool waterCaptureNoRhiFlush = true;  // WaterCaptureNoRhiFlush: water-info renderers skip the RHI-thread flush
     bool waterCaptureNoOcclusionWait = true;  // WaterCaptureNoOcclusionWait: water-info renderers skip the occlusion-fence wait
@@ -272,6 +275,27 @@ bool WaterInfoTestPatched();
 const char* WaterInfoTestHooks();
 bool WaterInfoTestTrampoline();
 bool WaterInfoTestMismatch();
+// ---- render/rt_build_batch.cpp (RayTracingBuildBatch) ----
+// new meshes' ray-tracing builds (InitRHI's build requests on the render thread) queued in the engine's geometry manager
+// instead of built one at a time, then all built as one batch at the start of the next scene render (Render's vtable
+// slot wrapped). Same builds, same frame.
+bool InstallRayTracingBuildBatch(bool beforeGameCode);   // start-up only (version.dll route)
+void SetRayTracingBuildBatch(bool on);                   // live
+void LogRayTracingBuildBatchStats();
+bool RayTracingBuildBatchDecide(bool on, int32_t priority, int32_t mode, bool fromInitRhi, bool renderThread, bool inRender,
+                                int32_t budget, uint8_t fastBuild, uint8_t allowUpdate);   // true = queue (pure; self-test)
+struct RayTracingBuildBatchInfoOut {
+    uint8_t* callSite = nullptr;   // CreateRayTracingGeometry's call, now to the gate
+    uint8_t* region = nullptr;     // [0] jmp to the gate, [16] the request function's queue path
+    void** slot = nullptr;         // Render's vtable slot, now the wrapper
+    void* hook = nullptr;          // the wrapper
+    uint8_t* request = nullptr;    // the game's RequestBuildAccelerationStructure
+    void* render = nullptr;        // the game's Render
+    void* immediate = nullptr;     // the immediate command list (the early batches')
+};
+bool RayTracingBuildBatchInfo(RayTracingBuildBatchInfoOut* out);   // self-test
+bool RayTracingBuildBatchFlushFirst(uint64_t queuedScratch, int32_t queued, uint64_t scratch);  // the cap's decision (pure)
+bool RayTracingBuildBatchQueueForTest(const void* manager, int32_t* count, uint64_t* scratch);  // self-test: the queue reading
 
 
 // ---- view_rename_guard.cpp (ViewRenameGuard: closes UE-217692, view creation vs pool defragmentation) ----

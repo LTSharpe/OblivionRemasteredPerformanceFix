@@ -324,6 +324,62 @@ loading itself is unchanged (arrival 2.7-3.1 s after the door is used, both).
   `WaterCaptureFastMeshScan`: the constructor's own time was measured with a timer on maintainer slices of this flight
   (not in the public benchmark), so no number is quoted here; it is small next to the three others.
 
+<a id="raytracingbuildbatch"></a>
+
+### New objects' ray-tracing structures built together (`RayTracingBuildBatch`)
+
+[Explanation](how-it-works.md#raytracingbuildbatch).
+
+- **Found (2026-10-21, Imperial City flight, 4K, DLSS Performance, RTX 4090):** the climb above the Niben has one frame
+  (97.6 s into the flight) with 42-50 ms of GPU busy against ~14 ms around it, in every pass; no engine setting moved it
+  (ray tracing of skinned meshes and landscape, skin cache, water, scalability groups). A PIX capture of that frame,
+  replayed with timings: ~145 back-to-back acceleration-structure builds for newly loaded static meshes, each after its
+  buffer uploads and followed by a UAV barrier, 65-350 us each whatever the size (12 to 7.6k triangles), no overlap.
+  The flight's 41.2 s frame is the same pattern (a 35-build block).
+- **Where:** `FRayTracingGeometry::InitRHI` (exe+0x26823C0) -> `CreateRayTracingGeometry` (exe+0x266FBA0, priority
+  Normal) -> `RequestBuildAccelerationStructure` of the geometry manager (exe+0x26C47C0). With
+  `r.RayTracing.Geometry.MaxBuiltPrimitivesPerFrame` <= 0 (the game: -1) or priority Immediate it builds at once on the
+  immediate command list (its own scratch buffer, then a barrier); otherwise it queues the request, and
+  `ProcessBuildRequests` (exe+0x26C2760) builds the queue as one batch at the start of the scene's ray-tracing update
+  (exe+0x1D51E60, called by `FDeferredShadingSceneRenderer::Render`, exe+0x1D5BC90). A budget is not an option: with
+  50000 the game hit DEVICE_HUNG in 3 of 3 runs.
+- **The change:** `CreateRayTracingGeometry`'s call goes to a gate. While the switch is on, a Normal request from
+  InitRHI, on the render thread outside a scene render, with the budget <= 0, for a geometry that is neither fast-build
+  nor allow-update (the skin cache refits those before the batch would run), enters the request function past its
+  "build at once" test, on its queue path; everything else calls the game's function. `Render`'s vtable slot holds a
+  wrapper that, when requests are queued, first calls `ProcessBuildRequests` on the frame's command list. Checked
+  before writing: the call site's shape, the request function's prologue and its budget test, the ray-tracing update's
+  call to `ProcessBuildRequests`, `Render`'s single vtable slot in .rdata; anything else: not installed, one log line
+  (the self-test changes one byte of the request function and checks that). Installed at start-up on the version.dll
+  route; on the OBSE64 route (loaded after the game's code started) it stays off with one log line. Then live.
+- **Why identical:** the same geometries get the same builds (inputs, flags, build mode), in the same frame, before the
+  frame's ray-tracing gather; a geometry released while queued drops its request (the engine's `ReleaseRHI`). An
+  offline D3D12 test with the frame's meshes: 71 builds one at a time 16.0 ms, as one batch (one barrier) 0.8 ms.
+  Image check (`water-visual`: the climb flight, then two hovering views of the Niben; switch off twice and on twice,
+  WaterRebuildSpread on in all four): the same as the off-versus-off floor (niben-bridge SSIM 0.99; niben-above 0.79
+  against 0.78 between the two off runs, which differ by fine outlines along every edge of the frame).
+- **Memory, and a cap:** with no scene render (a loading screen) the queue held a whole load for one call: 2,445
+  builds and 1.23 GB of scratch at an Anvil dock exit, one 52-117 ms call on the render thread (measured by LTSharpe on
+  an RX 9070 XT, where the video memory peak stayed 11.5-11.6 GB and the stock game ran those builds' GPU work in one
+  frame as well, ~450 ms against ~55 ms batched). So a request that would take the queued builds' scratch past 64 MiB
+  first has the queue built: in the gate, before it is queued (the request index Create stores in the geometry at
+  +0x9C then stays the queued one), with the game's `ProcessBuildRequests` on the immediate command list that the
+  "build at once" path uses there. The queue is the manager's own request array (count +0x30, free count +0x5C,
+  entries +0x28 of 0x18 bytes with the geometry at +8, allocation bits +0x38 / +0x48, as the queue path writes them,
+  checked at install): a request the engine drops is not counted. A batch's scratch is one buffer (the engine splits a
+  batch only at 2 GB); stock makes one per build, each living until the GPU has finished. Not measured on an 8 GB card.
+- **Results** (1.2.1 base + this switch only, stock Engine.ini, the runner's pinned runs, profile `promo-dlss`: 4K,
+  DLSS Performance, ray tracing mode 3; RTX 4090): `showcase`, a fresh game per run, off / on, three rounds (the first
+  side alternating; `tools\Run-Benchmark.ps1 -Scenario showcase -Profile promo-dlss -Pass perf -FixIni @{
+  RayTracingBuildBatch = 0 }`, then `= 1`). GPU busy (PresentMon) of the 97.6 s frame 37.1 / 45.1 / 31.9 -> 18.8 /
+  20.0 / 21.0 ms, of the 41.2 s frame 52.1 / 67.3 / 62.6 -> 22.1 / 20.4 / 23.9 ms; frames >= 33 ms 158 -> 133 per
+  flight, hitches 47.7 -> 44.3, fps 54.5 -> 55.4, 1% low 25.9 -> 26.4. (In one on run PresentMon had no GPU data for
+  30 frames at 99.2-99.8 s and then booked 320 ms on one 28 ms frame: left out.) In one game on the 28 s
+  `showcase-climb` cut, three passes each (a build with this series' other switches on in both sides): the spike
+  frame's GPU busy 51.7 / 50.3 / 36.8 -> at most 19.3 ms. With
+  Lumen's hardware ray tracing off (profile `cpu-nort`) the game still builds these structures; the switch batches them
+  (1,841 builds in the first minute, 13 batches, longest call 5.4 ms) without errors.
+
 ## Travelling: memory and threads
 
 <a id="lumenkeeparraycapacity"></a>

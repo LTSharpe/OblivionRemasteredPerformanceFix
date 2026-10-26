@@ -213,6 +213,22 @@ switch on a stand-in value (on, off, a player's own value).
 
 **Measured (2026-10-22, the Imperial City showcase flight at the test PC's own play settings: 4K, FSR Performance, frame generation, 60 fps cap; one held game, keys switched live):** with `WaterCaptureFsrSkip` and `WaterCaptureNoRhiFlush` (four flights, alternating): the time over 16.7 ms of the frames that waited for the render thread 889 / 588 -> 411 / 368 ms per flight, frames of 33 ms or more 67 / 37 -> 37 / 28, all frames' time over 16.7 ms 3,731 / 2,958 -> 2,886 / 2,558 ms. `WaterCaptureNoOcclusionWait` on top (five flights): the render thread's time per water redraw 7.5 -> 5.1 ms (1.2 -> 0.8 s per flight), render-thread-bound time over 16.7 ms 318 -> 223 ms; the frame totals moved within the run-to-run noise. `WaterCaptureFastMeshScan` saves a little more render-thread time per redraw, too little to show in frame times.
 
+<a id="raytracingbuildbatch"></a>
+
+### New objects' ray-tracing structures built together (`RayTracingBuildBatch`)
+
+[Evidence](research.md#raytracingbuildbatch).
+
+**The problem.** With ray tracing on, every object needs a ray-tracing structure on the graphics card before ray tracing can see it. When an object's render data is set up (an area streams in, characters appear), the engine built that structure right away: it uploaded the object's buffers, recorded one build, and then made the graphics card finish that build before anything else could use it. A build takes about a quarter of a millisecond whatever the object's size, and none of them overlap: when 100-150 objects arrive in one frame (the climb above the Niben on the Imperial City flight), the graphics card spends 30-40 ms on builds one after another, and the frame waits for it.
+
+*Analogy:* a printer that prints every page as a job of its own, warming up and cooling down each time, instead of one job of 145 pages.
+
+**What we did.** The engine already has a way to build many structures at once: its geometry manager can queue build requests and build all queued ones together at the start of the frame's scene render. The game never uses it for these objects: it builds at once whenever no per-frame build budget is set, and setting one makes the graphics card hang in this game. The DLL sends just these requests (new objects' first builds, from the render thread between frames, for objects that are never updated in place) down the queue path, and the scene render builds the whole queue in one batch before it does anything else. Everything else (characters' refits, builds during a render, builds from other threads) is built at once, as before. During a loading screen, when no frame is drawn, the queue is built whenever it reaches 64 MiB of build memory, so it never holds a whole area's worth at once.
+
+**Why the image can't change.** The same structures are built from the same data with the same settings, in the same frame, before the frame's ray-traced scene is gathered: no part of the frame can see an object without its structure. Only their place in the graphics card's work moves, from one by one before the frame to one batch at its start. An object removed while its request waits takes the request with it (the engine's own clean-up). Frozen screenshots with the switch on and off match within the run-to-run variation. Installed when the game starts (not on the OBSE64 route), then live.
+
+**Measured (2026-10-25, the Imperial City flight, 4K, DLSS Performance, ray tracing on, RTX 4090; a fresh game per run, off and on in turn, three rounds):** the two frames that waited for the builds, graphics card busy: at 97.6 s 37.1 / 45.1 / 31.9 -> 18.8 / 20.0 / 21.0 ms, at 41.2 s 52.1 / 67.3 / 62.6 -> 22.1 / 20.4 / 23.9 ms. Frames of 33 ms or more on the flight 158 -> 133.
+
 ## Travelling: memory and threads
 
 <a id="lumenkeeparraycapacity"></a>

@@ -70,6 +70,7 @@ Config LoadConfig(const wchar_t* iniPath)
     c.rigVmHashMemo = get(L"Fixes", L"RigVmHashMemo", c.rigVmHashMemo);
     c.rigLogicMapCache = get(L"Fixes", L"RigLogicMapCache", c.rigLogicMapCache);
     c.rtSceneBufferKeep = get(L"Fixes", L"RtSceneBufferKeep", c.rtSceneBufferKeep);
+    c.rayTracingBuildBatch = get(L"Fixes", L"RayTracingBuildBatch", c.rayTracingBuildBatch) != 0;
     c.waterCaptureFsrSkip = get(L"Fixes", L"WaterCaptureFsrSkip", c.waterCaptureFsrSkip) != 0;
     c.waterCaptureNoRhiFlush = get(L"Fixes", L"WaterCaptureNoRhiFlush", c.waterCaptureNoRhiFlush) != 0;
     c.waterCaptureNoOcclusionWait = get(L"Fixes", L"WaterCaptureNoOcclusionWait", c.waterCaptureNoOcclusionWait) != 0;

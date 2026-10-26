@@ -13,6 +13,14 @@ driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 - Self-test: builds with Windows SDKs before 10.0.26100 (10.0.22621 and older), which do not declare
   `ID3D12DeviceRemovedExtendedDataSettings2`; the crash-report check's DRED set-up is then skipped with a `SKIP` line
   and the rest of that check runs as before. No change to the fix itself.
+- **New: fewer GPU spikes where many objects appear at once with ray tracing on** (`RayTracingBuildBatch`, on; an
+  improvement, not a bug fix): the game built each newly loaded object's ray-tracing structure on its own, one after
+  another, about a quarter of a millisecond each; where 100-150 arrive together (the climb above the Niben on the
+  Imperial City flight) that frame took 30-40 ms longer on the graphics card. They are now built together at the start
+  of that same frame, before anything uses them; the picture is the same. Those frames' graphics card time on the
+  Imperial City flight: 32-67 -> 19-24 ms (4K, DLSS Performance, RTX 4090). Installed at start-up with the
+  version.dll route. During loading screens the builds are made in parts of at most 64 MiB of build memory. New key
+  `RayTracingBuildBatch` (1; 0 = off).
 
 ## 1.2.1-beta
 For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Thanks to luisAzcuaga for pull requests #6-#8,
