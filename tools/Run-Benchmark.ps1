@@ -1794,7 +1794,9 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
             }
             $workers = ($use | Where-Object { $_.Name -match 'Worker' } | Measure-Object CpuMs -Sum).Sum
             $d3d = ($use | Where-Object { $_.Name -eq 'D3D Background Thread' } | Measure-Object CpuMs -Sum).Sum
-            $fgMs = ($use | Where-Object { $_.Name -match 'FSR (Presenter|Interpolation)' } | Measure-Object CpuMs -Sum).Sum
+            # FSR 3 in the game's own DLLs: "FSR Presenter/Interpolation"; the driver's FG through AMD's SDK 2.3.0 loader
+            # (FG 4.0.2): "AMD ML Presenter/Interpolation Thread" (2026-10-25 pmcheck: frameGen read False with FG on)
+            $fgMs = ($use | Where-Object { $_.Name -match '(FSR|AMD ML) (Presenter|Interpolation)' } | Measure-Object CpuMs -Sum).Sum
             $total = ($use | Measure-Object CpuMs -Sum).Sum
             $r = [ordered]@{
                 id = $seg.id; type = $seg.type; seconds = Rnd ($wall / 1000); t0Ms = Rnd $seg.t0 1; t1Ms = Rnd $seg.t1 1

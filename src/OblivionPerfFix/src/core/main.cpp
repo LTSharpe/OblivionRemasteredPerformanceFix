@@ -681,7 +681,7 @@ struct OBSEPluginVersionData {
 extern "C" {
 __declspec(dllexport) OBSEPluginVersionData OBSEPlugin_Version = {
     OBSEPluginVersionData::kVersion,
-    0x010201,  // plugin version 1.2.1
+    0x010202,  // plugin version 1.2.2
     "OblivionPerfFix",
     "OblivionPerfFix",
     // Addresses come from byte-pattern scans and we use no OBSE game structures,

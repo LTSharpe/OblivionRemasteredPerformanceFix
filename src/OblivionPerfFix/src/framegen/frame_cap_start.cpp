@@ -39,10 +39,30 @@
 // DllMain; the OBSE64 route runs our start-up from OBSE64's hook of the CRT's _get_narrow_winmain_command_line, after the
 // static initialisers and before WinMain, so before the engine and T's first call too: the same install (T's entry is
 // 8-byte aligned, so the jump goes in with the one atomic write; an unaligned entry leaves the fix off there).
+// Since 1.2.2 (worker framecap2, 2026-10-26; findings "2026-10-26 (worker framecap2)"): only on the path that was measured.
+// Players with NVIDIA DLSS frame generation reported a much lower frame rate with the key on (120 cap -> ~29 fps after a while
+// in the world; 90 -> 50-60). From the exe: the DLSS sinks are per-frame console-variable sinks like FSR's, and their only
+// condition is that the mode is a valid UStreamlineDLSSGMode value, so T(on) comes at start-up with DLSS frame generation too
+// and the stock game leaves the cap at 0 there as well. But T(on) also sets Altar.Reflex.Mode to 2 (On + Boost) when its
+// Reflex flag (exe+0x930A86C: hardware GPU scheduling on, an NVIDIA GPU, Reflex available; always 0 on AMD) is set, and with
+// Reflex on the engine's limit (t.MaxFPS) is no longer a sleep in the engine: Streamline's MaxTickRateHandler
+// (t.Streamline.Reflex.HandleMaxTickRate,
+// default 1, exe+0x44C2C00) hands it to Reflex as frameLimitUs, and only on frames that were faster than the cap. How that
+// limiter behaves together with DLSS frame generation is NVIDIA's code and was never measured here (AMD PC). So the fix now
+// acts only when the switch came from FSR's sink (T's return address is the call in exe+0x495F380) and T's Reflex flag is 0
+// after the switch (the cap is then the engine's own sleep, as measured), and only if the limit is still 0 at that moment.
+// Everything else (DLSS frame generation, any GPU with Reflex) is left to the game, with a log line.
+// Since 1.2.2 also (worker rel122fix, 2026-10-26, from review rel122review): only when the GPU is not NVIDIA's. The Reflex
+// flag means "T switches Reflex on" (hardware GPU scheduling on && NVIDIA && the feature), not "Reflex is off": an NVIDIA PC
+// with hardware GPU scheduling off and Reflex on from an old saved value or Engine.ini passes it. We cannot test NVIDIA, so on
+// NVIDIA the key now leaves everything to the game (the stock game). The vendor is read through the same check T makes for its
+// flag (its lazy initialisation block, exe+0x495FC0C, calls exe+0x265B230: cmp GRHIVendorId,0x10DE / sete al / ret).
+// On AMD and Intel nothing changes.
 // Lab builds: FrameRateLimitAtStart=2 only logs what it would do.
 #include "common.h"
 
 #include <cstring>
+#include <intrin.h>
 
 namespace opf {
 namespace {
@@ -66,6 +86,32 @@ constexpr uint8_t kFirstInsns[7] = {0x40, 0x55, 0x53, 0x57, 0x48, 0x8B, 0xEC};
 
 // The Frame Rate Limit sink, exe+0x49586F0: call getter / null and RF_BeginDestroyed|RF_FinishDestroyed checks / mov rcx,[int*]
 // / cmp with its cached value / GEngine flag / call SetFrameRateLimit / jmp [vtable+ApplyNonResolutionSettings].
+// T's Reflex flag (function static, set on its first state change: hardware GPU scheduling on (D3DKMT WDDM 2.7 caps),
+// GRHIVendorId 0x10DE, a MaxTickRateHandler / latency-marker feature available): two reads of it.
+//   +0x26E 40 38 35 <disp32>     cmp byte [flag], sil   (the "on" branch)
+//   +0x3C6 80 3D <disp32> 00     cmp byte [flag], 0     (the "off" branch)
+constexpr size_t kReflexCmpA = 0x26E, kReflexCmpB = 0x3C6;
+
+// T's lazy initialisation of the Reflex flag, exe+0x495FC0C (reached from T's TLS checks): lea rcx,[guard] / call
+// _Init_thread_header / cmp [guard],-1 / jnz back into T / call the HAGS check / call the vendor check / call the feature
+// check / al = all three / jmp (twice) to "lea rcx,[guard]; mov [flag],al; call _Init_thread_footer" in T.
+constexpr const char* kReflexInit =
+    "48 8D 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 83 3D ?? ?? ?? ?? FF 0F 85 ?? ?? ?? ?? E8 ?? ?? ?? ?? 84 C0 74 19 E8 ?? ?? ?? ?? 84 C0 74 10 "
+    "E8 ?? ?? ?? ?? 84 C0 74 07 B0 01 E9 ?? ?? ?? ?? 32 C0 E9";
+constexpr size_t kInitBack = 0x13, kInitVendorCall = 0x22, kInitStoreJmpA = 0x36, kInitStoreJmpB = 0x3D;
+// The vendor check, exe+0x265B230: cmp dword [GRHIVendorId], 0x10DE / sete al / ret.
+constexpr uint8_t kVendorFn[14] = {0x81, 0x3D, 0, 0, 0, 0, 0xDE, 0x10, 0x00, 0x00, 0x0F, 0x94, 0xC0, 0xC3};
+constexpr uint32_t kNvidia = 0x10DE;
+
+// FSR frame generation's sink, exe+0x495F380: Altar.FSR3.Enabled && Altar.FSR3.FI.Enabled / cached state / r.FidelityFX.FI
+// set / call T(self, on) at +0x93.
+constexpr const char* kFsrSink =
+    "48 89 74 24 10 57 48 83 EC 20 48 8B F1 48 8B 0D ?? ?? ?? ?? 48 8B 01 FF 90 88 00 00 00 84 C0 74 19 48 8B 0D ?? ?? ?? ?? "
+    "48 8B 01 FF 90 88 00 00 00 84 C0 74 05 40 B7 01 EB 03 40 32 FF 40 38 3D ?? ?? ?? ?? 74 ?? 48 89 5C 24 30 48 8B 1D ?? ?? ?? ?? "
+    "48 8B CB 40 88 3D ?? ?? ?? ?? 48 8B 03 FF 50 18 4C 8B 0B 48 8D 0D ?? ?? ?? ?? 25 00 00 00 FF 48 8D 15 ?? ?? ?? ?? 40 84 FF "
+    "44 8B C0 48 0F 45 D1 48 8B CB 41 FF 91 80 00 00 00 40 0F B6 D7 48 8B CE E8";
+constexpr size_t kFsrCallT = 0x93;
+
 constexpr const char* kSink =
     "40 53 48 83 EC 20 E8 ?? ?? ?? ?? 48 8B D8 48 85 C0 74 ?? 8B 48 08 F7 C1 00 00 00 60 75 ?? 48 8B 0D ?? ?? ?? ?? 44 8B 01 "
     "44 3B 05 ?? ?? ?? ?? 74 ?? 48 8B 15 ?? ?? ?? ?? 33 C9 B8 10 00 00 00 66 41 0F 6E C8 45 85 C0 44 89 05 ?? ?? ?? ?? "
@@ -105,12 +151,16 @@ SetFn g_set = nullptr;
 const FStr* g_name = nullptr;        // T's function-static FString "Altar.GraphicsOptions.FrameRateLimit" (filled by T)
 const FStr* g_stash = nullptr;       // T's stored FrameRateLimit value
 const uint8_t* g_state = nullptr;    // T's frame generation state byte
+const uint8_t* g_reflex = nullptr;   // T's Reflex flag (1: T(on) also switched Reflex on)
+const uint8_t* g_fsrRet = nullptr;   // the return address of FSR's sink's call of T
+const uint32_t* g_vendor = nullptr;  // GRHIVendorId (the variable T's vendor check reads)
 int32_t* const* g_valueSlot = nullptr;  // the cvar's int value (IConsoleVariable::GetIntRef), for the log
 uint32_t g_mapOffset = 0;
 bool g_freeze = false;
 int g_mode = 0;                      // 0 off, 1 on (lab: 2 log only)
 bool g_seen = false;                 // T has been called (game thread)
 int g_testMenu = -1;                 // self-test: -1 = read the freeze subsystem, 0/1 = no menu / a menu
+int g_testCaller = -1;               // self-test: -1 = T's real caller, 0/1 = another sink / FSR's sink
 wchar_t g_value[64];
 
 void Narrow(const FStr* s, char* out, size_t size)
@@ -127,6 +177,15 @@ int32_t CvarValue()
         return g_valueSlot && *g_valueSlot ? **g_valueSlot : -1;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return -1;
+    }
+}
+
+uint32_t VendorId()
+{
+    __try {
+        return g_vendor ? *g_vendor : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
     }
 }
 
@@ -161,14 +220,39 @@ bool SavedValue(void* settings, const FStr* name, FStr* out)
 
 void SwitchHook(void* self, bool on)
 {
+    // reached by jumps from T's entry: the return address is the one T's caller pushed
+    const bool fromFsr = g_testCaller >= 0 ? g_testCaller == 1 : _ReturnAddress() == g_fsrRet;
     const bool wasOn = *g_state != 0;
     g_orig(self, on);
     // only frame generation's first switch from off to on (T itself does nothing when the state does not change): with the
     // saved options that is the start-up apply; every later switch is left to the game
     if (g_seen || !on || wasOn) return;
     g_seen = true;
+    if (!fromFsr) {
+        Log("[fpscap] frame generation's first switch on did not come from FSR frame generation's sink (DLSS frame generation's sinks "
+            "or another caller; Frame Rate Limit now %d): left to the game (only FSR frame generation on AMD and Intel GPUs is verified)",
+            CvarValue());
+        return;
+    }
+    const uint32_t vendor = VendorId();
+    if (vendor == kNvidia || vendor == 0) {
+        Log("[fpscap] frame generation's first switch on with GPU vendor 0x%04X (%s; Frame Rate Limit now %d): left to the game "
+            "(only FSR frame generation on AMD and Intel GPUs is verified)",
+            vendor, vendor ? "NVIDIA" : "not known", CvarValue());
+        return;
+    }
+    if (g_reflex && *g_reflex) {
+        Log("[fpscap] frame generation's first switch on also switched NVIDIA Reflex on (Frame Rate Limit now %d): left to the game "
+            "(with Reflex the limit goes to Reflex's own limiter, not verified)",
+            CvarValue());
+        return;
+    }
     if (MenuOpen()) {
         Log("[fpscap] frame generation's first switch came with a menu open: left to the game");
+        return;
+    }
+    if (CvarValue() > 0) {
+        Log("[fpscap] frame generation on at start-up left the Frame Rate Limit at %d: nothing to do", CvarValue());
         return;
     }
     char stash[64], saved[64];
@@ -228,10 +312,12 @@ bool FindFrameCapStart()
     const auto sw = FindAll(game.text, ParsePattern(kSwitch));
     const auto sink = FindAll(game.text, ParsePattern(kSink));
     const auto look = FindAll(game.text, ParsePattern(kLookup));
-    if (sw.size() != 1 || sink.size() != 1 || look.size() != 1) {
-        Log("[fpscap] frame generation switch / Frame Rate Limit sink / saved-settings lookup not found (%zu / %zu / %zu matches): fix "
-            "not installed",
-            sw.size(), sink.size(), look.size());
+    const auto fsr = FindAll(game.text, ParsePattern(kFsrSink));
+    const auto rinit = FindAll(game.text, ParsePattern(kReflexInit));
+    if (sw.size() != 1 || sink.size() != 1 || look.size() != 1 || fsr.size() != 1 || rinit.size() != 1) {
+        Log("[fpscap] frame generation switch / Frame Rate Limit sink / saved-settings lookup / FSR frame generation sink / Reflex "
+            "flag's initialisation not found (%zu / %zu / %zu / %zu / %zu matches): fix not installed",
+            sw.size(), sink.size(), look.size(), fsr.size(), rinit.size());
         return false;
     }
     uint8_t* const t = sw[0];
@@ -247,6 +333,24 @@ bool FindFrameCapStart()
     const bool nameAgrees = initOk && RipTarget(init + kInitNameLea, 3, 7) == reinterpret_cast<const uint8_t*>(name);
     const auto* const stash = reinterpret_cast<const FStr*>(RipTarget(t + kStashLea, 3, 7));
     const uint8_t* const state = RipTarget(t + kStateCmp, 3, 7);
+    const bool reflexOk = t[kReflexCmpA] == 0x40 && t[kReflexCmpA + 1] == 0x38 && t[kReflexCmpA + 2] == 0x35 && t[kReflexCmpB] == 0x80 &&
+                          t[kReflexCmpB + 1] == 0x3D && t[kReflexCmpB + 6] == 0x00 &&
+                          RipTarget(t + kReflexCmpA, 3, 7) == RipTarget(t + kReflexCmpB, 2, 7);
+    const uint8_t* const reflex = reflexOk ? RipTarget(t + kReflexCmpB, 2, 7) : nullptr;
+    const bool fsrOk = RipTarget(fsr[0] + kFsrCallT, 1, 5) == t;
+    // the Reflex flag's initialisation: belongs to T (jumps back into it), stores into the flag T reads, calls the vendor check
+    const uint8_t* const ri = rinit[0];
+    const uint8_t* const back = RipTarget(ri + kInitBack, 2, 6);
+    const uint8_t* const store = RipTarget(ri + kInitStoreJmpA, 1, 5);
+    const uint8_t* const vfn = RipTarget(ri + kInitVendorCall, 1, 5);
+    const bool vfnOk = game.text.Contains(vfn) && memcmp(vfn, kVendorFn, 2) == 0 &&
+                       memcmp(vfn + 6, kVendorFn + 6, sizeof kVendorFn - 6) == 0;
+    const auto* const vendor = vfnOk ? reinterpret_cast<const uint32_t*>(RipTarget(vfn, 2, 10)) : nullptr;
+    const bool initOwn = back > t && back < t + 0x500 && store > t && store < t + 0x500 &&
+                         RipTarget(ri + kInitStoreJmpB, 1, 5) == store && store[0] == 0x48 && store[1] == 0x8D && store[2] == 0x0D &&
+                         RipTarget(store, 3, 7) == RipTarget(ri, 3, 7) && store[7] == 0x88 && store[8] == 0x05 && reflex &&
+                         RipTarget(store + 7, 2, 6) == reflex;
+    const bool vendorOk = initOwn && vendor && inData(vendor, 4);
     uint8_t* const setA = t[kSetCallA] == 0xE8 ? RipTarget(t + kSetCallA, 1, 5) : nullptr;
     uint8_t* const setB = t[kSetCallB] == 0xE8 ? RipTarget(t + kSetCallB, 1, 5) : nullptr;
     const bool strOk = str && inData(str, 2) && wcscmp(str, L"Altar.GraphicsOptions.FrameRateLimit") == 0;
@@ -258,14 +362,20 @@ bool FindFrameCapStart()
     uint8_t* const find = RipTarget(look[0] + kLookupFind, 1, 5);
     if (!strOk || !nameAgrees || !inData(name, 8) || !inData(stash, 8) || !inData(state, 1) || !setA || setA != setB ||
         !game.text.Contains(setA) || !game.text.Contains(getter) || !game.text.Contains(hash) || !game.text.Contains(find) ||
-        !inData(valueSlot, 8) || mapOffset == 0 || mapOffset > 0x1000 || (mapOffset & 7) || memcmp(t, kFirstInsns, sizeof kFirstInsns) != 0) {
-        Log("[fpscap] unexpected code (name string %s, name %s, setter calls %s, map +0x%X): fix not installed", strOk ? "ok" : "differs",
-            nameAgrees ? "agrees" : "differs", setA && setA == setB ? "agree" : "differ", mapOffset);
+        !inData(valueSlot, 8) || mapOffset == 0 || mapOffset > 0x1000 || (mapOffset & 7) || memcmp(t, kFirstInsns, sizeof kFirstInsns) != 0 ||
+        !reflex || !inData(reflex, 1) || !fsrOk || !vendorOk) {
+        Log("[fpscap] unexpected code (name string %s, name %s, setter calls %s, map +0x%X, Reflex flag %s, FSR sink %s, Reflex flag's "
+            "initialisation %s, vendor check %s): fix not installed",
+            strOk ? "ok" : "differs", nameAgrees ? "agrees" : "differs", setA && setA == setB ? "agree" : "differ", mapOffset,
+            reflex ? "ok" : "differs", fsrOk ? "calls the switch" : "differs", initOwn ? "ok" : "differs", vfnOk ? "ok" : "differs");
         return false;
     }
     g_name = name;
     g_stash = stash;
     g_state = state;
+    g_reflex = reflex;
+    g_vendor = vendor;
+    g_fsrRet = fsr[0] + kFsrCallT + 5;
     g_set = reinterpret_cast<SetFn>(setA);
     g_getter = reinterpret_cast<GetterFn>(getter);
     g_hash = reinterpret_cast<HashFn>(hash);
@@ -308,9 +418,13 @@ bool InstallFrameCapStart(bool beforeGameCode, int mode)
     Log("[fpscap] frame generation switch exe+0x%llX detoured (setter exe+0x%llX, SavedSettings +0x%X%s%s): %s",
         static_cast<unsigned long long>(g_switch - Game().base), static_cast<unsigned long long>(reinterpret_cast<uint8_t*>(g_set) - Game().base),
         g_mapOffset, g_freeze ? "" : ", no freeze subsystem: menus not checked", beforeGameCode ? "" : ", OBSE64 route",
-        mode == 1 ? "the saved Frame Rate Limit is applied after frame generation's start-up switch" : "log only");
+        mode == 1 ? "the saved Frame Rate Limit is applied after FSR frame generation's start-up switch on AMD and Intel GPUs"
+                  : "log only");
     return true;
 }
+
+// Self-test: the GRHIVendorId variable found through T's vendor check (nullptr until FindFrameCapStart succeeded).
+const uint32_t* FrameCapStartTestVendor() { return g_vendor; }
 
 // Self-test: T's entry is the 5-byte jump to the hook's stub and the trampoline holds its first three instructions.
 bool FrameCapStartTestPatched()
@@ -323,10 +437,14 @@ bool FrameCapStartTestPatched()
 }
 
 bool FrameCapStartTestRun(void* fakeOrig, void* fakeGetter, void* fakeHash, void* fakeFind, void* fakeSet, const void* name,
-                          const uint8_t* state, int menu, int mode, bool on, bool reset)
+                          const uint8_t* state, int menu, int mode, bool on, bool reset, int caller, const uint8_t* reflex,
+                          int32_t* const* valueSlot, const uint32_t* vendor)
 {
     if (reset) g_seen = false;
     g_state = state;
+    g_reflex = reflex;
+    g_vendor = vendor;
+    g_testCaller = caller;
     g_orig = reinterpret_cast<SwitchFn>(fakeOrig);
     g_getter = reinterpret_cast<GetterFn>(fakeGetter);
     g_hash = reinterpret_cast<HashFn>(fakeHash);
@@ -334,7 +452,7 @@ bool FrameCapStartTestRun(void* fakeOrig, void* fakeGetter, void* fakeHash, void
     g_set = reinterpret_cast<SetFn>(fakeSet);
     g_name = static_cast<const FStr*>(name);
     g_stash = nullptr;
-    g_valueSlot = nullptr;
+    g_valueSlot = valueSlot;
     g_mapOffset = 0x1C8;
     g_testMenu = menu;
     g_mode = mode;

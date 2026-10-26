@@ -8,7 +8,8 @@
 
   "Stock" = OblivionPerfFix loaded with all its switches at 0 (each fix then leaves the game's code alone), except
   FrameRateLimitAtStart: that one only makes the game apply the frame-rate limit the player saved (a game bug with frame
-  generation on), so both sides run at the player's saved cap; it is not a speed-up. The ini is put back after every run. The fix must be installed (see README) and the benchmark set up (tools\Setup-Bench.ps1).
+  generation on; since 1.2.2 only with FSR frame generation and no NVIDIA Reflex), so both sides run at the same cap; it is
+  not a speed-up. The ini is put back after every run. The fix must be installed (see README) and the benchmark set up (tools\Setup-Bench.ps1).
 
 .PARAMETER Rounds
   How many stock/fix pairs (default 2, i.e. 4 runs). More rounds = smaller noise; differences under ~5% are noise.
@@ -95,7 +96,8 @@ if (-not $Base -and -not $Test) {
         if ($inFixes -and $line -match '^\s*([A-Za-z0-9]+)\s*=') { $off[$Matches[1]] = 0 }
     }
     # Kept as installed on the stock side: not a speed-up, it only makes the game honour the player's saved frame cap
-    # (with frame generation on the game forgets it after a start), so stock and fix run at the same cap.
+    # (with frame generation on the game forgets it after a start), so stock and fix run at the same cap (none with DLSS
+    # frame generation or Reflex, where the key leaves it to the game since 1.2.2).
     foreach ($k in @('FrameRateLimitAtStart')) { $off.Remove($k) }
     if (-not $off.Count) { throw "no switches found in $iniPath" }
     $runner = Join-Path $PSScriptRoot 'Run-Benchmark.ps1'
@@ -236,12 +238,13 @@ if ($first.profile.own) {
 $caps = @(@($baseRuns) + @($testRuns) | ForEach-Object { $_.R.sessions } | ForEach-Object { $_.frameCap } | Where-Object { $_ } | Select-Object -Unique)
 if ($caps.Count) { $md.Add("| Frame cap | fps capped at $($caps -join ' / ') by $(if ($first.profile.own) { "the player's settings" } else { 'the profile' }) |") }
 elseif ($first.profile.own -and @($testRuns | ForEach-Object { $_.R.sessions } | ForEach-Object { $_.scenes } | Where-Object { $_.frameGen }).Count) {
-    # stock game behaviour: with frame generation on, the saved Frame Rate Limit is not applied after a start (only once
-    # the Graphics page is opened), so a player's 60 cap is not in effect in these freshly started games
-    $md.Add("| Frame cap | none in effect: with frame generation on, the game does not apply its saved frame-rate limit after a start (it does once you open the Graphics settings), stock and fix alike |")
+    # no cap read back (t.MaxFPS 0) with frame generation on: either no limit saved, or the stock game's start-up bug (with
+    # frame generation on the saved Frame Rate Limit is applied only once the Graphics page is opened) where
+    # FrameRateLimitAtStart does not act: key 0, or (since 1.2.2) DLSS frame generation / NVIDIA Reflex
+    $md.Add("| Frame cap | none in effect (t.MaxFPS 0), stock and fix alike: either no frame-rate limit is saved, or the game did not apply it after the start (a game bug with frame generation on: it does once you open the Graphics settings; FrameRateLimitAtStart=1 applies it with FSR frame generation, not with DLSS frame generation or NVIDIA Reflex) |")
 }
 $md.Add("| Runs | stock $($baseRuns.Count), fix $($testRuns.Count) (medians; alternated) |")
-$md.Add("| Stock | the fix loaded with every switch off except FrameRateLimitAtStart (a game bug fix, not a speed-up: it applies the frame-rate limit you saved), so both sides run at your saved frame-rate cap |")
+$md.Add("| Stock | the fix loaded with every switch off except FrameRateLimitAtStart (a game bug fix, not a speed-up: it applies the frame-rate limit you saved where it can), so both sides run at the same frame-rate cap |")
 # Short of RAM: Windows pages and the game hitches far more (2-5x the hitches seen at < 3 GB free): such runs are not comparable
 $lowRam = @(@($baseRuns) + @($testRuns) | Where-Object {
     @($_.R.sessions | ForEach-Object { $_.scenes } | Where-Object { $null -ne $_.availMinMB -and [double]$_.availMinMB -lt 3072 }).Count } | ForEach-Object Name)

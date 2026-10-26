@@ -77,6 +77,10 @@ static_assert(sizeof(CameraInfoDesc) == 0x40);
 constexpr uint32_t kRing = 64;
 alignas(64) CameraInfoDesc g_ring[kRing];
 std::atomic<uint32_t> g_next{0};
+// The last camera that passed ReadCamera (render thread writes, any thread reads; a sequence lock): FrameGenLastCamera.
+std::atomic<uint32_t> g_lastSeq{0};
+float g_lastPos[3], g_lastFwd[3];
+std::atomic<uint64_t> g_lastTick{0};
 
 struct Layout {
     uint32_t matrices = 0, location = 0, scale = 0;
@@ -182,6 +186,13 @@ void AttachCamera(const uint8_t* view, uint8_t* desc)
                 "own behaviour); FrameGenCameraInfo does nothing on this build");
         return;
     }
+    g_lastSeq.fetch_add(1, std::memory_order_acq_rel);  // odd: being written
+    for (int i = 0; i < 3; ++i) {
+        g_lastPos[i] = cam.position[i];
+        g_lastFwd[i] = cam.forward[i];
+    }
+    g_lastSeq.fetch_add(1, std::memory_order_acq_rel);
+    g_lastTick.store(GetTickCount64(), std::memory_order_relaxed);
     CameraInfoDesc& slot = g_ring[g_next.fetch_add(1, std::memory_order_relaxed) % kRing];
     cam.header.type = kTypeCameraInfo;
     cam.header.pNext = nullptr;
@@ -405,6 +416,25 @@ void LogFrameGenCameraInfoStats()
     s_attachedLogged = attached;
     s_rejectedLogged = rejected;
     s_preparesLogged = prepares;
+}
+
+// The camera of the last frame-generation view (UE world units; forward a unit vector) and its age; false if there is
+// none yet, it is older than maxAgeMs (frame generation off, menus), or it was being written on every try.
+bool FrameGenLastCamera(float pos[3], float fwd[3], uint64_t maxAgeMs)
+{
+    const uint64_t tick = g_lastTick.load(std::memory_order_relaxed);
+    if (!tick || GetTickCount64() - tick > maxAgeMs) return false;
+    for (int tries = 0; tries < 4; ++tries) {
+        const uint32_t s0 = g_lastSeq.load(std::memory_order_acquire);
+        if (s0 & 1) continue;
+        for (int i = 0; i < 3; ++i) {
+            pos[i] = g_lastPos[i];
+            fwd[i] = g_lastFwd[i];
+        }
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (g_lastSeq.load(std::memory_order_relaxed) == s0) return true;
+    }
+    return false;
 }
 
 bool FrameGenCameraInfoTestInfo(FrameGenCameraInfoOut* out)

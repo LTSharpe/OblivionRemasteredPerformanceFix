@@ -52,12 +52,13 @@ constexpr size_t kWarnFlag = 0, kWarnPicks = 13, kWarnMax = 20, kWarnFmtOther = 
                  kWarnFmt = 95, kWarnSprintf2 = 116, kWarnHandler = 121, kWarnCaption = 141, kWarnCall = 148,
                  kWarnReset = 150;
 
-// The engine's warning handler (build 19115871 exe+0x691B460): MessageBoxA(NULL, caption, text, MB_TOPMOST), returns 0.
+// The engine's warning handler (build 19115871 exe+0x691B460): MessageBoxA(NULL, rcx, rdx, MB_TOPMOST) (rcx the box's text,
+// rdx its caption), returns 0.
 //   48 83 EC 28 4C 8B C2 41 B9 00 00 04 00 48 8B D1 33 C9 FF 15 [MessageBoxA] 33 C0 48 83 C4 28 C3
 constexpr const char* kHandler = "48 83 EC 28 4C 8B C2 41 B9 00 00 04 00 48 8B D1 33 C9 FF 15 ?? ?? ?? ?? 33 C0 48 83 C4 28 C3";
 constexpr size_t kHandlerImport = 18;
 
-using HandlerFn = uint64_t (*)(const char* caption, const char* text, uint64_t a3);
+using HandlerFn = uint64_t (*)(const char* boxText, const char* boxCaption, uint64_t a3);
 
 constexpr size_t kTextKeep = 160;
 
@@ -80,14 +81,14 @@ void Keep(const char* text)
     strncpy_s(g_lastText, text, _TRUNCATE);
 }
 
-// Same signature as the game's handler; the argument order follows the call site: rcx = the caption ("WARNING"),
-// rdx = the text, r8 = a third value the handler ignores.
-uint64_t Hook(const char* caption, const char* text, uint64_t a3)
+// Same signature as the game's handler (MessageBoxA's order): rcx = the box's text (the call site passes "WARNING"),
+// rdx = the box's caption (the call site passes the formatted warning), r8 = a third value the handler ignores.
+uint64_t Hook(const char* boxText, const char* boxCaption, uint64_t a3)
 {
     const void* ret = g_testReturn ? g_testReturn : _ReturnAddress();
     if (ret == g_return && g_enabled.load(std::memory_order_relaxed)) {
         g_heldBack.fetch_add(1, std::memory_order_relaxed);
-        Keep(text);
+        Keep(boxCaption);
         if (g_textLogs < 3) {
             ++g_textLogs;
             Log("[picks] the old engine's warning box held back (the game would have stopped until it was closed): \"%s\" "
@@ -96,12 +97,12 @@ uint64_t Hook(const char* caption, const char* text, uint64_t a3)
         return 0;  // what the game's handler returns
     }
     g_forwarded.fetch_add(1, std::memory_order_relaxed);
-    return g_original(caption, text, a3);
+    return g_original(boxText, boxCaption, a3);
 }
 
 // True if `slot` is the exe's import-table entry for user32's MessageBoxA: the import directory names it (that holds for a
-// mapped copy too, where the imports are not resolved), and, once the loader has filled the slot in, the value is the
-// function user32 exports.
+// mapped copy too, where the imports are not resolved), and the value is either still the file's (the RVA of the name
+// entry: the self-test's mapped copy, or a slot the loader has not filled in yet) or the function user32 exports.
 bool ImportIsMessageBoxA(const GameModule& game, const uint8_t* slot)
 {
     if (slot < game.base || slot + sizeof(void*) > game.base + game.sizeOfImage) return false;
@@ -110,6 +111,7 @@ bool ImportIsMessageBoxA(const GameModule& game, const uint8_t* slot)
     const IMAGE_DATA_DIRECTORY& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
     if (!dir.VirtualAddress || dir.VirtualAddress + dir.Size > game.sizeOfImage) return false;
     bool named = false;
+    uint64_t nameRva = 0;
     for (const auto* desc = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(game.base + dir.VirtualAddress);
          desc->Name && !named; ++desc) {
         if (desc->Name >= game.sizeOfImage || _stricmp(reinterpret_cast<const char*>(game.base + desc->Name), "USER32.dll") != 0) continue;
@@ -122,17 +124,18 @@ bool ImportIsMessageBoxA(const GameModule& game, const uint8_t* slot)
             const auto* byName = reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(game.base + names[i].u1.AddressOfData);
             if (strcmp(byName->Name, "MessageBoxA") == 0) {
                 named = reinterpret_cast<const uint8_t*>(entries + i) == slot;
+                nameRva = names[i].u1.AddressOfData;
                 break;
             }
         }
     }
     if (!named) return false;
-    // The slot's value: unresolved (still an offset into the image: a mapped copy) or the function user32 exports.
-    const auto value = *reinterpret_cast<const uint8_t* const*>(slot);
-    if (value >= game.base && value < game.base + game.sizeOfImage) return true;
+    // The slot's value: unresolved (the file's value, the name entry's RVA: a mapped copy, whose imports the loader does not
+    // resolve, holds that whether or not this process has user32 loaded) or the function user32 exports.
+    const uint64_t value = *reinterpret_cast<const uint64_t*>(slot);
+    if (value == nameRva) return true;
     const HMODULE user32 = GetModuleHandleW(L"user32.dll");
-    if (!user32) return true;  // not loaded yet: the loader has not filled the slot in either
-    return value == reinterpret_cast<const uint8_t*>(GetProcAddress(user32, "MessageBoxA"));
+    return user32 && value == reinterpret_cast<uint64_t>(GetProcAddress(user32, "MessageBoxA"));
 }
 
 bool StartsWith(const GameModule& game, const uint8_t* s, const char* prefix)

@@ -9,24 +9,52 @@ Downloads, checksums and build attestations: https://github.com/LTSharpe/Oblivio
 Bug fixes say whose bug it was: **game bug** = also happens without OblivionPerfFix (in the game, its engine or a
 driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 
-- Self-test: builds with Windows SDKs before 10.0.26100 (10.0.22621 and older), which do not declare
-  `ID3D12DeviceRemovedExtendedDataSettings2`; the crash-report check's DRED set-up is then skipped with a `SKIP` line
-  and the rest of that check runs as before. No change to the fix itself.
+## 1.2.2-beta
+For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Thanks to mkusm for pull requests #20 and #21,
+to luisAzcuaga for pull request #11, to hexaae for the frame-rate report and ScorpioKing for a similar one, and to
+everyone who reported results and problems.
+
+- **Our bug fixed (since 1.2.0-beta): a much lower frame rate with `FrameRateLimitAtStart` on** (reported by hexaae with
+  NVIDIA DLSS frame generation; thanks also to ScorpioKing for a similar report). With DLSS frame generation the game
+  switches NVIDIA Reflex on, and the frame-rate limit we put back then goes to Reflex's own frame limiter instead of the
+  game's usual wait: a path we could not test on our AMD PC. The key now acts only with FSR frame generation on AMD and
+  Intel graphics cards (the case we measured: the saved limit in effect from the start, as before); with DLSS frame
+  generation, and on NVIDIA cards (where the game can turn Reflex on), it leaves the limit to the game, as without the
+  mod, and the log says so. No change to the key's name or default.
 - **New: fewer GPU spikes where many objects appear at once with ray tracing on** (`RayTracingBuildBatch`, on; an
-  improvement, not a bug fix): the game built each newly loaded object's ray-tracing structure on its own, one after
-  another, about a quarter of a millisecond each; where 100-150 arrive together (the climb above the Niben on the
-  Imperial City flight) that frame took 30-40 ms longer on the graphics card. They are now built together at the start
-  of that same frame, before anything uses them; the picture is the same. Those frames' graphics card time on the
-  Imperial City flight: 32-67 -> 19-24 ms (4K, DLSS Performance, RTX 4090). Installed at start-up with the
-  version.dll route. During loading screens the builds are made in parts of at most 64 MiB of build memory. New key
-  `RayTracingBuildBatch` (1; 0 = off).
-- **Game bug fixed: the game stopping in big fights behind a "Havok picks" box** (`HavokPickWarningGuard`; happens
-  without OblivionPerfFix too): in fights with many characters the game's old engine can pop up a leftover debug
-  message, "42 Havok picks (6 path, 36 LOS, 0 ViewCaster) used this frame.", on its own thread. The whole game then
-  stands still, often behind its own window, until someone finds and closes the box (our battle benchmark lost 2 of
-  10 runs to it). The box only reports that the engine skipped some sight and path checks that frame, which it does
-  with or without the box, so the message now goes to the log instead and the game keeps running. Nothing else
-  changes: the engine's limit on those checks (`iMaxPicks` in Oblivion.ini) is left alone.
+  improvement, not a bug fix; pull request #21 by mkusm, thanks): the game built each newly loaded object's ray-tracing
+  structure on its own, one after another, about a quarter of a millisecond each; where 100-150 arrive together (the
+  climb above the Niben on the Imperial City flight) that frame took 30-40 ms longer on the graphics card. They are now
+  built together at the start of that same frame, before anything uses them; the picture is the same. Those frames'
+  graphics card time on the Imperial City flight: 32-67 -> 19-24 ms (4K, DLSS Performance, RTX 4090); at a Skingrad
+  forest spot with 134 new objects 44 -> 15-16 ms (4K, FSR Performance, frame generation, RX 9070 XT). Installed at
+  start-up with the version.dll route. During loading screens the builds are made in parts of at most 64 MiB of build
+  memory. New key `RayTracingBuildBatch` (1; 0 = off).
+- **Game bug fixed: the game stopping in big fights behind a "Havok picks" box** (`HavokPickWarningGuard`, on; happens
+  without OblivionPerfFix too; pull request #11 by luisAzcuaga, thanks): in fights with many characters the game's old
+  engine can pop up a leftover debug message, "42 Havok picks (6 path, 36 LOS, 0 ViewCaster) used this frame.", on its
+  own thread. The whole game then stands still, often behind its own window, until someone finds and closes the box
+  (in our own battle tests it stopped 3 of about 14 runs on one day). The box only reports that the engine skipped some sight and path
+  checks that frame, which it does with or without the box, so the message now goes to the log instead and the game
+  keeps running. Nothing else changes: the engine's limit on those checks (`iMaxPicks` in Oblivion.ini) is left alone.
+  New key `HavokPickWarningGuard` (1; 0 = the box as before).
+- **Changed: frame pacing with frame generation on the newest AMD drivers** (`FrameGenPacingTuning`; not a bug fix):
+  recent Adrenalin drivers (26.10.x) can run frame generation's swap chain, the part that decides when each frame is
+  shown, inside the driver. AMD's recommended setting that the fix applies (Tuning Set B) made the shown frames less even
+  there in our tests (about twice as many gaps over 25 ms, 40 % more frame-to-frame timing error on the Imperial City
+  flight), while the driver's own pacing kept them even. `FrameGenPacingTuning=1` (the default) now sets Set B only on
+  AMD's own FSR files' swap chain and leaves the driver's swap chain at its own pacing; the log says which. New value 3 =
+  Set B everywhere (what 1 did up to 1.2.1). Only when frames are shown changes, not what is drawn.
+- **Benchmark kit:** the report's "Frame cap" and "Stock" lines no longer claim that both sides ran at your saved cap
+  (issue #23, thanks to brad1138): with no cap in effect they now say it can be either no limit saved or the game's
+  start-up bug, and that `FrameRateLimitAtStart` applies it only with FSR frame generation.
+- **Benchmark:** stack timelines are public: `tools/Sample-Timeline.ps1` with its two samplers and the reader
+  `tools/Analyze-Hitch.ps1`, so `Run-Benchmark.ps1 -Stacks` works outside our lab (promised in issue #18; how to use it in
+  `docs/benchmark.md`). Two new scenarios from pull request #21: `showcase-climb` (the Imperial City flight's climb,
+  28 s) and `water-visual` (image check along the Niben).
+- **Self-test:** builds with Windows SDKs before 10.0.26100 (10.0.22621 and older), which do not declare
+  `ID3D12DeviceRemovedExtendedDataSettings2`; the crash-report check's DRED set-up is then skipped with a `SKIP` line
+  and the rest of that check runs as before (pull request #20 by mkusm, thanks). No change to the fix itself.
 
 ## 1.2.1-beta
 For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Thanks to luisAzcuaga for pull requests #6-#8,

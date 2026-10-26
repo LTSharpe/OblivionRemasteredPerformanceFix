@@ -86,6 +86,16 @@ third of them (the later fixes target travel, so those rows are unchanged or bet
 | Xbox / PC Game Pass (experimental) | download `OblivionPerfFix-<version>-GamePass.zip`; its files go into `OblivionRemastered\Binaries\WinGDK\` in the game's folder (usually `C:\XboxGames\The Elder Scrolls IV - Oblivion Remastered\`). Reported working by a few players; less tested than Steam: the log says which fixes found their code, and no log at all means it didn't load. A [test report](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/new/choose) helps everyone |
 | Steam Deck / Linux (one Linux report so far; Steam Deck untested) | as for Steam, then add `WINEDLLOVERRIDES="version=n,b" %command%` to the game's launch options |
 
+**Check where the files landed** (a mod manager can put them in the wrong folder):
+
+| Zip | Files | Folder (inside the game folder) |
+|---|---|---|
+| `OblivionPerfFix-<version>.zip` | `version.dll`, `OblivionPerfFix.ini` | `OblivionRemastered\Binaries\Win64\`, next to `OblivionRemastered-Win64-Shipping.exe`. Not in `OBSE\Plugins`: the game never loads a `version.dll` from there |
+| `OblivionPerfFix-<version>-OBSE.zip` | `OblivionPerfFix.dll`, `OblivionPerfFix.ini` | `OblivionRemastered\Binaries\Win64\OBSE\Plugins\` |
+| `OblivionPerfFix-<version>-GamePass.zip` | `version.dll`, `OblivionPerfFix.ini` | `OblivionRemastered\Binaries\WinGDK\` |
+
+The log, `OblivionPerfFix.log`, appears next to the DLL at the first start; no log means the fix was not loaded.
+
 **Updates:** track the mod on [Nexus Mods](https://www.nexusmods.com/oblivionremastered/mods/5709) (Vortex and Mod Organizer 2
 then show when a new version is out), or on GitHub choose *Watch > Custom > Releases*. To update, extract the new zip
 over the old files. If you changed settings in `OblivionPerfFix.ini`, set them again in the new one: new fixes come with
@@ -123,6 +133,12 @@ like `[fgpace] frame generation context created: provider 4.0.1 *, ... (Adrenali
   the game's FSR 3.1.0 code never sends; the fix sends it (`FrameGenCameraInfo`), uses AMD's recommended pacing
   setting for this file (`FrameGenPacingTuning`), and guards a crash that the 3.1.4 file still has
   (`FrameGenCrashGuard`). Without the fix, ML frame generation runs with the camera at zero.
+- **Improved frame pacing on the latest AMD drivers:** recent Adrenalin drivers (26.10.x) can also run the part of
+  frame generation that decides when each frame is shown (its swap chain). The log then says `frame generation swap
+  chain context created: provider 4.0.0 ... (Adrenalin's driver provider)`. Since 1.2.2 the fix leaves the driver's
+  pacing alone there: in our tests it shows the frames more evenly than AMD's recommended setting (about 30 % less
+  frame-to-frame timing error on the Imperial City flight). With AMD's own file's swap chain the fix still uses the
+  recommended setting. `FrameGenPacingTuning=3` uses it everywhere, as 1.2.1 did; only when frames are shown changes.
 - **Undo:** delete the downloaded file and rename `amd_fidelityfx_dx12.dll.original` back. Steam's *Verify integrity
   of game files* also restores the original (and so does a game update: put the 3.1.4 file back afterwards).
 - **Other graphics cards:** with an NVIDIA, Intel or older AMD card the 3.1.4 file works like the game's own (FSR 3
@@ -206,7 +222,7 @@ folder.
 
 "Stock" means the DLL is loaded with every fix switched off, so the game's own code runs, except the fix for the
 game's frame-cap bug (`FrameRateLimitAtStart`: with frame generation on, the game forgets the frame-rate limit you saved
-until you open the Graphics page), so both sides run at your saved frame-rate cap. Differences under about 5% are noise; `Benchmark.cmd -Rounds 3` (from a command prompt in the kit's folder) gives steadier numbers, `Benchmark.cmd -Rounds 1` is a quick look (about 8 minutes).
+until you open the Graphics page; applied with FSR frame generation on AMD and Intel cards), so both sides run at the same frame-rate cap. Differences under about 5% are noise; `Benchmark.cmd -Rounds 3` (from a command prompt in the kit's folder) gives steadier numbers, `Benchmark.cmd -Rounds 1` is a quick look (about 8 minutes).
 
 Also in the kit: **`Check-GPU.cmd`**: is your graphics card or your CPU the limit? See [below](#find-good-graphics-settings).
 
@@ -320,6 +336,14 @@ budget does not crash the game: Windows moves the extra video memory to system R
 Two smaller ones: `NaniteInitialRootPages` reserves about 32 MB more for Nanite's root pages from the start (the stock
 game grows that buffer during play and can stall for a moment while it does), and `RtSceneBufferKeep` keeps the ray-tracing
 scene buffer at the largest size the session needed instead of shrinking and regrowing it.
+
+**My frame-rate limit is not in effect after a start with frame generation on.** A game bug: with frame generation on,
+the game applies the Frame Rate Limit you saved only once you open *Settings > Graphics*. With FSR frame generation on
+AMD and Intel graphics cards the fix applies it from the start (`FrameRateLimitAtStart`). With NVIDIA DLSS frame
+generation, and on NVIDIA cards (where the game can turn Reflex on), it leaves the limit to the game since 1.2.2, as
+without the mod: in 1.2.0-1.2.1 it applied it there too, and then NVIDIA Reflex's own limiter could
+hold the frame rate far below the limit (our bug, fixed in 1.2.2). If you play with DLSS frame generation on 1.2.0 or
+1.2.1, set `FrameRateLimitAtStart=0`.
 
 **The first minute feels slower than later.** For a while after every start the game compiles graphics pipelines in the
 background. The fix runs that at full speed while you are in the main menu and loading screens; if you start playing

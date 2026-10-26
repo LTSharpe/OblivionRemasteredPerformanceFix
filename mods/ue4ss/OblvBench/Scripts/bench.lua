@@ -1411,6 +1411,46 @@ function V.cvar(rest)
 end
 function V.get(rest) return rest .. "=" .. tostring(Cvar(rest)) end
 
+-- "ismcensus [class]" (hitchtracy 2026-10-26, read-only, no hooks): the loaded instanced static mesh components of a class
+-- (default FoliageInstancedStaticMeshComponent) grouped by collision set-up: collision enabled (0 none, 1 query, 2 physics,
+-- 3 both), profile, responses to Visibility (0), Camera (1), Pawn (3) (0 ignore, 1 overlap, 2 block); components and
+-- instances per group, then the meshes of the largest groups. Lines in UE4SS.log; the reply is the summary.
+function V.ismcensus(rest)
+    local cls = (rest and rest ~= "") and rest or "FoliageInstancedStaticMeshComponent"
+    local groups, ncomp, ninst = {}, 0, 0
+    for _, c in ipairs(FindAllOf(cls) or {}) do
+        pcall(function()
+            if not c:IsValid() then return end
+            local ce = c:GetCollisionEnabled()
+            local prof = c:GetCollisionProfileName():ToString()
+            local rv, rc, rp = c:GetCollisionResponseToChannel(0), c:GetCollisionResponseToChannel(1), c:GetCollisionResponseToChannel(3)
+            local n = c:GetInstanceCount()
+            local mesh = "-"
+            pcall(function() local m = c.StaticMesh; if m and m:IsValid() then mesh = m:GetFName():ToString() end end)
+            local key = string.format("ce=%s prof=%s vis=%s cam=%s pawn=%s", tostring(ce), prof, tostring(rv), tostring(rc), tostring(rp))
+            local g = groups[key] or { comps = 0, inst = 0, meshes = {} }
+            groups[key] = g
+            g.comps = g.comps + 1; g.inst = g.inst + n
+            g.meshes[mesh] = (g.meshes[mesh] or 0) + n
+            ncomp = ncomp + 1; ninst = ninst + n
+        end)
+    end
+    local list = {}
+    for k, g in pairs(groups) do list[#list + 1] = { k, g } end
+    table.sort(list, function(a, b) return a[2].inst > b[2].inst end)
+    local out = {}
+    for i, e in ipairs(list) do
+        local ms = {}
+        for m, n in pairs(e[2].meshes) do ms[#ms + 1] = { m, n } end
+        table.sort(ms, function(a, b) return a[2] > b[2] end)
+        local names = {}
+        for j = 1, math.min(8, #ms) do names[j] = ms[j][1] .. ":" .. ms[j][2] end
+        print(string.format("[OblvBench] ismcensus %s | %s comps=%d inst=%d | %s\n", cls, e[1], e[2].comps, e[2].inst, table.concat(names, ",")))
+        if i <= 6 then out[#out + 1] = string.format("[%s comps=%d inst=%d]", e[1], e[2].comps, e[2].inst) end
+    end
+    return string.format("ismcensus %s comps=%d inst=%d groups=%d %s", cls, ncomp, ninst, #list, table.concat(out, " "))
+end
+
 -- "tp <world|cell> <name> <x> <y> <z> <heading>": one-step teleport (PositionWorld / PositionCell)
 -- "tp here <x> <y> <z>": setpos within the current cell
 function V.tp(rest)

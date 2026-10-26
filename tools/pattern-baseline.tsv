@@ -1,15 +1,17 @@
 # find_patterns.py counts, TimeDateStamp 0xF19077A4, SizeOfImage 0x9E1E000
 # key (file:constant:sha1 of the pattern)	matches	file:line when saved
-core/common.h:-:32fa8b08cd	1	core/common.h:527
+core/common.h:-:32fa8b08cd	1	core/common.h:566
 diagnostics/hitch_ledger.cpp:kTgEntry:cd7e0c3315	1	diagnostics/hitch_ledger.cpp:51
 diagnostics/hitch_ledger.cpp:kGridEntry:7c56bf9579	1	diagnostics/hitch_ledger.cpp:56
 diagnostics/hitch_ledger.cpp:kSyncCall:2f403fb14d	1	diagnostics/hitch_ledger.cpp:60
 diagnostics/hitch_ledger.cpp:kSyncFn:7d7156c9e5	1	diagnostics/hitch_ledger.cpp:64
 diagnostics/hitch_ledger.cpp:kPsoCounters:3553f4124b	1	diagnostics/hitch_ledger.cpp:68
 diagnostics/hitch_ledger.cpp:kPsoGetter:5877563a01	1	diagnostics/hitch_ledger.cpp:71
-framegen/frame_cap_start.cpp:-:3d928562f7	1	framegen/frame_cap_start.cpp:59
-framegen/frame_cap_start.cpp:-:a6bc2d03e1	1	framegen/frame_cap_start.cpp:70
-framegen/frame_cap_start.cpp:-:a8bf50001b	1	framegen/frame_cap_start.cpp:79
+framegen/frame_cap_start.cpp:-:3d928562f7	1	framegen/frame_cap_start.cpp:73
+framegen/frame_cap_start.cpp:-:c76a12fefa	1	framegen/frame_cap_start.cpp:99
+framegen/frame_cap_start.cpp:-:7493bf2852	1	framegen/frame_cap_start.cpp:92
+framegen/frame_cap_start.cpp:-:a6bc2d03e1	1	framegen/frame_cap_start.cpp:99
+framegen/frame_cap_start.cpp:-:a8bf50001b	1	framegen/frame_cap_start.cpp:108
 framegen/framegen_async.cpp:kRegister:9c72712edf	9+	framegen/framegen_async.cpp:39
 framegen/framegen_async.cpp:kDefaultAndFlags:63cb16b8e1	9+	framegen/framegen_async.cpp:43
 framegen/framegen_camera.cpp:kSite:92df11be8e	1	framegen/framegen_camera.cpp:50
@@ -17,6 +19,8 @@ framegen/framegen_camera.cpp:kScaleRead:a537302988	2	framegen/framegen_camera.cp
 framegen/framegen_guard.cpp:kAcquire:0c0882ee43	0	framegen/framegen_guard.cpp:44
 framegen/framegen_guard.cpp:kSlot:bf3a595687	0	framegen/framegen_guard.cpp:48
 framegen/framegen_guard.cpp:kFree:0400889fc9	0	framegen/framegen_guard.cpp:52
+guards/havok_pick_warning.cpp:-:e1de7b5153	1	guards/havok_pick_warning.cpp:46
+guards/havok_pick_warning.cpp:-:20d82a2502	1	guards/havok_pick_warning.cpp:57
 guards/name_lookup_guard.cpp:-:0d4af6b067	1	guards/name_lookup_guard.cpp:41
 guards/name_lookup_guard.cpp:-:6584b07e9c	1	guards/name_lookup_guard.cpp:48
 guards/object_replace_guard.cpp:-:cbbda2a23e	1	guards/object_replace_guard.cpp:52
@@ -114,7 +118,7 @@ npcs/cell_buffer.cpp:kGridEntry:7c56bf9579	1	npcs/cell_buffer.cpp:85
 npcs/cell_buffer.cpp:kGridRest:d3e173cd05	1	npcs/cell_buffer.cpp:86
 npcs/cell_buffer.cpp:kGridFlags:b9be2fb127	1	npcs/cell_buffer.cpp:90
 npcs/cell_buffer.cpp:kWriteSetting:324fc2d201	1	npcs/cell_buffer.cpp:95
-npcs/cell_buffer.cpp:-:fdc87a1a7c	9+	npcs/cell_buffer.cpp:354
+npcs/cell_buffer.cpp:-:fdc87a1a7c	9+	npcs/cell_buffer.cpp:357
 npcs/cloth_register.cpp:kExecRecreate:9d9a8c52df	9+	npcs/cloth_register.cpp:83
 npcs/cloth_register.cpp:kExecSuspended:dedcb59d9c	9+	npcs/cloth_register.cpp:87
 npcs/cloth_register.cpp:kExecEnabled:bb36e68efa	9+	npcs/cloth_register.cpp:90
@@ -278,15 +282,18 @@ render/parallel_translate.cpp:kRdgPattern:008befe82f	1	render/parallel_translate
 render/parallel_translate.cpp:kGetTotalSizePattern:7a94e42f18	9+	render/parallel_translate.cpp:177
 render/parallel_translate.cpp:kOpenPattern:f5f4bdb1c5	2	render/parallel_translate.cpp:178
 render/parallel_translate.cpp:kRollOverPattern:1925eb68e6	2	render/parallel_translate.cpp:179
-render/rt_build_batch.cpp:kInitRhi:94655abff0	1	render/rt_build_batch.cpp:59
-render/rt_build_batch.cpp:kCreateHead:20dec5ca9b	1	render/rt_build_batch.cpp:62
-render/rt_build_batch.cpp:kCreateRequest:6b1ca4210e	1	render/rt_build_batch.cpp:64
-render/rt_build_batch.cpp:kRequest:8eda822b6c	1	render/rt_build_batch.cpp:68
-render/rt_build_batch.cpp:kRequestNowCode:847cabfb01	1	render/rt_build_batch.cpp:70
-render/rt_build_batch.cpp:kWorldUpdate:c0e03a2d88	1	render/rt_build_batch.cpp:72
-render/rt_build_batch.cpp:kProcess:9e8fd73ce2	1	render/rt_build_batch.cpp:76
-render/rt_build_batch.cpp:kRender:44cd70959b	1	render/rt_build_batch.cpp:78
-render/rt_build_batch.cpp:kRenderCallCode:0f9fd4c99e	9+	render/rt_build_batch.cpp:81
+render/rt_build_batch.cpp:kInitRhi:94655abff0	1	render/rt_build_batch.cpp:68
+render/rt_build_batch.cpp:kCreateHead:20dec5ca9b	1	render/rt_build_batch.cpp:71
+render/rt_build_batch.cpp:kCreateRequest:6b1ca4210e	1	render/rt_build_batch.cpp:73
+render/rt_build_batch.cpp:kRequest:8eda822b6c	1	render/rt_build_batch.cpp:77
+render/rt_build_batch.cpp:kRequestNowCode:847cabfb01	1	render/rt_build_batch.cpp:79
+render/rt_build_batch.cpp:kQueueFree:c02d877996	1	render/rt_build_batch.cpp:81
+render/rt_build_batch.cpp:kQueueAdd:c2be9eda1e	1	render/rt_build_batch.cpp:82
+render/rt_build_batch.cpp:kQueueBits:bba710e28e	6	render/rt_build_batch.cpp:83
+render/rt_build_batch.cpp:kWorldUpdate:c0e03a2d88	1	render/rt_build_batch.cpp:89
+render/rt_build_batch.cpp:kProcess:9e8fd73ce2	1	render/rt_build_batch.cpp:93
+render/rt_build_batch.cpp:kRender:44cd70959b	1	render/rt_build_batch.cpp:95
+render/rt_build_batch.cpp:kRenderCallCode:0f9fd4c99e	9+	render/rt_build_batch.cpp:98
 render/submit_batch.cpp:kSubmitListsPattern:661eb46a6d	1	render/submit_batch.cpp:44
 render/submit_batch.cpp:kMergeGatePattern:9b70cd1855	1	render/submit_batch.cpp:49
 render/submit_batch.cpp:kMergeLoopPattern:f98b737d3b	1	render/submit_batch.cpp:52
@@ -314,7 +321,7 @@ render/water_info.cpp:-:32a8e027d3	1	render/water_info.cpp:100
 render/water_info.cpp:-:4f81b97465	1	render/water_info.cpp:102
 render/water_info.cpp:-:3829271a3c	1	render/water_info.cpp:116
 render/water_info.cpp:-:1ec951c3da	1	render/water_info.cpp:123
-render/water_info.cpp:-:2e8938f66a	0	render/water_info.cpp:942
+render/water_info.cpp:-:2e8938f66a	0	render/water_info.cpp:946
 saves/save_bytes.cpp:kArraySerialize:13e5d83e4b	1	saves/save_bytes.cpp:47
 saves/save_bytes.cpp:kByteSerialize:715a3342fa	1	saves/save_bytes.cpp:54
 saves/save_bytes.cpp:kSaveToMemory:30faba09a0	1	saves/save_bytes.cpp:58

@@ -490,6 +490,20 @@ uint32_t FakeQuery(void** ctx, void* desc)
     return 0;
 }
 uint32_t FakeQueryFails(void**, void*) { return 2; }
+// the same query answered like a provider inside AMD's DLL (bit 31 of the id clear)
+uint32_t FakeQueryDll(void** ctx, void* desc)
+{
+    queryCtx = *ctx;
+    auto* d = static_cast<uint8_t*>(desc);
+    memcpy(&queryType, d, 8);
+    if (queryType != 6) return 1;
+    const uint64_t id = 0xF600000000401007ull;
+    static const char name[] = "3.1.7";
+    const char* p = name;
+    memcpy(d + 16, &id, 8);
+    memcpy(d + 24, &p, 8);
+    return 0;
+}
 }  // namespace fgp
 
 static void Check(bool ok, const char* what)
@@ -3890,6 +3904,42 @@ int wmain(int argc, wchar_t** argv)
                                                              0x00020002);
         Check(failed == "?" && queryType == 0 && other == "?",
               "frame generation provider: no answer = '?', other context types are not asked");
+
+        // By provider (1.2.2): with 1, Adrenalin's driver swap chain (provider id bit 31) keeps its own pacing; 3 = Set B
+        // on every swap chain (1.2.1's 1); 2 = Set A everywhere. AMD's DLL swap chains get Set B with 1 as before.
+        const auto run = [&](int mode) {
+            return FrameGenPacingTestRun(reinterpret_cast<void*>(&FakeCreate), reinterpret_cast<void*>(&FakeDestroy),
+                                         reinterpret_cast<void*>(&FakeConfigure), true, mode, &ctx);
+        };
+        calls = 0;
+        FrameGenPacingTestQuery(reinterpret_cast<void*>(&FakeQuery));  // the driver's provider
+        Check(run(1) && calls == 0 && FrameGenPacingTestApplied() == 0,
+              "frame generation pacing by provider: 1 on Adrenalin's driver swap chain (id bit 31) = its own pacing, not configured");
+        FrameGenPacingTestSwitch(3);
+        Check(calls == 1 && Near(margin, 0.01f) && Near(variance, 0.3f) && FrameGenPacingTestApplied() == 1,
+              "frame generation pacing by provider: 3 = Set B on the driver's swap chain too");
+        FrameGenPacingTestSwitch(1);
+        Check(calls == 2 && Near(margin, 0.1f) && Near(variance, 0.1f) && FrameGenPacingTestApplied() == 0,
+              "frame generation pacing by provider: back to 1 live on the driver's swap chain = AMD's defaults (its own pacing)");
+        FrameGenPacingTestSwitch(2);
+        Check(calls == 3 && Near(margin, 0.75f) && Near(variance, 0.1f) && FrameGenPacingTestApplied() == 2,
+              "frame generation pacing by provider: 2 = Set A on the driver's swap chain too");
+        FrameGenPacingTestDestroy(ctx);
+        FrameGenPacingTestSwitch(0);
+        FrameGenPacingTestQuery(reinterpret_cast<void*>(&FakeQueryDll));  // a provider inside AMD's DLL
+        Check(run(1) && calls == 4 && Near(margin, 0.01f) && Near(variance, 0.3f) && FrameGenPacingTestApplied() == 1,
+              "frame generation pacing by provider: 1 on AMD's DLL swap chain (id bit 31 clear) = Set B");
+        FrameGenPacingTestSwitch(3);
+        Check(calls == 4 && FrameGenPacingTestApplied() == 1,
+              "frame generation pacing by provider: 3 on AMD's DLL swap chain = the same Set B, not configured again");
+        FrameGenPacingTestDestroy(ctx);
+        FrameGenPacingTestSwitch(0);
+        FrameGenPacingTestQuery(reinterpret_cast<void*>(&FakeQueryFails));  // no answer: not the driver's
+        Check(run(1) && calls == 5 && FrameGenPacingTestApplied() == 1,
+              "frame generation pacing by provider: no provider answer = AMD's DLL swap chain, Set B");
+        FrameGenPacingTestDestroy(ctx);
+        FrameGenPacingTestSwitch(0);
+        FrameGenPacingTestQuery(nullptr);
 
         // The call order AMD's ML frame generation requires: per frameID configure -> prepare -> generate. Frames 1-3
         // pipelined as the game does (the generation of frame N at present, after frame N+1's configure and prepare).

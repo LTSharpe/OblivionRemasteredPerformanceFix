@@ -15,8 +15,15 @@
 // has the key (SDK 1.1.3+, FidelityFX-SDK FrameInterpolationSwapchainDX12.cpp): AMD's FSR 3.1.4 DLL (1.0.1.41314) or
 // the SDK 2.x loader (swap chain 3.1.7), told apart by the DLL's version resource (DescribeFsrLibrary); with the game's
 // own FSR 3.1.0 library (whose Configure ignores the key) it does nothing. Mode 0 = the game's pacing (not configured; switched back live: AMD's defaults 0.1 ms / 0.1),
-// 1 = Set B, 2 = Set A. allowHybridSpin false, hybridSpinTime 2, allowWaitForSingleObjectOnFence false (AMD's defaults).
-// What is drawn does not change; only when the presents go out.
+// 1 = Set B on AMD's DLL swap chains (3.1.4, SDK 2.x 3.1.7) and Adrenalin's driver swap chain left at its own pacing,
+// 2 = Set A everywhere, 3 = Set B everywhere (what 1 did up to 1.2.1). allowHybridSpin false, hybridSpinTime 2,
+// allowWaitForSingleObjectOnFence false (AMD's defaults). What is drawn does not change; only when the presents go out.
+//
+// Why 1 leaves the driver's swap chain alone (measured 2026-10-26, Adrenalin's FG 4.0.2 / swap chain 4.0.0, 4K, cap 60,
+// hidden runs, ABBA in one held game): the driver's swap chain takes the key, and Set B there gives slightly smoother game
+// frames but less even shown frames (presented gaps > 25 ms about twice as many per flight, frame-to-frame timing error
+// +40 %); unconfigured it paces like AMD's defaults. On AMD's DLL swap chains Set B is what removed the long slow-downs
+// after heavy moments (2026-10-14). Which swap chain it is comes from the provider query below (id bit 31 = the driver's).
 //
 // The same ffxCreateContext redirection also asks each new context which provider runs it (ffxQuery with
 // FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION, SDK 1.1.4+; the 3.1.0 library would hand the query to the provider
@@ -81,7 +88,9 @@ std::atomic<QueryFn> g_query{nullptr};
 uint8_t* g_library = nullptr;
 SRWLOCK g_lock = SRWLOCK_INIT;   // the remembered context vs ffxDestroyContext and the live switch
 void* g_context = nullptr;       // the frame generation swap chain context (ffxContext), under g_lock
-int g_applied = 0;               // the mode last configured on it (0 = not configured, the game's pacing)
+int g_applied = 0;               // the tuning set last configured on it (0 = not configured, the game's pacing)
+bool g_driverChain = false;      // under g_lock: the remembered context is Adrenalin's driver swap chain (provider id bit 31)
+bool g_driverLogged = false;     // under g_lock: "kept the driver's own pacing" logged for this context
 std::atomic<int> g_mode{0};
 std::atomic<bool> g_unsupportedLogged{false};
 std::atomic<uint64_t> s_contexts{0}, s_configured{0}, s_failed{0}, s_providerLines{0};
@@ -122,12 +131,13 @@ const char* ContextKind(uint64_t type)
     }
 }
 
-// Logs which provider runs a context the game just created (upscaling, frame generation, its swap chain).
-void LogProvider(void* context, uint64_t type)
+// Logs which provider runs a context the game just created (upscaling, frame generation, its swap chain); true if it
+// is one of Adrenalin's driver providers (id bit 31). No answer (or a library without the query) = not the driver's.
+bool LogProvider(void* context, uint64_t type)
 {
     const char* kind = ContextKind(type);
     const QueryFn query = g_query.load();
-    if (!kind || !query || !context || !(g_supported ? g_supported() : LibraryInfo().providerQuery)) return;
+    if (!kind || !query || !context || !(g_supported ? g_supported() : LibraryInfo().providerQuery)) return false;
     ProviderVersionDesc q{};
     q.header.type = kTypeProviderVersion;
     void* ctx = context;
@@ -141,28 +151,48 @@ void LogProvider(void* context, uint64_t type)
         strcpy_s(type == kTypeFrameGen ? g_providerFg : g_providerUpscale, sizeof g_providerFg, name);
         ReleaseSRWLockExclusive(&g_infoLock);
     }
-    if (s_providerLines.fetch_add(1, std::memory_order_relaxed) >= 32) return;  // contexts come back on resolution changes
+    if (s_providerLines.fetch_add(1, std::memory_order_relaxed) >= 32) return driver;  // contexts come back on resolution changes
     if (ok)
         Log("[fgpace] %s context created: provider %s, id 0x%016llX (%s)", kind, q.versionName,
             static_cast<unsigned long long>(q.versionId), driver ? "Adrenalin's driver provider" : "inside AMD's DLL");
     else
         Log("[fgpace] %s context created: provider query returned %u (no answer)", kind, r);
+    return driver;
 }
 
-constexpr int kMaxMode = 2;
-PacingTuning TuningFor(int mode)
+constexpr int kMaxMode = 3;
+// Tuning sets (what g_applied holds): 0 = AMD's defaults / not configured, 1 = Set B, 2 = Set A, lab 4 = between them.
+PacingTuning TuningFor(int set)
 {
     PacingTuning t{0.1f, 0.1f, false, 2, false};  // AMD's defaults (= the game's pacing)
-    if (mode == 1) { t.safetyMarginInMs = 0.01f; t.varianceFactor = 0.3f; }   // Tuning Set B
-    if (mode == 2) { t.safetyMarginInMs = 0.75f; t.varianceFactor = 0.1f; }   // Tuning Set A
+    if (set == 1) { t.safetyMarginInMs = 0.01f; t.varianceFactor = 0.3f; }   // Tuning Set B
+    if (set == 2) { t.safetyMarginInMs = 0.75f; t.varianceFactor = 0.1f; }   // Tuning Set A
     return t;
 }
-const char* ModeName(int mode) { return mode == 3 ? "lab middle (0.5 ms, 0.2)" : mode == 1 ? "Set B (0.01 ms, 0.3)" : mode == 2 ? "Set A (0.75 ms, 0.1)" : "AMD's defaults (0.1 ms, 0.1)"; }
+const char* ModeName(int set) { return set == 4 ? "lab middle (0.5 ms, 0.2)" : set == 1 ? "Set B (0.01 ms, 0.3)" : set == 2 ? "Set A (0.75 ms, 0.1)" : "AMD's defaults (0.1 ms, 0.1)"; }
+// The key's value -> the tuning set for this swap chain: 1 = Set B except on Adrenalin's driver swap chain (its own
+// pacing), 3 = Set B on every swap chain (1.2.1's 1); 0 and 2 (and lab 4) the same everywhere.
+int TuningSetFor(int mode, bool driverChain)
+{
+    if (mode == 1) return driverChain ? 0 : 1;
+    if (mode == 3) return 1;
+    return mode;
+}
 
 // Under g_lock (exclusive). Configures the remembered context for `mode` if it differs from what it has.
 void ApplyLocked(int mode)
 {
-    if (!g_context || g_applied == mode) return;
+    if (!g_context) return;
+    const int set = TuningSetFor(mode, g_driverChain);
+    const bool keptForDriver = mode == 1 && g_driverChain;
+    if (g_applied == set) {
+        if (keptForDriver && !g_driverLogged) {
+            g_driverLogged = true;
+            Log("[fgpace] the frame generation swap chain is Adrenalin's driver's: its own pacing is kept (FrameGenPacingTuning=1 "
+                "sets Set B only on AMD's DLL swap chains; 3 = Set B here too)");
+        }
+        return;
+    }
     const ConfigureFn configure = g_configure.load();
     if (!configure) return;
     if (!SdkSupportsTuning()) {
@@ -171,7 +201,7 @@ void ApplyLocked(int mode)
                 g_supported ? "this library" : LibraryInfo().name);
         return;
     }
-    PacingTuning t = TuningFor(mode);
+    PacingTuning t = TuningFor(set);
     KeyValueDesc d{};
     d.header.type = kTypeKeyValue;
     d.key = kKeyFramePacingTuning;
@@ -179,13 +209,14 @@ void ApplyLocked(int mode)
     void* ctx = g_context;
     const uint32_t r = configure(&ctx, &d.header);
     if (r == 0) {
-        g_applied = mode;
+        g_applied = set;
         s_configured.fetch_add(1, std::memory_order_relaxed);
+        if (keptForDriver) g_driverLogged = true;
     } else {
         s_failed.fetch_add(1, std::memory_order_relaxed);
     }
-    Log("[fgpace] frame generation swap chain pacing set to %s: ffxConfigure returned %u%s", ModeName(mode), r,
-        r ? " (left as it was)" : "");
+    Log("[fgpace] frame generation swap chain pacing set to %s%s: ffxConfigure returned %u%s", ModeName(set),
+        keptForDriver ? " = Adrenalin's driver swap chain's own pacing (FrameGenPacingTuning=1)" : "", r, r ? " (left as it was)" : "");
 }
 
 
@@ -194,12 +225,14 @@ uint32_t CreateHook(void** context, ApiHeader* desc, const void* memCb)
     const uint64_t type = desc ? desc->type : 0;
     const bool swapChain = type == kTypeSwapWrap || type == kTypeSwapNew || type == kTypeSwapHwnd;
     const uint32_t r = g_create.load()(context, desc, memCb);
-    if (r == 0 && context && *context) LogProvider(*context, type);
+    const bool driver = r == 0 && context && *context && LogProvider(*context, type);
     if (r != 0 || !swapChain || !context || !*context) return r;
     s_contexts.fetch_add(1, std::memory_order_relaxed);
     AcquireSRWLockExclusive(&g_lock);
     g_context = *context;
     g_applied = 0;
+    g_driverChain = driver;
+    g_driverLogged = false;
     const int mode = g_mode.load();
     Log("[fgpace] frame generation swap chain context created (desc type 0x%llX)%s", static_cast<unsigned long long>(type),
         mode ? "" : "; pacing left as the game has it (FrameGenPacingTuning=0)");
@@ -214,6 +247,7 @@ uint32_t DestroyHook(void** context, const void* memCb)
     if (context && *context && *context == g_context) {
         g_context = nullptr;
         g_applied = 0;
+        g_driverChain = false;
     }
     const uint32_t r = g_destroy.load()(context, memCb);
     ReleaseSRWLockExclusive(&g_lock);
@@ -445,7 +479,10 @@ bool ApplyFrameGenPacingTuning(bool beforeGameCode, int mode)
         return false;
     }
     Log("[fgpace] frame generation pacing tuning: waiting for amd_fidelityfx_dx12.dll (mode %d: %s)", mode,
-        mode ? ModeName(mode) : "the game's pacing until switched");
+        mode == 1   ? "Set B (0.01 ms, 0.3); the driver swap chain keeps its own pacing"
+        : mode == 3 ? "Set B (0.01 ms, 0.3) on every swap chain"
+        : mode      ? ModeName(mode)
+                    : "the game's pacing until switched");
     return true;
 }
 
@@ -485,8 +522,11 @@ void LogFrameGenPacingStats()
         snprintf(providers, sizeof providers, "; providers: frame generation %s, upscaling %s", g_providerFg[0] ? g_providerFg : "?",
                  g_providerUpscale[0] ? g_providerUpscale : "?");
     ReleaseSRWLockShared(&g_infoLock);
+    AcquireSRWLockShared(&g_lock);
+    const char* now = g_applied == 0 && g_driverChain ? "the driver swap chain's own pacing" : ModeName(g_applied);
+    ReleaseSRWLockShared(&g_lock);
     Log("[fgpace] swap chain contexts %llu, configured %llu, failed %llu; now %s%s", static_cast<unsigned long long>(s_contexts.load()),
-        static_cast<unsigned long long>(s_configured.load()), static_cast<unsigned long long>(s_failed.load()), ModeName(g_applied),
+        static_cast<unsigned long long>(s_configured.load()), static_cast<unsigned long long>(s_failed.load()), now,
         providers);
 }
 
@@ -509,6 +549,7 @@ bool FrameGenPacingTestRun(void* fakeCreate, void* fakeDestroy, void* fakeConfig
     return r == 0;
 }
 void FrameGenPacingTestSwitch(int mode) { SetFrameGenPacingTuning(mode); }
+void FrameGenPacingTestQuery(void* fakeQuery) { g_query = reinterpret_cast<QueryFn>(fakeQuery); }  // nullptr = no query
 void FrameGenPacingTestDestroy(void* context) { DestroyHook(&context, nullptr); }
 // self-test: a context of `type` created through the hook with `fakeQuery` as ffxQuery; returns the frame generation
 // provider the stats line would name ("" if none)

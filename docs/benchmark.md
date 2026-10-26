@@ -61,7 +61,8 @@ tools\Bench-Report.ps1
 
 `Bench-Report.ps1` runs the benchmark alternately with every fix switched off ("stock": the DLL loaded with all its
 switches at 0, so it leaves the game's code alone, except `FrameRateLimitAtStart`, which only makes the game apply the
-frame-rate limit you saved, a game bug with frame generation on: so both sides run at your saved cap) and with the fix
+frame-rate limit you saved, a game bug with frame generation on, where it can (FSR frame generation without NVIDIA
+Reflex): so both sides run at the same cap) and with the fix
 as installed, then writes `report.md` and copies of
 the runs' `result.json` with your user name, PC name and folder paths removed. Share it in a
 [Benchmark result](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/new/choose) issue.
@@ -196,6 +197,23 @@ settings in effect and `OblivionPerfFix.log`), frame logs, screenshots and frame
 - **The first 2-3 minutes after a game start are slower** (the game compiles graphics pipelines in the background);
   the runner waits for that before measuring.
 - **Frame generation:** frame times are presented frames, generated ones included.
+
+### What a slow frame was doing: stack timelines (`-Stacks`)
+To see which code runs during a hitch, sample the threads' call stacks with time stamps on PresentMon's clock and join
+them with the slow frames afterwards:
+```powershell
+tools\Run-Benchmark.ps1 -Label st -Scenes inn-door -Pass perf -Stacks GameThread,OblivionThread
+tools\Analyze-Hitch.ps1 -Run st -Segment inn-door/exit -MinMs 50      # per slow frame: what each sampled thread was in
+tools\Sample-Timeline.ps1 -OutPrefix captures\t1 -Seconds 10          # the sampler alone, on a running game
+```
+- `-Stacks <threads>` samples those threads during door legs, flights and walks into `stacks\<scene>-timeline.csv`
+  (time, thread, stack index) and `stacks\<scene>-stacks.txt` (one collapsed stack per line, root first, frames as
+  `module+0xFUNCSTART`). Thread names may use wildcards (`'*Worker*'`).
+- `-StackSampler fast -StackIntervalMs 2` uses `tools\FastSampler.cs` (its own x64 unwinder, ~30 us per thread sample)
+  instead of dbghelp (`tools\StackSampler.cs`, ~1 ms or more), so the workers can be sampled too.
+- Sampling suspends each thread for a moment: a `-Stacks` run's fps and frame times are not comparable with other runs.
+- `Analyze-Hitch.ps1` names functions from `tools\symbols.csv` (`rva,name,note`) when that file is there; without it the
+  frames stay `exe+0x...`.
 
 ## Troubleshooting
 | You see | Do |

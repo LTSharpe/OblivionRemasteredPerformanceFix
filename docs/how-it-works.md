@@ -19,7 +19,7 @@ are built a few frames later (`NpcCreationPacing`), and the cells behind you are
 Every fix has a switch in `OblivionPerfFix.ini` (the name in brackets after each heading), all on by default in 1.0.0-beta, and the
 DLL turns a fix off by itself if it can't find the exact code it expects (for example after a game update). The fixes
 are grouped by what they help with. `RdgParallelTranslate=2` selects automatically (off on cards under 9.5 GB);
-`FrameGenPacingTuning=1` selects Tuning Set B. `HitchLedger` is a diagnostic and is off by default. The evidence for every
+`FrameGenPacingTuning=1` selects Tuning Set B (except on Adrenalin's own swap chain, see that section). `HitchLedger` is a diagnostic and is off by default. The evidence for every
 measurement below, and the ideas we tested and rejected, are in [research.md](research.md).
 
 The test PC's own play settings are 4K, FSR Performance, frame generation, a 60 fps cap, hardware ray tracing and
@@ -1333,8 +1333,14 @@ switched while the game runs. The same hook also writes into the log which versi
 generation (AMD's own query, with the 3.1.4 DLL), so the log shows whether the driver's ML frame
 generation is in use.
 
-**Why the image can't change.** Nothing that is drawn; only when the frames are shown. `FrameGenPacingTuning=1` selects Set B by default;
-`FrameGenPacingTuning=0` selects the game's own pacing.
+**Adrenalin's own swap chain (since 1.2.2).** Recent AMD drivers can run the frame generation swap chain themselves; the
+log names it "Adrenalin's driver provider" (AMD's provider query, id bit 31). There Set B made the shown frames less
+even in our tests (about twice as many gaps over 25 ms, 40 % more frame-to-frame timing error), while the driver's own
+pacing kept them even, so `FrameGenPacingTuning=1` leaves that swap chain at its own pacing and sets Set B only on AMD's
+DLL swap chains. `FrameGenPacingTuning=3` sets Set B on every swap chain (what 1 did up to 1.2.1).
+
+**Why the image can't change.** Nothing that is drawn; only when the frames are shown. `FrameGenPacingTuning=1` selects Set B by default
+(not on Adrenalin's own swap chain); `FrameGenPacingTuning=0` selects the game's own pacing.
 
 **Measured (2026-10-14, 4K, FSR Performance, ML frame generation with the SDK 2.3.0 DLLs, 60 fps cap, Kvatch walls
 flight, two games, the key switched while running):** below the walls (spot C) the rendered frame rate stayed at
@@ -1478,7 +1484,7 @@ with exactly the recorded crash; with the guard it carried on, and the log count
 
 [Evidence](research.md#havokpickwarningguard).
 
-**The problem.** A freeze in the game's own code, not a slowdown. The old engine counts the "picks" it asks its physics for every frame: the short rays and shape casts that path finding, line of sight and the view caster use. It allows 40 a frame (the `iMaxPicks` setting; any more are skipped that frame, with "nothing hit"). At the end of its physics update, when the count went past 40, it formats a leftover debug message, "42 Havok picks (6 path, 36 LOS, 0 ViewCaster) used this frame.", and shows it as a Windows message box on its own thread. That thread waits for the box to be closed, the main thread waits for that thread at its next frame, and the whole game stands still, often behind its own full-screen window, until someone finds the box. It happens in fights with many characters; our battle benchmark lost 2 of 10 runs to it.
+**The problem.** A freeze in the game's own code, not a slowdown. The old engine counts the "picks" it asks its physics for every frame: the short rays and shape casts that path finding, line of sight and the view caster use. It allows 40 a frame (the `iMaxPicks` setting; any more are skipped that frame, with "nothing hit"). At the end of its physics update, when the count went past 40, it formats a leftover debug message, "42 Havok picks (6 path, 36 LOS, 0 ViewCaster) used this frame.", and shows it as a Windows message box on its own thread. That thread waits for the box to be closed, the main thread waits for that thread at its next frame, and the whole game stands still, often behind its own full-screen window, until someone finds the box. It happens in fights with many characters; in our own battle tests it stopped 3 of about 14 runs on one day.
 
 *Analogy:* a kitchen whose head cook stops the whole service to walk out and tell the manager "we skipped a few orders this minute", and waits by the manager's door until told "noted".
 
@@ -1577,6 +1583,11 @@ Either way the game runs at native resolution without frame generation until you
 *Analogy:* a thermostat that is set back to "off" every morning because the heating switch is flipped after the dial is set; looking at the dial puts it right again.
 
 **What we did.** Right after that first switch at start-up (and only if no menu is open), the DLL applies your saved Frame Rate Limit once, through the same setting and in the same way as opening the Graphics page does. Later switches of frame generation (in the settings) are left to the game. Your saved settings are not changed.
+
+Since 1.2.2 it does this only with FSR frame generation on AMD and Intel graphics cards, the case we measured. With DLSS
+frame generation, and on NVIDIA cards (where the switch can also turn NVIDIA Reflex on), the limit is no longer a pause in
+the engine but goes to Reflex's own frame limiter, which we could not test; players with DLSS frame generation reported a
+much lower frame rate with the key on. There it is left to the game, as without the DLL.
 
 **Why the game can't change.** It only puts in effect what your settings already say and what the game shows; the game reaches the same state as soon as you open the Graphics page. It works on both routes (`version.dll` and OBSE64).
 

@@ -11,7 +11,7 @@
 #include <string_view>
 #include <vector>
 
-#define OPF_VERSION "1.2.1"
+#define OPF_VERSION "1.2.2"
 
 namespace opf {
 
@@ -98,7 +98,7 @@ struct Config {
                                        // wait; only 0 is the game's code). PsoCompileThreadPool keeps it at 1.
     bool frameGenAsyncCompute = true;  // FrameGenAsyncCompute: r.FidelityFX.FI.AllowAsyncWorkloads 1 at start-up (frame generation on its own GPU queue)
     bool frameGenCameraInfo = true;   // FrameGenCameraInfo: the camera desc for AMD's ML frame generation (SDK 2.x DLLs)
-    int frameGenPacingTuning = 1;      // FrameGenPacingTuning: AMD's FG present pacing tuning (FSR 3.1.4 or SDK 2.x DLLs): 0 game's, 1 Set B, 2 Set A (1)
+    int frameGenPacingTuning = 1;      // FrameGenPacingTuning: AMD's FG present pacing tuning (FSR 3.1.4 or SDK 2.x DLLs): 0 game's, 1 Set B but the driver's own swap chain left alone, 2 Set A, 3 Set B everywhere (1)
     bool displayModeCache = true;      // DisplayModeCache: GetMonitorsInfo reads each monitor's mode list once (checked each time)
     bool screenshotFilterFast = true;  // MenuScreenshotFilter: the menu's same-size ImageResize of its screenshot, same bytes in SSE2
     int screenshotReadbackConvert = 1; // ScreenshotReadbackConvert: the screenshot readback's R10G10B10A2 -> FColor conversion in SSE2 (identical
@@ -170,8 +170,8 @@ struct Config {
                                        // ClusterPageData starts with that many root pages (3072: +32 MiB of video memory)
     int frameRateLimitAtStart = 1;     // FrameRateLimitAtStart: framegen/frame_cap_start.cpp (game bug): with frame generation on at
                                        // start-up, the saved Frame Rate Limit applied once after the game's switch zeroed it, as the
-                                       // Graphics page does (1; lab: 2 = only logged; the public build reads 2 as 1); start-up
-                                       // install when != 0, 0 off
+                                       // Graphics page does; since 1.2.2 only after FSR's switch on AMD/Intel GPUs (1; lab: 2 =
+                                       // only logged; the public build reads 2 as 1); start-up install when != 0, 0 off
     int navLinkFast = 1;               // NavLinkFast: streaming/nav_link_fast.cpp, a streamed navmesh tile's border links with less
                                        // searching (calls that cannot make a link left out; the search looks only at the
                                        // neighbour's polygons with a border edge on that side; same links): 1 on (lab: 2 on +
@@ -258,7 +258,9 @@ bool FindFrameCapStart();
 bool InstallFrameCapStart(bool beforeGameCode, int mode);  // start-up only (version.dll and OBSE64 routes, while T's state is off)
 bool FrameCapStartTestPatched();                           // self-test: T's entry jump and trampoline
 bool FrameCapStartTestRun(void* fakeOrig, void* fakeGetter, void* fakeHash, void* fakeFind, void* fakeSet, const void* name,
-                          const uint8_t* state, int menu, int mode, bool on, bool reset);  // self-test: one hook call with fakes
+                          const uint8_t* state, int menu, int mode, bool on, bool reset, int caller, const uint8_t* reflex,
+                          int32_t* const* valueSlot, const uint32_t* vendor);  // self-test: one hook call with fakes (caller 1 = FSR's sink)
+const uint32_t* FrameCapStartTestVendor();                 // self-test: GRHIVendorId as found through T's vendor check
 // ---- streaming/nanite_stream_buffers.cpp (NaniteInitialRootPages; the probe and minimums are lab-only) ----
 bool FindNaniteStreamBuffers();                   // ProcessNewResources' three resizes (the root-page variable is checked against it)
 int32_t* FindNaniteRootPagesVar();                // r.Nanite.Streaming.NumInitialRootPages' value (nullptr if not found)
@@ -656,6 +658,7 @@ struct FrameGenCameraInfoOut {
     uint64_t attached = 0, rejected = 0, prepares = 0, withCamera = 0, withOurs = 0;
 };
 bool FrameGenCameraInfoTestInfo(FrameGenCameraInfoOut* out);
+bool FrameGenLastCamera(float pos[3], float fwd[3], uint64_t maxAgeMs);  // the last FG view's camera (FrameGenCameraInfo)
 void FrameGenCameraInfoTestAttach(const void* view, void* desc);  // self-test: what the stub calls
 // self-test: redirects the module's ffxDispatch export to the counter (once) and swaps in `original` as the function
 // it passes calls to; returns the previous one (nullptr if the export could not be redirected)
@@ -666,6 +669,7 @@ void SetFrameGenPacingTuning(int mode);                          // switchable l
 void LogFrameGenPacingStats();
 bool FrameGenPacingTestRun(void* fakeCreate, void* fakeDestroy, void* fakeConfigure, bool supported, int mode, void** outContext);
 void FrameGenPacingTestSwitch(int mode);
+void FrameGenPacingTestQuery(void* fakeQuery);  // self-test: ffxQuery for the next contexts (nullptr = none)
 void FrameGenPacingTestDestroy(void* context);
 int FrameGenPacingTestApplied();
 const char* FrameGenPacingTestProvider(void* fakeCreate, void* fakeQuery, uint64_t type);

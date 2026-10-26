@@ -1285,6 +1285,17 @@ little more even (95th percentile 11.0 against 11.7-11.9 ms). The one difference
 rendered frame of 33 ms or more, as often with and without) more often shows as one longer gap instead of being
 spread over a few frames, about five more gaps over 25 ms in a two-minute flight.
 
+**With Adrenalin's own swap chain (2026-10-26, driver FG 4.0.2 / swap chain 4.0.0 / upscaler 4.1.2, all the driver's;
+4K, FSR Performance, frame generation, RT mode 3, 60 fps cap; hidden runs, the key switched live in held games, ABBA;
+`rumare-loop-flight` and `kvatch-walls`):** the driver's swap chain accepts the key, and left unconfigured it paces like
+AMD's defaults. Set B there: game-thread frames over 17.5 ms 16.0-16.5 % against 18.1-19.2 %, the game's present
+blocked less (95th percentile about 5 against 10 ms), rendered frame rate +1-1.5 %; but the shown frames less even:
+present gaps over 16.7 ms 127-146 against 85-104 per flight, over 25 ms 21-28 against 11-15, frame-to-frame timing error
+(present step minus content step) +40 % on the Imperial City flight and +22 % on the Kvatch walls. The Kvatch spot C
+slow-down that Set B was chosen for did not arise in a warm world. Since 1.2.2, `FrameGenPacingTuning=1` therefore
+leaves the driver's swap chain (provider id bit 31) at its own pacing and sets Set B only on AMD's DLL swap chains;
+`3` sets Set B everywhere.
+
 <a id="framegencamerainfo"></a>
 
 ### The camera for AMD's ML frame generation (`FrameGenCameraInfo`)
@@ -1567,6 +1578,24 @@ Game bugs (they also happen without OblivionPerfFix). Bugs in our own fixes are 
 - **Result:** with the fix, `t.MaxFPS` was 60 from the first sample through the main menu and the world; a Graphics page
   visit changed nothing; frame generation off: 60; on again in play: 0, as stock (left to the game; the next page visit
   restores it).
+- **Narrowed in 1.2.2 (2026-10-26, worker framecap2; findings "2026-10-26 (worker framecap2)"):** two players with NVIDIA
+  DLSS frame generation reported a much lower frame rate with the key on (120 cap -> ~29 fps; 90 -> 50-60), normal with
+  it off. From the exe: the DLSS sinks (exe+0x495F160 / 0x495EF90) are per-frame console-variable sinks like FSR's and
+  only check that the mode is a valid `UStreamlineDLSSGMode` value, so the start-up T(on) and the lost cap happen with
+  DLSS too. T(on) also sets `Altar.Reflex.Mode` 2 when its Reflex flag (exe+0x930A86C: hardware GPU scheduling on,
+  GRHIVendorId 0x10DE, Reflex available; so always 0 on AMD) is set, and with Reflex on, Streamline's MaxTickRateHandler (exe+0x44C2C00, `t.Streamline.Reflex.HandleMaxTickRate`
+  default 1) takes `t.MaxFPS` as Reflex's `frameLimitUs` (only on frames faster than the cap) instead of the engine's own
+  sleep. That path, and how NVIDIA's limiter treats it with DLSS frame generation, was never measured (AMD test PC). The
+  fix now acts only when the switch came from FSR's sink (exe+0x495F380, by T's return address), T's Reflex flag is 0 and
+  the limit is still 0; otherwise it logs and leaves it to the game.
+- **And not on NVIDIA (1.2.2, 2026-10-26, worker rel122fix after review rel122review; findings "2026-10-26 (worker
+  rel122fix)"):** the Reflex flag means "T switches Reflex on" (HAGS && NVIDIA && feature), not "Reflex is off": an NVIDIA
+  PC with hardware GPU scheduling off and Reflex on from an old saved `Altar.Reflex.Mode` or Engine.ini would pass that
+  gate. The hook now also leaves it to the game when GRHIVendorId is 0x10DE (or not known, 0), read through the vendor
+  check T itself calls for its flag: T's lazy initialisation block (exe+0x495FC0C, unique pattern; checked to jump back
+  into T and to store into the flag T reads) calls exe+0x265B230 (`cmp GRHIVendorId,0x10DE / sete al / ret`, checked
+  bytes). So the key acts only with FSR frame generation on AMD and Intel GPUs; on NVIDIA it is the stock game. Self-test:
+  the variable found; NVIDIA with flag 0, vendor 0 -> left; Intel -> applied.
 
 <a id="frozenclothstretchfix"></a>
 

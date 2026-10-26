@@ -1,6 +1,6 @@
 {
   "name": "showcase-climb",
-  "description": "Dev-loop cut of showcase (see showcase.json): rumare-loop-flight's waypoints 95-130 only, about 28 s instead of 111 s: north of the stone bridge down the Niben, over the bridge and the climb for the panorama (the full flight's 76.3-104.4 s). It keeps the water-info rebuild spikes at the full flight's 89-93 s and the climb's GPU frame at its 97.6 s (here ~21 s in): one frame of 42-50 ms GPU work inside a CPU-bound half-second of NPC units (2026-10-21). Same hour, timescale, weather, speeds and camera options as the full flight. For tools\\Dev-Loop.ps1 and quick Run-Benchmark -Cvars checks; use showcase for numbers you share.",
+  "description": "Dev-loop cut of showcase (see showcase.json): rumare-loop-flight's waypoints 95-130 only, about 28 s instead of 111 s: north of the stone bridge down the Niben, over the bridge and the climb for the panorama (the full flight's 76.3-104.4 s). It keeps the water-info rebuild spikes at the full flight's 89-93 s and the climb's GPU frame at its 97.6 s (here ~21 s in): one frame of 42-50 ms GPU work inside a CPU-bound half-second of NPC units (2026-10-21). Same hour, timescale, weather, speeds and camera options as the full flight. For quick Run-Benchmark -Cvars checks; use showcase for numbers you share.",
   "settings": {},
   "record": [
     "r.ScreenPercentage",
