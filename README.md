@@ -107,45 +107,72 @@ Every fix has its own switch in `OblivionPerfFix.ini` (1 = on, 0 = off), explain
 ## Optional: AMD ML frame generation (Radeon RX 9000)
 
 The game ships AMD's FSR 3.1.0, whose frame generation is the older, analytical kind. On a **Radeon RX 9000** graphics
-card, AMD's driver can replace it with **AMD's ML (machine-learning) frame generation**, but only for games that use
-FSR 3.1.4 or newer. You can give the game AMD's own, signed FSR 3.1.4 file:
+card, AMD's driver can run **AMD's ML (machine-learning) frame generation** instead, and since Adrenalin 26.10.1 also
+its own, newer frame pacing ("in supported titles with AMD FSR Frame Generation 3.1.6/4.0.0 or newer", AMD,
+[21 Oct 2026](https://www.amdgaming.com/blog-news/89d77bfe-fda6-40b1-93c6-918dc14ee93b)). Both need a newer FSR than the
+game's. You can give the game AMD's current signed files, from the **FSR SDK v2.3.0** (the newest release, June 2026):
 
-1. **Download** `amd_fidelityfx_dx12.dll` from AMD's FidelityFX SDK v1.1.4:
-   [github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/blob/v1.1.4/PrebuiltSignedDLL/amd_fidelityfx_dx12.dll](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/blob/v1.1.4/PrebuiltSignedDLL/amd_fidelityfx_dx12.dll)
-   (click *Download raw file*). 6,675,664 bytes, file version 1.0.1.41314, SHA-256
-   `12A5081257EC95B0B53AD51B4A87FB3C03F97FE0BBB59F9496968F8D50EF93A6`, digitally signed by Advanced Micro Devices
-   (right-click > *Properties* > *Digital Signatures*). It is the file inside the SDK's
-   [v1.1.4 release](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/releases/tag/v1.1.4) (a 470 MB zip), the
-   one AMD publishes for games to ship.
-2. **Back up the game's own file:** in the game folder, go to `OblivionRemastered\Binaries\Win64\` and rename
+1. **Update AMD Software: Adrenalin Edition** to 26.10.1 or newer (ML frame generation arrived with 25.12.1; on our PC
+   the driver started running frame generation's pacing itself with 26.10.1).
+2. **Download three files** from AMD's [FSR SDK v2.3.0](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/releases/tag/v2.3.0)
+   on GitHub (on each page, click *Download raw file*):
+
+   | File | Size, version | SHA-256 |
+   |---|---|---|
+   | [`amd_fidelityfx_loader_dx12.dll`](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/blob/v2.3.0/Kits/FidelityFX/signedbin/amd_fidelityfx_loader_dx12.dll) | 26,376 bytes, 2.3.0.2740 | `E2D85AA05A9BD9ED8B38935FDF5199372CCA6F74C12015143BB6F945EE1608AA` |
+   | [`amd_fidelityfx_framegeneration_dx12.dll`](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/blob/v2.3.0/Kits/FidelityFX/signedbin/amd_fidelityfx_framegeneration_dx12.dll) | 40,085,776 bytes, 4.0.1.2740 | `02297BEEDD285E822D3A64F314CF00FAF378DCEC0EDC47FF0C4DD71B3A8C2F18` |
+   | [`amd_fidelityfx_upscaler_dx12.dll`](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/blob/v2.3.0/Kits/FidelityFX/signedbin/amd_fidelityfx_upscaler_dx12.dll) | 28,761,864 bytes, 4.1.1.2740 | `D0DCCCC74A43C44BA435B7A369B456E0970D8A4464E4BD683119B374F2C9FB46` |
+
+   Each is digitally signed by Advanced Micro Devices (right-click > *Properties* > *Digital Signatures*).
+3. **Back up the game's own file:** in the game folder, go to `OblivionRemastered\Binaries\Win64\` and rename
    `amd_fidelityfx_dx12.dll` to `amd_fidelityfx_dx12.dll.original`.
-3. **Put the downloaded file there** as `amd_fidelityfx_dx12.dll`.
-4. **In AMD Software (Adrenalin)**, open the game's page under *Gaming* and make sure the FSR upgrades (*AMD FSR
-   Upscaling* and *AMD FSR Frame Generation*) are on. With the game's own file, frame generation says *Upgrade
-   Inactive - Enable FSR 3.1.4+ in-game*; with the 3.1.4 file it no longer does. Needs a driver with ML frame generation
-   (it arrived with Adrenalin 25.12.1; tested with 26.9.2).
-5. **In the game**, choose FSR as the upscaler and switch frame generation on.
+4. **Put the files there:** `amd_fidelityfx_loader_dx12.dll` **renamed to `amd_fidelityfx_dx12.dll`** (the game loads
+   that name; AMD documents the loader as interface- and behaviour-compatible with the old file), and the other two
+   under their own names.
+5. **In AMD Software (Adrenalin)**, *Gaming > Graphics*: turn on *AMD FSR Upscaling* and *AMD FSR Frame Generation*
+   (AMD's steps say to do this with the game closed). Leave *AMD Fluid Motion Frames* off for this game: it is the
+   driver's own frame generation, and AMD uses the in-game one *instead of* it where a game has one (we have not tried
+   the two together).
+6. **In the game**, choose FSR as the upscaler and switch frame generation on.
 
-To check it: Adrenalin's in-game overlay shows *AMD FSR Frame Generation: Active*, and `OblivionPerfFix.log` has a line
-like `[fgpace] frame generation context created: provider 4.0.1 *, ... (Adrenalin's driver provider)`.
+**To check it**, look in `OblivionPerfFix.log` after a few minutes of play (the lines below are from our PC):
+- `[fgpace] amd_fidelityfx_dx12.dll is AMD's SDK 2.x loader (file version 2.3.0.2740)`: the new files are in place.
+- `[fgpace] frame generation context created: provider 4.0.2 * ...`: a provider 4.x is ML frame generation (3.x is the
+  analytical kind, which you get on cards without ML frame generation).
+- `[fgpace] frame generation swap chain context created: provider 4.0.0 * ... (Adrenalin's driver provider)`: the
+  driver runs the pacing, and the fix leaves it alone. *(inside AMD's DLL)* there means the driver did not take over
+  (an older driver, or the Adrenalin switch off): ML frame generation then still runs from AMD's file.
+- `[fgcam] camera info linked N times ... AMD's library got N prepare calls, N with camera info`: ML frame generation
+  gets the camera every frame.
 
-- **Why the fix matters here:** ML frame generation also needs the camera's position and direction each frame, which
-  the game's FSR 3.1.0 code never sends; the fix sends it (`FrameGenCameraInfo`), uses AMD's recommended pacing
-  setting for this file (`FrameGenPacingTuning`), and guards a crash that the 3.1.4 file still has
-  (`FrameGenCrashGuard`). Without the fix, ML frame generation runs with the camera at zero.
-- **Improved frame pacing on the latest AMD drivers:** recent Adrenalin drivers (26.10.x) can also run the part of
-  frame generation that decides when each frame is shown (its swap chain). The log then says `frame generation swap
-  chain context created: provider 4.0.0 ... (Adrenalin's driver provider)`. Since 1.2.2 the fix leaves the driver's
-  pacing alone there: in our tests it shows the frames more evenly than AMD's recommended setting (about 30 % less
-  frame-to-frame timing error on the Imperial City flight). With AMD's own file's swap chain the fix still uses the
-  recommended setting. `FrameGenPacingTuning=3` uses it everywhere, as 1.2.1 did; only when frames are shown changes.
-- **Undo:** delete the downloaded file and rename `amd_fidelityfx_dx12.dll.original` back. Steam's *Verify integrity
-  of game files* also restores the original (and so does a game update: put the 3.1.4 file back afterwards).
-- **Other graphics cards:** with an NVIDIA, Intel or older AMD card the 3.1.4 file works like the game's own (FSR 3
-  frame generation); there is no reason to swap it there.
+Adrenalin's own status line is not a reliable check with these files: on an older driver it said *Upgrade Inactive*,
+because the ML frame generation was already in AMD's file.
+
+- **What the fix adds:** ML frame generation needs the camera's position and direction each frame, which the game's FSR
+  3.1.0 code never sends; the fix sends it (`FrameGenCameraInfo`; without it ML frame generation runs with the camera
+  at zero). On the driver's swap chain it keeps the driver's pacing (`FrameGenPacingTuning`, since 1.2.2: in our tests
+  the driver's own pacing showed frames more evenly, about 30 % less frame-to-frame timing error on the Imperial City
+  flight than AMD's recommended setting); on AMD's file's own swap chain it uses AMD's recommended setting.
+  `FrameGenPacingTuning=3` uses it everywhere, as 1.2.1 did; only when frames are shown changes. The frame generation
+  crash guard (`FrameGenCrashGuard`) is for the game's 3.1.0 and AMD's older 3.1.4 file; AMD's SDK 2.x files no longer
+  have that crash, so the log says the guard is not installed there. That is expected.
+- **AMD's older 3.1.4 file** (one `amd_fidelityfx_dx12.dll` from SDK v1.1.4, our earlier advice) also gets ML frame
+  generation from the driver, but AMD names 3.1.6/4.0.0 or newer for the new pacing, and we have not checked what
+  26.10.1 does with 3.1.4. If you used it, replace it with the three files above.
+- **Undo:** delete the two extra files and rename `amd_fidelityfx_dx12.dll.original` back. Steam's *Verify integrity of
+  game files* also restores the game's file (the two extra files are then unused; delete them), and so does a game
+  update: do step 4 again afterwards.
+- **Other graphics cards:** ML frame generation is for the RX 9000 only (AMD). With an NVIDIA, Intel or older AMD card
+  these files fall back to FSR 3.1.6 frame generation and 3.1.5 upscaling (FSR 4.1 upscaling on an RX 7000), which may
+  look a little different from the game's 3.1.0 and which we have not checked: there is no reason to swap them there.
+  Game Pass: not tested.
+- AMD's 26.10.1 notes list a known issue on the RX 9000: a crash or hang when switching apps or opening overlays with
+  in-game FSR frame generation on
+  ([release notes](https://www.amd.com/en/resources/support-articles/release-notes/RN-RAD-WIN-26-10-1.html)). AMD's
+  workaround, V-Sync on in the game, is not available here: the game greys V-Sync out while frame generation is on.
 - We have not measured a frame-rate difference against the game's own frame generation: ML frame generation is about
-  the quality of the generated frames. This is AMD's file and AMD's driver feature: if anything looks wrong, undo it
-  and tell us.
+  the quality of the generated frames, and AMD has not said how its new pacing works. These are AMD's files and AMD's
+  driver features: if anything looks wrong, undo it and tell us.
 
 ## What it does
 
