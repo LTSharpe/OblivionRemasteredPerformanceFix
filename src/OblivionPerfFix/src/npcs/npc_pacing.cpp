@@ -28,6 +28,10 @@
 //     deferred delegate instance (the capture is copied with the type's own copy constructor; the weak pointer is
 //     re-checked by the original when it finally runs) into one global FIFO, replayed at the start of the next frames
 //     and in OnWorldPostActorTick (the pairing manager's end-of-frame call, vtable +0x38, from that handler).
+//     A delegate's actor is its owner (the weak pointer at +0x18) or the first actor among the owner's outers (up to
+//     four objects). An equipment or hair delegate's owner is a smaller object whose word at the actor's root-component
+//     offset can be an invalid pointer: the fault reading it ends the walk, so the unit counts as near and runs
+//     whatever the budget, right after its actor's appearance unit.
 //
 // (c) (PacingFlowWait) Altar runs a "flow" session for each newly loaded level's pre-placed actors at the start
 //     of OnWorldPostActorTick. In the game the main queue is always complete by then (the GT waited for the OT's end
@@ -225,6 +229,21 @@ constexpr size_t kMaxTickRateSlot = 32;
 constexpr uint64_t kSlackMarginUs = 1500;  // kept free below the cap
 
 
+// PacingFadeAware (npcslice 2026-10-20, public since 1.2.3 after npcjitter): UVCharacterFadeInOutComponent's tick
+// (exe+0x48D5A40): every spawned NPC
+// dither-fades in (value 5 -> 0 at 4/s; findings 2026-10-18 "fade value"). From the matched code: the state (+0xD8,
+// 1 = FadeIn), the value (+0xBC), the owner actor (+0xA8), the owner class check (StaticClass call; UE 5.3
+// FStructBaseChain: class +0x30 array / +0x38 depth, object class at +0x10) and the actor's fade component (+0x7A0)
+// whose floor (+0xCC) the tick applies as max(floor, value).
+constexpr char kFadeTick[] =
+    "48 89 5C 24 10 57 48 83 EC 20 48 8B D9 8B 89 ?? ?? 00 00 83 E9 01 0F 84 ?? ?? ?? ?? 83 F9 01 0F 85 ?? ?? ?? ?? "
+    "F3 0F 59 8B ?? ?? 00 00 F3 0F 58 8B ?? ?? 00 00 0F 2F 8B ?? ?? 00 00 F3 0F 11 8B ?? ?? 00 00 72 ?? 48 8D 4B 30 "
+    "C7 83 ?? ?? 00 00 00 00 00 00 33 D2 E8 ?? ?? ?? ?? 48 8B BB ?? ?? 00 00 48 85 FF 0F 84 ?? ?? ?? ?? E8 ?? ?? ?? ?? "
+    "48 8B 57 10 4C 8D 40 30 48 63 40 38 3B 42 38 0F 8F ?? ?? ?? ?? 48 8B C8 48 8B 42 30 4C 39 04 C8 0F 85 ?? ?? ?? ?? "
+    "48 8B 87 ?? ?? 00 00 41 B0 01 48 8B D7 48 8B CB F3 0F 10 98 ?? ?? 00 00";
+constexpr size_t kFadeStateAt = 15, kFadeValueAt = 49, kFadeOwnerAt = 94, kFadeClassCallAt = 107, kFadeCompAt = 153,
+                 kFadeFloorAt = 170;
+
 // ---- types ----
 using RunSessionFn = uint8_t (*)(void* manager, int32_t key);
 using HandlerEndFn = void (*)(void* manager, void* tag, uint64_t a3, uint64_t a4);
@@ -265,6 +284,7 @@ struct Entry {
     uint64_t since;   // frame it was deferred in
     uintptr_t key;    // its actor (0 = unknown)
     bool distant;
+    bool fadeHeld;    // PacingFadeAware: waits because its actor is still invisible in its spawn fade-in
 };
 constexpr size_t kFifoCap = 1024;
 
@@ -275,6 +295,7 @@ struct Stats {
     std::atomic<uint64_t> slackFrames{}, maxBudgetUs{}, frameLogs{};
     std::atomic<uint64_t> flowWaits{}, heldEnds{}, flowDrains{};  // (c): flow calls that waited, frames whose end waited, bound reached
     std::atomic<uint64_t> flowLongWaits{};  // (c) waits past kMaxFlowWait while the queue progressed
+    std::atomic<uint64_t> leanDrains{}, leanKept{};  // PacingLeanFlowDrain: bound drains of the main queue only, delegates kept
     std::atomic<uint64_t> guard[5]{};  // frames not deferring: session, travel, menu/loading, ring, player
 };
 
@@ -371,6 +392,16 @@ struct State {
     uint64_t lastPaceEnd = 0;
     double busyUs = 0;        // decaying max of the GT's busy time per frame without our units
     double capPeriodUs = 0;   // 1 / the engine's max tick rate (0 = uncapped)
+    // PacingFadeAware (public since 1.2.3; lab modes 2 / 3 and PacingFadeMin)
+    std::atomic<int> fadeAware{0};        // 1: far + rendered actors still invisible in their fade-in may wait; lab 2: near ones too
+    std::atomic<int> fadeMinTenths{30};   // ... while max(floor, value) >= this / 10 (5 = invisible, 2 "mostly gone"); lab key only
+    StaticClassFn fadeClass = nullptr;
+    uint32_t fadeState = 0, fadeValue = 0, fadeOwner = 0, fadeComp = 0, fadeFloor = 0;
+    bool fadeFound = false;
+    bool lastFadeHeld = false;           // set by ResolveDelegate
+    std::atomic<uint64_t> fadeHeldUnits{0}, fadeReleased{0};  // per stats interval: units held as fade-hidden, heads released
+                                                              // by the re-check (game thread; read and reset by the monitor)
+    bool (*testRendered)(const void*) = nullptr;   // self-test: fake "recently rendered"
     uint64_t budgetThisFrame = 4000;
     uint64_t frameStartUs = 0;
     int frameTypes[kNumTypes] = {};
@@ -693,6 +724,38 @@ bool FindPlayer(const GameModule& game)
     return true;
 }
 
+// PacingFadeAware: the fade component's layout from its tick (optional; without it the key does nothing and the pacing
+// works as in 1.2.2).
+bool FindFade(const GameModule& game)
+{
+    const auto hits = FindAll(game.text, ParsePattern(kFadeTick));
+    if (hits.size() != 1) {
+        Log("[pacing] spawn fade-in component tick not recognised (%zu matches): PacingFadeAware not available (the rest of "
+            "the pacing works as before)", hits.size());
+        return false;
+    }
+    uint8_t* const t = hits[0];
+    g.fadeState = Disp32(t + kFadeStateAt);
+    g.fadeValue = Disp32(t + kFadeValueAt);
+    g.fadeOwner = Disp32(t + kFadeOwnerAt);
+    g.fadeComp = Disp32(t + kFadeCompAt);
+    g.fadeFloor = Disp32(t + kFadeFloorAt);
+    uint8_t* const cls = RipTarget(t + kFadeClassCallAt, 1, 5);
+    if (g.fadeState > 0x400 || g.fadeValue > 0x400 || g.fadeOwner > 0x400 || g.fadeFloor > 0x400 || g.fadeComp > 0x4000 ||
+        g.fadeComp % 8 || g.fadeOwner % 8 || !game.text.Contains(cls)) {
+        Log("[pacing] spawn fade-in component layout not recognised: PacingFadeAware not available (the rest of the pacing "
+            "works as before)");
+        return false;
+    }
+    g.fadeClass = reinterpret_cast<StaticClassFn>(cls);
+    g.fadeFound = true;
+    Log("[pacing] spawn fade-in component: tick exe+0x%X, state +0x%X, value +0x%X, owner +0x%X, floor +0x%X, actor's "
+        "component +0x%X, owner class exe+0x%X",
+        static_cast<unsigned>(t - game.base), g.fadeState, g.fadeValue, g.fadeOwner, g.fadeFloor, g.fadeComp,
+        static_cast<unsigned>(cls - game.base));
+    return true;
+}
+
 
 // ---- positions (game thread) ----
 
@@ -707,6 +770,7 @@ bool ActorLocation(const uint8_t* obj, double* x, double* y, double* z)
     *z = l[2];
     return std::isfinite(*x) && std::isfinite(*y) && std::isfinite(*z);
 }
+
 
 bool ReadPlayer(double* x, double* y, double* z)
 {
@@ -749,6 +813,7 @@ bool Player()
 // AActor::WasRecentlyRendered(kRenderedWithinS), as the engine computes it (game thread, inside ResolveDelegate's guard).
 bool RecentlyRendered(const uint8_t* actor)
 {
+    if (g.testRendered) return g.testRendered(actor);
     if (!g.actorWorld) return false;
     const uint8_t* world = static_cast<const uint8_t*>(g.actorWorld(actor));
     if (!world) return false;
@@ -757,6 +822,31 @@ bool RecentlyRendered(const uint8_t* actor)
     void* const* vt = *reinterpret_cast<void* const* const*>(actor);
     const float last = reinterpret_cast<LastRenderFn>(vt[g.lastRenderSlot / 8])(actor);
     return now - static_cast<double>(last) <= std::max(static_cast<double>(delta), kRenderedWithinS);
+}
+
+// PacingFadeAware: the actor is in its spawn fade-in and still (almost) invisible: FadeIn and max(floor, value) at or
+// above 3.0 (lab: PacingFadeMin / 10), read as the component's tick reads it (owner class check first). Dither 5 is fully
+// invisible; >= 3 is about the first 0.75 s of the 1.25 s fade (findings 2026-10-26 npcjitter). Game thread, caller's guard.
+float FadeLevel(const uint8_t* actor)  // the actor's spawn fade-in dither, -1 = not fading in / not a faded character
+{
+    if (!g.fadeFound || !actor) return -1.0f;
+    const uint8_t* const cls = g.fadeClass();
+    const uint8_t* const oc = *reinterpret_cast<const uint8_t* const*>(actor + 0x10);
+    if (!cls || !oc) return -1.0f;
+    const int32_t idx = *reinterpret_cast<const int32_t*>(cls + 0x38);
+    if (idx < 0 || idx > *reinterpret_cast<const int32_t*>(oc + 0x38)) return -1.0f;
+    const uint8_t* const* chain = *reinterpret_cast<const uint8_t* const* const*>(oc + 0x30);
+    if (!chain || chain[idx] != cls + 0x30) return -1.0f;
+    const uint8_t* const comp = *reinterpret_cast<const uint8_t* const*>(actor + g.fadeComp);
+    if (!comp || *reinterpret_cast<const uint8_t* const*>(comp + g.fadeOwner) != actor) return -1.0f;
+    if (*reinterpret_cast<const int32_t*>(comp + g.fadeState) != 1) return -1.0f;
+    const float v = std::max(*reinterpret_cast<const float*>(comp + g.fadeValue), *reinterpret_cast<const float*>(comp + g.fadeFloor));
+    return v;
+}
+
+bool FadeHidden(const uint8_t* actor)
+{
+    return FadeLevel(actor) * 10.0f >= static_cast<float>(g.fadeMinTenths.load(std::memory_order_relaxed));
 }
 
 
@@ -774,6 +864,7 @@ bool ResolveDelegate(const uint8_t* inst, uintptr_t* key, bool* distant)
 {
     *key = 0;
     *distant = false;
+    g.lastFadeHeld = false;
     if (!g.testPlayer && (!g.outerOk || !g.weakGet)) return false;
     __try {
         const uint8_t* obj = static_cast<const uint8_t*>(g.weakGet(inst + kOwnerWeakOffset));
@@ -784,6 +875,16 @@ bool ResolveDelegate(const uint8_t* inst, uintptr_t* key, bool* distant)
                 const bool far1 = FarFrom(x, y, z);
                 bool seen = far1 && RecentlyRendered(obj);
                 *distant = far1 && !seen;
+                {   // PacingFadeAware: far and rendered, but still invisible in its spawn fade-in: unseen, so it may wait
+                    // like a hidden far NPC (the frustum/occlusion "rendered" test counts primitives that are drawn fully
+                    // dithered away; npcjitter, Namira's Shrine). Lab: 2 = near ones too, 3 = equipment/hair only.
+                    const int fa = g.fadeAware.load(std::memory_order_relaxed);
+                    bool fadeWait = fa && !*distant && far1 && FadeHidden(obj);
+                    if (fadeWait) {
+                        *distant = true;
+                        g.lastFadeHeld = true;
+                    }
+                }
                 if (g.delegateLogs < 16) {
                     ++g.delegateLogs;
                     Log("[pacing] delegate unit: actor at (%.0f, %.0f, %.0f), %.0f from the player, %s: %s", x, y, z,
@@ -895,6 +996,18 @@ bool FifoHasKey(uintptr_t key)
     return false;
 }
 
+bool ResolveDelegate(const uint8_t* inst, uintptr_t* key, bool* distant);
+// PacingFadeAware: whether a waiting entry may still wait (its actor far and unseen, or still fade-hidden); an actor that
+// cannot be resolved any more runs (its ExecuteIfSafe re-checks the weak pointer).
+bool StillMayWait(const Entry& e)
+{
+    uintptr_t key = 0;
+    bool distant = false;
+    const bool resolved = ResolveDelegate(e.inst, &key, &distant);
+    if (!resolved) return false;
+    if (!distant && e.fadeHeld) g.fadeReleased.fetch_add(1, std::memory_order_relaxed);
+    return distant;
+}
 
 
 // Runs a unit (depth and the distance a nested completion inherits) and returns its time in us.
@@ -944,7 +1057,11 @@ void ReplayBudget()
         const uint64_t age = g.frame - e.since;
         const bool forced = age > 2 * maxLag;
         if (!forced && e.distant && OverBudget(e.type, age)) {
-                break;
+            // PacingFadeAware: the head is re-checked; it runs now once its actor is seen (or near) and no longer
+            // fade-hidden, i.e. once it would no longer have been allowed to wait.
+            bool recheck = g.fadeAware.load(std::memory_order_relaxed) != 0;
+            const bool release = recheck && !StillMayWait(e);
+            if (!release) break;
         }
         if (forced) {
             s.forced.fetch_add(1, std::memory_order_relaxed);
@@ -968,7 +1085,8 @@ bool Enqueue(int type, const uint8_t* inst, uintptr_t key, bool distant, bool fa
     e.since = g.frame;
     e.key = key;
     e.distant = distant;
-    (void)fadeHeld;
+    e.fadeHeld = fadeHeld;
+    if (fadeHeld) g.fadeHeldUnits.fetch_add(1, std::memory_order_relaxed);
     ++g.count;
     s.deferred[type].fetch_add(1, std::memory_order_relaxed);
     AtomicMax(s.maxFifo, g.count);
@@ -1011,7 +1129,7 @@ bool DelegateUnit(int type, void* inst, bool* result)
         // With a backlog, a distant unit (or one of an actor that has queued units) queues behind it; a near unit of
         // another actor runs now. Without one, a distant unit waits only when the frame's budget is spent.
         const bool wait = g.count ? (distant || FifoHasKey(key)) : (distant && OverBudget(type));
-        bool fadeHeld = false;
+        const bool fadeHeld = g.lastFadeHeld;
         if (wait) {
             if (Enqueue(type, p, key, distant, fadeHeld)) {
                 *result = true;
@@ -1324,7 +1442,14 @@ uint8_t RunSessionHook(void* manager, int32_t key)
                     static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(ret) - reinterpret_cast<uintptr_t>(Game().base)),
                     static_cast<unsigned long long>(g.S - g.E), g.count, lean ? ", which stay queued" : "");
             }
-            Drain(manager, !lean);
+            if (lean) {
+                if (g.E < g.S) {
+                    s.leanDrains.fetch_add(1, std::memory_order_relaxed);
+                    s.leanKept.fetch_add(g.count, std::memory_order_relaxed);
+                }
+                Drain(manager, false);
+            } else
+            Drain(manager);
         } else {
             // an unexpected RunSession(-1) on the game thread: it consumes an end command like ours
             const uint8_t r = g.origRun(manager, key);
@@ -1384,6 +1509,7 @@ bool FindNpcPacing()
         Log("[pacing] frame-rate cap: UpdateTimeAndHandleMaxTickRate exe+0x%X (%d slots), GetMaxTickRate vtable +0x%X",
             static_cast<unsigned>(paces[0] - game.base), g.numMaxTickSlots, g.getMaxTickRateSlot);
     else Log("[pacing] frame-rate cap sleep not found: PacingUseSlack has no effect");
+    FindFade(game);  // optional (PacingFadeAware)
     g.freezeKnown = FindFreezeSubsystem();
     if (!g.freezeKnown) {
         Log("[pacing] menu/loading freeze state not available: fix not available");
@@ -1428,6 +1554,7 @@ void SetNpcPacing(bool enabled, int budgetMs, int minDistance, int maxLagFrames,
     if (was != g.enabled.load()) Log("[pacing] NPC creation pacing %s", g.enabled.load() ? "on" : "off (backlog runs at once)");
 }
 
+
 void SetNpcPacingLeanFlowDrain(bool on)
 {
     if (g.leanFlowDrain.exchange(on) != on)
@@ -1435,11 +1562,30 @@ void SetNpcPacingLeanFlowDrain(bool on)
             on ? "the main queue only, the waiting delegates stay queued" : "the main queue and the waiting delegates", on);
 }
 
+void SetNpcPacingFadeAware(int mode)
+{
+    const int fa = std::clamp(mode, 0, 1);
+    const int was = g.fadeAware.exchange(g.fadeFound ? fa : 0);
+    if (was != g.fadeAware.load())
+        Log("[pacing] PacingFadeAware %d%s", g.fadeAware.load(),
+            fa && !g.fadeFound ? " [spawn fade-in component not found: off]"
+            : fa              ? " (a far NPC still invisible in its spawn fade-in counts as unseen)"
+                              : " (only the rendered test, as 1.2.2)");
+}
+
+
 
 
 void LogNpcPacingStats()
 {
     if (!g.installed) return;
+    {   // PacingFadeAware (per stats interval)
+        const uint64_t held = g.fadeHeldUnits.exchange(0, std::memory_order_relaxed);
+        const uint64_t released = g.fadeReleased.exchange(0, std::memory_order_relaxed);
+        if (held || released)
+            Log("[pacing] PacingFadeAware: %llu units of far NPCs still invisible in their spawn fade-in waited; %llu released by "
+                "the re-check", static_cast<unsigned long long>(held), static_cast<unsigned long long>(released));
+    }
     uint64_t run[kNumTypes], def[kNumTypes], runAll = 0, defAll = 0;
     for (int i = 0; i < kNumTypes; ++i) {
         run[i] = s.run[i].exchange(0);
@@ -1472,6 +1618,12 @@ void LogNpcPacingStats()
         static_cast<unsigned long long>(s.flowLongWaits.exchange(0)), static_cast<unsigned long long>(s.flowDrains.exchange(0)), static_cast<unsigned long long>(s.guard[0].exchange(0)),
         static_cast<unsigned long long>(s.guard[1].exchange(0)), static_cast<unsigned long long>(s.guard[2].exchange(0)),
         static_cast<unsigned long long>(s.guard[3].exchange(0)), static_cast<unsigned long long>(s.guard[4].exchange(0)));
+    {   // PacingLeanFlowDrain
+        const uint64_t ld = s.leanDrains.exchange(0), lk = s.leanKept.exchange(0);
+        if (ld)
+            Log("[pacing] PacingLeanFlowDrain: %llu level flows at their wait bound drained the main queue only; %llu waiting "
+                "delegates stayed queued", static_cast<unsigned long long>(ld), static_cast<unsigned long long>(lk));
+    }
 }
 
 bool NpcPacingPlayerPos(double* x, double* y, double* z)
@@ -1550,6 +1702,23 @@ void NpcPacingTestSetup(const NpcPacingTestFakes& f)
     if (!g.fifo) g.fifo = static_cast<Entry*>(VirtualAlloc(nullptr, sizeof(Entry) * kFifoCap, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
 }
 
+bool NpcPacingFadeInfo(uint32_t offsets[5], void** staticClass)
+{
+    if (!g.fadeFound) return false;
+    offsets[0] = g.fadeState;
+    offsets[1] = g.fadeValue;
+    offsets[2] = g.fadeOwner;
+    offsets[3] = g.fadeComp;
+    offsets[4] = g.fadeFloor;
+    *staticClass = reinterpret_cast<void*>(g.fadeClass);
+    return true;
+}
+
+void NpcPacingTestFade(const uint8_t* (*staticClass)()) { g.fadeClass = staticClass; }
+
+void NpcPacingTestRendered(bool (*rendered)(const void* actor)) { g.testRendered = rendered; }
+
+uint64_t NpcPacingFrame() { return g.frame; }  // RigTraceReuse's stats line
 
 NpcPacingTestState NpcPacingTestRead()
 {

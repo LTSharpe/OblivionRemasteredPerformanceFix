@@ -1,6 +1,7 @@
 ﻿<#
 .SYNOPSIS
-    Unattended benchmark. Gets the game into the world (starting through Steam or launching the explicit game path directly, or reusing a healthy
+  Unattended benchmark. Gets the game into the world (starting it through Steam, or directly for a non-Steam
+  OBLIVION_GAME_DIR install, or reusing a healthy
   game the benchmark left at the main menu), applies a display/graphics profile (bench\profiles.json),
   switches to spectator mode (cinematic camera, no HUD, no head bob, god mode, nobody notices the
   player), runs the selected scenes (bench\scenarios\*.json) through the OblvBench UE4SS mod and writes
@@ -65,6 +66,7 @@ param(
     [double]$MaxMinutes = 0,                             # time limit for one run (0: from the scene estimate)
     [double]$MaxSessionMin = 60,                         # -Session auto restarts a game older than this (UE4SS's Lua bindings add ~1 GB/h in a busy session; fps itself did not drift in 105 min, 2026-10-06)
     [double]$IdleCloseMin = 20,                          # a parked game is closed (saves and config restored) after this long without a run; 0 = never
+    [double]$OtherCoresWarn = 8,                         # warn when other processes used this many cores over any ~1 s of a scene (a parallel build: ~9-10.5; quiet PC with the harness: 3-6.5; 2026-10-26)
     [string[]]$Stacks,                                   # thread names to stack-sample during door transitions, flights and walks (for Analyze-Hitch.ps1); perturbs timing; wildcards work ('*Worker*')
     [ValidateSet('dbghelp', 'fast')][string]$StackSampler = 'dbghelp',   # fast: FastSampler.cs, ~30 us per thread sample (all workers at a few hundred Hz); dbghelp: the old ~1 ms sampler
     [double]$StackIntervalMs = 2,                        # -StackSampler fast: one sweep over all sampled threads every n ms
@@ -114,6 +116,30 @@ function Read-SharedLines([string]$path) {
     $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
     try { $text = (New-Object IO.StreamReader $fs).ReadToEnd() } finally { $fs.Dispose() }
     @($text -split "`r?`n" | Where-Object { $_ })
+}
+
+# $null, or the warning for start-up settings this run asked for that a reused game does not have: -FixIni keys whose
+# value differs from the installed OblivionPerfFix.ini's [Fixes] (missing keys count as different), and any -IniCvars / -Ini
+# (Engine.ini and the game's config are read at start-up only). Only meaningful when the running game is reused.
+$script:ReuseIgnored = $null
+function Get-ReuseIgnoredWarning {
+    $parts = @()
+    if ($FixIni.Count) {
+        $have = @{}
+        if (Test-Path -LiteralPath $fixIniPath) {
+            $inFixes = $false
+            foreach ($l in Read-SharedLines $fixIniPath) {
+                if ($l -match '^\s*\[(.+?)\]') { $inFixes = ($Matches[1] -eq 'Fixes'); continue }
+                if ($inFixes -and $l -match '^\s*(\w+)\s*=\s*([^;\s]*)') { $have[$Matches[1]] = $Matches[2] }
+            }
+        }
+        $diff = @($FixIni.Keys | Sort-Object | Where-Object { "$($have[$_])" -ne "$($FixIni[$_])" } | ForEach-Object { "$_=$($FixIni[$_]) (installed: $(if ($have.ContainsKey($_)) { $have[$_] } else { 'absent' }))" })
+        if ($diff.Count) { $parts += "-FixIni NOT applied: $($diff -join ', ')" }
+    }
+    if ($IniCvars.Count) { $parts += "-IniCvars NOT applied ($(ConvertTo-SortedText $IniCvars))" }
+    if ($Ini.Count) { $parts += "-Ini NOT applied ($(($Ini.Keys | Sort-Object) -join ', '))" }
+    if (-not $parts.Count) { return $null }
+    "reused game (-Session $Session): start-up settings are applied only when the runner starts a game, so this run measured the installed ones: $($parts -join '; '). Write live keys into the installed ini (shared-open, read back) or use -Session fresh/auto."
 }
 
 function Step([string]$msg) {
@@ -1822,6 +1848,8 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
                 hardFaultsPerSec = Rnd ($sampler.HardFaultsPerSec($seg.t0, $seg.t1)) 1
                 availMinMB = Rnd ($sampler.AvailMinMB($seg.t0, $seg.t1)); pageInsPerSec = Rnd ($sampler.PageInsPerSec($seg.t0, $seg.t1))
                 pageInsMaxPerSec = Rnd ($sampler.PageInsMaxPerSec($seg.t0, $seg.t1))
+                # other processes' CPU (2026-10-26): a parallel build on this PC made bursts of 25-80 ms game frames
+                otherCores = Rnd ($sampler.OtherCores($seg.t0, $seg.t1)) 2; otherCoresMax = Rnd ($sampler.OtherCoresMax($seg.t0, $seg.t1)) 2
                 shot = $seg.shot
             }
             # CPU ms per frame of every thread name that used at least 0.05 ms per frame (RHISubmissionThread, workers, pools, ...)
@@ -1829,6 +1857,7 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
             if ($f.Frames) { foreach ($u in $use) { $v = $u.CpuMs / $f.Frames; if ($v -ge 0.05) { $all[$u.Name] = Rnd $v 2 } } }
             $r.allThreads = $all
             if (-not $f.Frames) { Warn "$($seg.id): no frames in the measured time (game frozen?): the numbers of this scene are void" }
+            if ($r.otherCoresMax -ge $OtherCoresWarn) { Warn "$($seg.id): other processes used up to $($r.otherCoresMax) cores (mean $($r.otherCores)) during the measured time (a build or another busy program on this PC competes with the game: longer frames, jitter bursts; perf-threads.csv column OtherCores says when): not comparable" }
             if ($null -ne $r.notForegroundPct -and $r.notForegroundPct -gt 2) { Warn "$($seg.id): the game was not the foreground window for $($r.notForegroundPct)% of the measured time (another window was in front; the game then turns frame generation off): not comparable" }
             if ($seg.type -eq 'door') {
                 $after = $log.Stats($seg.tA, $seg.t1)
@@ -1964,6 +1993,9 @@ function Write-Report($result, [string]$runDir) {
             $hf = @($mem | ForEach-Object { [double]$_.hardFaultsPerSec })
             $md.Add("System memory during the scenes: available min $(($av | Measure-Object -Minimum).Minimum) MB; the game's working set $(($wsv | Measure-Object -Minimum).Minimum)-$(($wsv | Measure-Object -Maximum).Maximum) GB, its own hard page faults up to $(($hf | Measure-Object -Maximum).Maximum)/s (scene average); system-wide page-ins up to $(($pin | Measure-Object -Maximum).Maximum) pages/s (these include the file cache reading game data from disk, not only paging)." + $(if ($paged.Count) { " Scenes with >= 1000 system page-ins/s: $($paged -join ', ')." } else { '' }))
         }
+        # other processes' CPU per scene (2026-10-26): absent in older results
+        $oc = @($perf.scenes | Where-Object { $_ -and $null -ne $_.otherCoresMax })
+        if ($oc.Count) { $md.Add(''); $md.Add("Other processes' CPU during the scenes (cores; a build or scan competes with the game): $(($oc | ForEach-Object { "$($_.id) mean $($_.otherCores) max $($_.otherCoresMax)" }) -join ', ').") }
     }
     $vis = $result.sessions | Where-Object { $_.kind -eq 'visual' }
     if ($vis -and $vis.visual.Count) {
@@ -2044,6 +2076,12 @@ function Get-StopRequest {
         if (-not (Test-Path $script:BenchStopFile)) { return $null }
         $r = Get-Content $script:BenchStopFile -Raw | ConvertFrom-Json
         if ([int]$r.pid -ne $PID -or ((Get-Date) - [datetime]$r.time).TotalHours -gt 12) { return $null }
+        # only for this process, not for a later one that got the same pid from Windows (2026-10-26: a request from
+        # 08:51 stopped another runner at 18:24): a request made before this process started is stale, and since
+        # 2026-10-26 the request names the target's start time
+        $myStart = [Diagnostics.Process]::GetCurrentProcess().StartTime
+        if ([datetime]$r.time -lt $myStart.AddSeconds(-1)) { return $null }
+        if ($r.PSObject.Properties['start'] -and $r.start -and [math]::Abs(([datetime]$r.start - $myStart).TotalSeconds) -gt 1) { return $null }
         $r
     } catch { $null }
 }
@@ -2052,7 +2090,8 @@ if ($Stop) {
     if (-not $target -and (Test-Path $script:BenchLockFile) -and ((Get-Content $script:BenchLockFile -Raw) -match 'pid=(\d+)')) { $target = [int]$Matches[1] }
     if (-not $target -and (Test-Path $script:BenchStatusFile)) { try { $st = Get-Content $script:BenchStatusFile -Raw | ConvertFrom-Json; if ($st.state -eq 'running') { $target = [int]$st.pid } } catch {} }
     if (-not $target -or -not (Get-Process -Id $target -ErrorAction SilentlyContinue)) { Step 'no running benchmark to stop'; exit 0 }
-    @{ pid = $target; time = (Get-Date).ToString('o'); reason = $StopReason; by = $PID } | ConvertTo-Json | Set-Content $script:BenchStopFile -Encoding utf8
+    $targetStart = try { (Get-Process -Id $target -ErrorAction Stop).StartTime.ToString('o') } catch { $null }
+    @{ pid = $target; start = $targetStart; time = (Get-Date).ToString('o'); reason = $StopReason; by = $PID } | ConvertTo-Json | Set-Content $script:BenchStopFile -Encoding utf8
     Step "stop requested for runner pid $target$(if ($StopReason) { " ($StopReason)" }): it ends after its current scene and parks or closes the game as its -After says; later runs in that process do not start"
     exit 0
 }
@@ -2121,7 +2160,14 @@ for ($run = 1; $run -le $Runs; $run++) {
             if ($game) { Watch-Game $game }
             $startReason = Get-RestartReason $game
             if ($startReason) { if ($game) { Step "not reusing the running game: $startReason" } }
-            else { Step "reusing the running game (started $([math]::Round(((Get-Date) - $game.StartTime).TotalMinutes)) min ago)" }
+            else {
+                Step "reusing the running game (started $([math]::Round(((Get-Date) - $game.StartTime).TotalMinutes)) min ago)"
+                # -FixIni (and -IniCvars, -Ini) are applied only when the runner starts a game (Set-RunConfig in
+                # Start-BenchGame). A reused game (-Session reuse) keeps the installed ini: say so when that ini differs
+                # (2026-10-26, worker brumaburst; the behaviour is unchanged).
+                $script:ReuseIgnored = Get-ReuseIgnoredWarning
+                if ($script:ReuseIgnored) { Write-Warning $script:ReuseIgnored }
+            }
             if (-not $game) { Restore-Config }            # left by an earlier session
             Protect-Saves
         }
@@ -2165,6 +2211,8 @@ for ($run = 1; $run -le $Runs; $run++) {
         # runs only after the result is written). .NET read: strings from Get-Content carry provider properties that
         # ConvertTo-Json would serialise.
         if (Test-Path -LiteralPath $fixIniPath) { $result.perfFix.ini = @(Read-SharedLines $fixIniPath | Where-Object { $_ -match '^\s*\w+\s*=' }) }
+        # -FixIni / -IniCvars / -Ini asked for but not in effect in a reused game (Get-ReuseIgnoredWarning)
+        if ($script:ReuseIgnored -and $sessions.Count) { [void]$sessions[0].warnings.Add($script:ReuseIgnored) }
         # the game's command-line arguments as the game process has them (-FixedSeed since 2026-10-20)
         if (-not $SelfTest -and ($gNow = Get-Game)) {
             $cl = try { "$((Get-CimInstance Win32_Process -Filter "ProcessId=$($gNow.Id)").CommandLine)" } catch { '' }

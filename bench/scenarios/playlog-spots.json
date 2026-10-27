@@ -1,0 +1,655 @@
+{
+ "name": "playlog-spots",
+ "description": "Mini-scenarios (save-free) of places where a player reported stutter or a low frame rate in a play test (4K, FSR performance, frame generation on, frame rate capped at 60): routes follow the player's track, terrain-following at 180 units over the highest ground within 256 units, camera 90 above the path. Pinned 12:00 Clear, timescale 1 (NPC schedules may differ from the play). Iterate on `small` (game-thread questions); confirm at `-Profile user -KeepWorld`. Scenes: pl-xing-ride (a typical cell crossing), pl-xing-west (a large crossing; its group of characters may not reproduce), brindle-approach (the walk from the south into Brindle Home), brindle-corral-hold and brindle-control-hold (A/B in one world: at the Brindle Home horse corral vs ~120 m west). Used for the 1.2.3 numbers of PhysAnimNoEmptyLock and RigTraceReuse (brindle-corral-hold).",
+ "settings": {},
+ "record": [
+  "r.ScreenPercentage",
+  "Altar.UpscalingMethod",
+  "Altar.FSR3.Quality",
+  "r.FidelityFX.FSR3.QualityMode",
+  "r.FidelityFX.FI.Enabled",
+  "r.VSync",
+  "Altar.GraphicsOptions.VSync",
+  "Altar.GraphicsOptions.FrameRateLimit",
+  "Altar.GraphicsOptions.Brightness",
+  "Altar.GraphicsOptions.HDR",
+  "t.MaxFPS",
+  "sg.ViewDistanceQuality",
+  "sg.ShadowQuality",
+  "sg.GlobalIlluminationQuality",
+  "sg.ReflectionQuality",
+  "sg.PostProcessQuality",
+  "sg.TextureQuality",
+  "sg.EffectsQuality",
+  "sg.FoliageQuality",
+  "sg.ShadingQuality",
+  "r.Lumen.HardwareRayTracing",
+  "r.Lumen.HardwareRayTracing.LightingMode",
+  "r.RayTracing.Culling.Radius",
+  "r.Streaming.PoolSize",
+  "Altar.SaveOnLoading",
+  "Altar.SaveOnFastTravel"
+ ],
+ "masks": [
+  [
+   0.94,
+   0.0,
+   0.06,
+   0.035
+  ]
+ ],
+ "weathers": {
+  "Clear": "00038EEE",
+  "Cloudy": "00038EF0",
+  "Overcast": "00038EEC",
+  "Fog": "00038EEF",
+  "Rain": "00038EF2",
+  "Thunderstorm": "00038EF1",
+  "Oblivion": "00032E15",
+  "OblivionStorm": "00067199",
+  "SEClear": "00078801",
+  "SECloudy": "00044F59",
+  "SEFog": "00044F5A",
+  "SERain": "00044F5C",
+  "SEThunderstorm": "00044F5D",
+  "SEManiaFog": "00079D76"
+ },
+ "defaults": {
+  "hour": 12,
+  "settle": 20,
+  "measure": 20,
+  "hold": 12,
+  "weather": "Clear",
+  "timescale": 1
+ },
+ "places": {
+  "brindle-corral": {
+   "world": "Tamriel",
+   "pos": [
+    -55105,
+    46976,
+    7937
+   ],
+   "heading": 291,
+   "pitch": -5
+  },
+  "brindle-control": {
+   "world": "Tamriel",
+   "pos": [
+    -63573,
+    51055,
+    9577
+   ],
+   "heading": 270,
+   "pitch": -5
+  }
+ },
+ "scenes": [
+  {
+   "id": "pl-xing-ride",
+   "type": "fly",
+   "world": "Tamriel",
+   "hour": 12,
+   "weather": "Clear",
+   "timescale": 1,
+   "settle": 20,
+   "speed": 280,
+   "pitch": -3,
+   "flyopt": "ease=1.5 easeout=1.5 clip=1 camlook=0.8 camtau=0.8 camsmooth=2 cameye=90",
+   "tags": [
+    "traversal",
+    "outdoor",
+    "crossing",
+    "playlog"
+   ],
+   "comment": "A cell crossing from the player's track (Obl -64.7k,51.5k -> -69.5k,55.5k, cells (-16,12)->(-17,13)); the old engine's grid change comes about 16 s into this flight (at 280 u/s), followed by a few slow frames in the play. A 20 s hover at the start lets the start grid load, so the crossing attaches its new row during the timed flight.",
+   "path": [
+    [
+     -64668,
+     51505,
+     10360
+    ],
+    [
+     -65056,
+     51706,
+     10393
+    ],
+    [
+     -65444,
+     51907,
+     10460
+    ],
+    [
+     -65789,
+     52158,
+     10508
+    ],
+    [
+     -66134,
+     52410,
+     10487
+    ],
+    [
+     -66459,
+     52696,
+     10468
+    ],
+    [
+     -66784,
+     52982,
+     10428
+    ],
+    [
+     -67098,
+     53103,
+     10289
+    ],
+    [
+     -67411,
+     53224,
+     10156
+    ],
+    [
+     -67459,
+     53631,
+     10073
+    ],
+    [
+     -67520,
+     54023,
+     10049
+    ],
+    [
+     -67554,
+     54517,
+     10092
+    ],
+    [
+     -67575,
+     54911,
+     10172
+    ],
+    [
+     -67603,
+     55381,
+     10276
+    ],
+    [
+     -67634,
+     55770,
+     10364
+    ],
+    [
+     -68016,
+     55861,
+     10428
+    ],
+    [
+     -68378,
+     55717,
+     10428
+    ],
+    [
+     -68739,
+     55573,
+     10412
+    ],
+    [
+     -69136,
+     55536,
+     10396
+    ],
+    [
+     -69532,
+     55499,
+     10388
+    ]
+   ]
+  },
+  {
+   "id": "pl-xing-west",
+   "type": "fly",
+   "world": "Tamriel",
+   "hour": 12,
+   "weather": "Clear",
+   "timescale": 1,
+   "settle": 20,
+   "speed": 270,
+   "pitch": -3,
+   "flyopt": "ease=1.5 easeout=1.5 clip=1 camlook=0.8 camtau=0.8 camsmooth=2 cameye=90",
+   "tags": [
+    "traversal",
+    "outdoor",
+    "crossing",
+    "npc",
+    "playlog"
+   ],
+   "comment": "A large crossing from the player's track, ~25 km west of Chorrol (Obl -92.3k,88.8k -> -89.4k,94.0k); grid change about 18 s in, where many characters were created at once in the play. No ACHR/ACRE is placed within 16k units in Oblivion.esm/AltarESPMain.esp: the group was travelling characters; check the run log for the creates before using its numbers.",
+   "path": [
+    [
+     -92289,
+     88788,
+     16644
+    ],
+    [
+     -92571,
+     89114,
+     16633
+    ],
+    [
+     -92639,
+     89488,
+     16660
+    ],
+    [
+     -92558,
+     89923,
+     16753
+    ],
+    [
+     -92722,
+     90451,
+     16892
+    ],
+    [
+     -92578,
+     90800,
+     16884
+    ],
+    [
+     -92328,
+     90982,
+     16777
+    ],
+    [
+     -92078,
+     91165,
+     16743
+    ],
+    [
+     -91945,
+     91572,
+     16785
+    ],
+    [
+     -91812,
+     91979,
+     16884
+    ],
+    [
+     -91522,
+     92302,
+     16844
+    ],
+    [
+     -91231,
+     92626,
+     16711
+    ],
+    [
+     -90969,
+     92978,
+     16588
+    ],
+    [
+     -90707,
+     93330,
+     16481
+    ],
+    [
+     -90411,
+     93650,
+     16417
+    ],
+    [
+     -90115,
+     93970,
+     16396
+    ],
+    [
+     -89779,
+     93980,
+     16345
+    ],
+    [
+     -89443,
+     93989,
+     16320
+    ]
+   ]
+  },
+  {
+   "id": "brindle-approach",
+   "type": "fly",
+   "world": "Tamriel",
+   "hour": 12,
+   "weather": "Clear",
+   "timescale": 1,
+   "settle": 20,
+   "speed": 300,
+   "pitch": -3,
+   "flyopt": "ease=1.5 easeout=1.5 clip=1 camlook=0.8 camtau=0.8 camsmooth=2 cameye=90",
+   "tags": [
+    "traversal",
+    "outdoor",
+    "crossing",
+    "npc",
+    "playlog",
+    "brindle"
+   ],
+   "comment": "The player's walk from the south into Brindle Home (Obl -63.5k,30.3k -> -56.9k,45.5k; two points moved 300 units east round a farmhouse): the old engine's grid change about 31 s in attaches cell (-14,11) with the farm's four horses, after which the player reported a low base frame rate.",
+   "path": [
+    [
+     -63481,
+     30323,
+     6476
+    ],
+    [
+     -63279,
+     30578,
+     6500
+    ],
+    [
+     -63077,
+     30832,
+     6540
+    ],
+    [
+     -62875,
+     31087,
+     6596
+    ],
+    [
+     -62673,
+     31342,
+     6636
+    ],
+    [
+     -62488,
+     31602,
+     6673
+    ],
+    [
+     -62303,
+     31862,
+     6724
+    ],
+    [
+     -62118,
+     32121,
+     6772
+    ],
+    [
+     -61933,
+     32381,
+     6852
+    ],
+    [
+     -61688,
+     32592,
+     6964
+    ],
+    [
+     -61443,
+     32804,
+     6985
+    ],
+    [
+     -61198,
+     33015,
+     7025
+    ],
+    [
+     -60953,
+     33226,
+     7084
+    ],
+    [
+     -60735,
+     33489,
+     7111
+    ],
+    [
+     -60518,
+     33752,
+     7148
+    ],
+    [
+     -60300,
+     34015,
+     7183
+    ],
+    [
+     -60077,
+     34299,
+     7241
+    ],
+    [
+     -59854,
+     34583,
+     7324
+    ],
+    [
+     -59640,
+     34875,
+     7340
+    ],
+    [
+     -59425,
+     35167,
+     7316
+    ],
+    [
+     -59448,
+     35471,
+     7284
+    ],
+    [
+     -59471,
+     35776,
+     7247
+    ],
+    [
+     -59494,
+     36080,
+     7233
+    ],
+    [
+     -59594,
+     36440,
+     7244
+    ],
+    [
+     -59695,
+     36800,
+     7265
+    ],
+    [
+     -59795,
+     37160,
+     7292
+    ],
+    [
+     -59785,
+     37507,
+     7316
+    ],
+    [
+     -59775,
+     37853,
+     7348
+    ],
+    [
+     -59765,
+     38200,
+     7404
+    ],
+    [
+     -59473,
+     38350,
+     7399
+    ],
+    [
+     -59180,
+     38499,
+     7399
+    ],
+    [
+     -58888,
+     38648,
+     7428
+    ],
+    [
+     -58596,
+     38798,
+     7484
+    ],
+    [
+     -58540,
+     39231,
+     7484
+    ],
+    [
+     -58484,
+     39664,
+     7500
+    ],
+    [
+     -58558,
+     39992,
+     7532
+    ],
+    [
+     -58633,
+     40320,
+     7548
+    ],
+    [
+     -58707,
+     40648,
+     7551
+    ],
+    [
+     -58570,
+     40961,
+     7556
+    ],
+    [
+     -58434,
+     41274,
+     7561
+    ],
+    [
+     -58297,
+     41587,
+     7585
+    ],
+    [
+     -57978,
+     41689,
+     7628
+    ],
+    [
+     -57660,
+     41791,
+     7644
+    ],
+    [
+     -57341,
+     41893,
+     7647
+    ],
+    [
+     -57281,
+     42235,
+     7655
+    ],
+    [
+     -57220,
+     42577,
+     7668
+    ],
+    [
+     -57160,
+     42919,
+     7687
+    ],
+    [
+     -57127,
+     43250,
+     7727
+    ],
+    [
+     -57094,
+     43580,
+     7788
+    ],
+    [
+     -57061,
+     43910,
+     7820
+    ],
+    [
+     -57028,
+     44241,
+     7871
+    ],
+    [
+     -56991,
+     44563,
+     7940
+    ],
+    [
+     -56954,
+     44885,
+     7983
+    ],
+    [
+     -56918,
+     45207,
+     8044
+    ],
+    [
+     -56881,
+     45529,
+     8108
+    ]
+   ]
+  },
+  {
+   "id": "brindle-corral-hold",
+   "type": "static",
+   "at": "brindle-corral",
+   "hour": 12,
+   "weather": "Clear",
+   "timescale": 1,
+   "settle": 15,
+   "measure": 40,
+   "visual": false,
+   "tags": [
+    "outdoor",
+    "npc",
+    "playlog",
+    "brindle"
+   ],
+   "comment": "Where the player stood between the house and the corral, looking at the horses (Torbal the Sufficient's house 15 m south): a steady low base frame rate was reported here. Run with HitchLedger=1 and HitchLedgerTickSplit=1 to name the steady cost."
+  },
+  {
+   "id": "brindle-control-hold",
+   "type": "static",
+   "at": "brindle-control",
+   "hour": 12,
+   "weather": "Clear",
+   "timescale": 1,
+   "settle": 15,
+   "measure": 40,
+   "visual": false,
+   "tags": [
+    "outdoor",
+    "playlog",
+    "brindle"
+   ],
+   "comment": "Control in the same world: ~120 m west of the corral (the corral cell still loaded). Run right after brindle-corral-hold."
+  }
+ ]
+}

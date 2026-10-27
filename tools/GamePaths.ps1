@@ -54,6 +54,10 @@ function Get-OblivionGame {
             (Join-Path (Split-Path $exe) 'steam_api64.dll'),
             (Join-Path (Split-Path $exe) 'steam_api.dll')
         ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+        if (-not $steamDll) {   # where the Steam build keeps it: Engine\Binaries\ThirdParty\Steamworks\Steamv153\Win64 (2026-10)
+            $steamDll = Get-ChildItem -Path (Join-Path $env:OBLIVION_GAME_DIR 'Engine\Binaries\ThirdParty\Steamworks\*\Win64\steam_api64.dll') `
+                -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+        }
         return [pscustomobject]@{ Source = 'OBLIVION_GAME_DIR'; LaunchMethod = $(if ($steamDll) { 'Steam' } else { 'Direct' }); SteamDll = $steamDll
             SteamRoot = Get-SteamRoot; Library = $null; GameDir = $env:OBLIVION_GAME_DIR
             Win64 = Split-Path $exe; Exe = $exe; BuildId = $null }

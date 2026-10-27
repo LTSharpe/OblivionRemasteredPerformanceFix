@@ -11,7 +11,10 @@
 #include <string_view>
 #include <vector>
 
-#define OPF_VERSION "1.2.2"
+#define OPF_VERSION "1.2.3"
+// The release label after the version (the tag is v<OPF_VERSION><OPF_RELEASE_SUFFIX>): in the log's first line and the DLL's
+// version resource (build.ps1 reads both lines; CI checks the tag against OPF_VERSION).
+#define OPF_RELEASE_SUFFIX "-beta"
 
 namespace opf {
 
@@ -187,6 +190,18 @@ struct Config {
     int saveThumbnailAsync = 1;        // SaveThumbnailAsync: saves/save_thumb.cpp, the save's thumbnail read back without the game
                                        // thread waiting (same picture): 1 on (lab: 2 on + compared with the game's read-back; public
                                        // reads 2 as 1); 0 = not installed (start-up), then live
+    bool menuOpenFlashFix = true;        // MenuOpenFlashFix (issue #5, game bug): occlusion culling off for the player menu's open
+                                         // frame, so the next frame (the menu's background "box") is not culled (installed only if on
+                                         // at start-up, version.dll route; then live; the OBSE64 route logs it as not installed)
+    bool physAnimNoEmptyLock = true;     // PhysAnimNoEmptyLock: physics/physanim_lock.cpp, a physical animation component that drives no
+                                         // bodies skips UpdateTargetActors' scene write lock (identical; installed only if on at start-up,
+                                         // version.dll route; then live)
+    int rigTraceReuse = 1;               // RigTraceReuse: npcs/rig_trace_reuse.cpp, a Control Rig sphere trace repeated with identical
+                                         // inputs inside one rig execution reuses its result (equivalent): 1 on, 2 verify (runs and
+                                         // compares), 0 off; installed only if not 0 at start-up (version.dll route), then live
+    int chaosMaxPayloadSize = 10000000;  // ChaosMaxPayloadSize: physics/chaos_payload.cpp, p.MaxPayloadSize raised (cm) at start-up so
+                                         // the ~730 bodies over 1 km stay in the Chaos trees (equivalent); only over the game's 100000;
+                                         // an Engine.ini value wins; 0 = the game's value; both routes; start-up only
     int osPageCache = 1;                 // OsPageCache: blocks the allocator releases to Windows are kept (exact size, bounded) and
                                          // handed out again for its own cache misses (identical; start-up install, then live)
     int osPageCacheMB = 64;              // not in the shipped ini: OsPageCache's cap (MB, 4-1024)
@@ -217,6 +232,9 @@ struct Config {
     bool hitchLedger = false;          // Diagnostic HitchLedger: slow game-thread frames' stage times to
                                        // OblivionPerfFix-ledger.csv (installed only if on at start-up, then switched live)
     int hitchLedgerMs = 25;            // ... a frame counts as slow from this period (ms, the cap's sleep included)
+    bool hitchLedgerTickSplit = false; // HitchLedgerTickSplit (diagnostic, public since 1.2.3): diagnostics/tick_split.cpp, the
+                                       // game thread's tick time by kind, class and group to OblivionPerfFix-ticksplit.csv
+                                       // (needs HitchLedger=1; installed only if on at start-up, then live)
     bool npcCreationPacing = true;    // NpcCreationPacing: far-away NPC creation spread over frames 
     int pacingBudgetMs = 4;           // not in the shipped ini: NPC unit time per frame before far units wait
     int pacingMinDistance = 4096;      // not in the shipped ini: only actors farther than this (game units) wait
@@ -224,8 +242,12 @@ struct Config {
     bool pacingUseSlack = true;        // not in the shipped ini: under a frame-rate cap, use the cap's sleep as budget
     bool pacingFlowWait = true;        // not in the shipped ini: a level flow waits for the main queue instead of draining it
     bool pacingLeanFlowDrain = true;   // PacingLeanFlowDrain: a level flow at its wait bound drains the owed main queue only;
-                                       // the waiting delegates stay queued (live)
+                                       // the waiting delegates stay queued (live; PR #25)
     int pacingFlowWaitFrames = 8;      // not in the shipped ini: ... up to this many frames while the queue progresses (3 = 0.17)
+    int pacingFadeAware = 1;           // not in the shipped ini: PacingFadeAware (npcjitter): 1 = a far NPC still fully invisible in
+                                       // its spawn fade-in (dither >= 3) counts as unseen, so its appearance / equipment / hair may
+                                       // wait like a hidden far NPC's (live); 0 = only fix 15's "rendered" test (1.2.2). Lab: 2 = near
+                                       // ones too; 3 (fadenear) = far-seen and near, equipment and hair only, after the appearance
     bool memoryRelief = true;          // MemoryRelief: when Windows runs short of memory, LumenKeepArrayCapacity and UploadMemoryKeep (and 4 for VRAM) give theirs back
     int memoryReliefRamMB = 1024;      // not in the shipped ini: UploadMemoryKeep gives back while available RAM is under this (3 s)
     bool vramRelief = false;           // not in the shipped ini: MemoryRelief's video-memory stages (RAM/commit relief stays)
@@ -871,6 +893,81 @@ void LogFocusRestoreStats();
 bool FocusRestoreInfo(FocusRestoreInfoOut* out);
 void FocusRestoreTestOriginals(void* fakeHandler, void* fakeSetter);  // self-test only: fakes for the game's two functions
 
+// physanim_lock.cpp (PhysAnimNoEmptyLock, public since 1.2.3): a physical animation component with no driven body and no
+// pending parallel animation task skips UpdateTargetActors' scene write lock (the game's code otherwise; identical)
+bool InstallPhysAnimNoEmptyLock(bool beforeGameCode);  // the function's entry redirected (only while the game starts)
+void SetPhysAnimNoEmptyLock(bool enabled);              // live, once installed
+void LogPhysAnimNoEmptyLockStats();
+void PhysAnimTestCall(uint8_t* self, uint8_t teleport, void* fakeGame);  // self-test only
+const uint8_t* PhysAnimTestTrampoline();   // self-test only: the trampoline (prologue + absolute jump back)
+uint32_t PhysAnimTestOffset(int which);     // self-test only: 0 DriveData.Num, 1 mesh, 2 pending task
+// chaos_payload.cpp (ChaosMaxPayloadSize, public since 1.2.3): p.MaxPayloadSize raised at start-up so that the ~730 large
+// elements stay in the Chaos acceleration trees instead of the GlobalPayloads list every scene query walks (equivalent)
+float* FindChaosMaxPayloadVar();                      // p.MaxPayloadSize's bound value (nullptr if not found)
+bool SetChaosMaxPayloadSize(int cm, bool beforeGameCode);  // start-up, both routes; only over the game's 100000
+void LogChaosMaxPayloadSizeLive();                    // periodic report: the live value once, then on change
+// rig_trace_reuse.cpp (RigTraceReuse, public since 1.2.3): a Control Rig sphere
+// trace repeated with bit-identical inputs inside one UControlRig::Execute reuses that run's earlier result (equivalent)
+bool InstallRigTraceReuse(bool beforeGameCode, const wchar_t* iniPath);  // start-up only (version.dll route)
+void SetRigTraceReuse(int mode);                                         // live, once installed: 0 off, 1 reuse, 2 verify
+void LogRigTraceReuseStats();
+uint32_t RigTraceUnitDiscover(const GameModule& game);     // self-test: the unit's RVA (0 = not found); no writes
+uint32_t RigTraceExecuteDiscover(const GameModule& game);  // self-test: UControlRig::Execute's RVA (0 = not found)
+void RigTraceTestCall(uint8_t* ctx, const double* start, const double* end, const uint8_t* channel, float radius, uint8_t* hit,
+                      double* loc, double* nrm, void* fakeUnit);  // self-test only
+uint64_t RigTraceTestExecute(void* fakeExec, void* self);         // self-test only
+void RigTraceTestSetReuse(bool on);                               // self-test only
+uint64_t RigTraceTestReused();                                    // self-test only
+void RigTraceTestSetMode(int mode);                               // self-test only: 0 off, 1 reuse, 2 verify
+uint64_t RigTraceTestVerified(uint64_t* diff);                    // self-test only: verified repeats (and how many differed)
+uint64_t NpcPacingFrame();  // npc_pacing.cpp: its frame counter (counts while NpcCreationPacing's frame hook runs)
+// tick_split.cpp (diagnostic TickSplit, [Fixes] HitchLedgerTickSplit, public since 1.2.3, needs HitchLedger=1): the game
+// thread's tick time by tick-function kind, ticked class and tick group into OblivionPerfFix-ticksplit.csv.
+struct TickSplitFrame {        // from LedgerFrameEnd, every frame
+    bool recording, slow;
+    uint64_t frame, endUs;
+    uint32_t periodUs, actorUs, pairUs;
+    uint32_t tgUs[8];
+};
+struct TickSplitInfoOut {
+    bool installed;
+    uint8_t *exec, *tickable, *setup, *coll, *latent, *timer, *tickObj, *stream, *region, *tNative, *tDynamic, *tCallback;
+    void *execHook, *tickableHook;
+};
+bool InstallTickSplit(bool beforeGameCode, const wchar_t* dir);  // start-up only, after InstallHitchLedger
+void SetTickSplit(bool on);                                      // monitor thread, live
+void TickSplitGroup(int group, bool entering);                   // game thread: the ledger's tick-group hook
+void TickSplitPreActor();                                        // game thread: OnWorldPreActorTick
+void TickSplitFrameEnd(const TickSplitFrame& fr);                // game thread: every frame end
+void TickSplitWindowEnd();                                       // game thread: hands a 2 s window to the monitor thread
+void TickSplitDrain();                                           // monitor thread: windows and slow-frame rows -> csv
+bool TickSplitInfo(TickSplitInfoOut* out);
+void TickSplitTestSetup(uint64_t (*clock)(), const wchar_t* path);  // self-test only
+void TickSplitTestClose();                                       // self-test only
+// menu_open_flash.cpp (MenuOpenFlashFix, issue #5, game bug: the bright wrong frame when the player menu opens; occlusion
+// culling off for the menu-open frame; start-up install after ApplyFocusRestoreFix, then live)
+struct MenuOpenFlashInfoOut {
+    uint8_t* jmpSite;     // RequestCapture's exec thunk jmp (now to requestHook)
+    void* request;        // VBackgroundWidgetBase::RequestCapture
+    void* processShots;   // UGameViewportClient::ProcessScreenShots (the restore point, every frame)
+    void** shotSlots[4];  // its vtable slots (now shotsHook)
+    int numShotSlots;
+    void** cvarSlot;      // IConsoleVariable* r.AllowOcclusionQueries
+    const bool* cvarRef;  // the bool it binds (GOcclusionCullEnabled)
+    void* requestHook;
+    void* shotsHook;
+    bool armed, broken;
+};
+bool InstallMenuOpenFlashFix(bool beforeGameCode);
+void SetMenuOpenFlashFix(bool on);
+void LogMenuOpenFlashStats();
+bool MenuOpenFlashInfo(MenuOpenFlashInfoOut* out);
+// self-test only: fakes for the variable (slot, bound bool), RequestCapture and ProcessScreenShots; the caller is the game thread
+void MenuOpenFlashTestSetup(void** fakeCvarSlot, const bool* fakeRef, void* fakeRequest, void* fakeShots, uint32_t setOffset,
+                            uint32_t getBoolOffset);
+void MenuOpenFlashTestAgeRestorePoint(int64_t ms);  // self-test only: the last ProcessScreenShots seen this much earlier
+const char* MenuOpenFlashLastBrokenLog();           // self-test only: the last "fix off for this session" line ("" = none)
+
 
 // stream_churn.cpp (LumenKeepArrayCapacity and UploadMemoryKeep: memory churn while the world streams)
 struct StreamChurnFixInfo {
@@ -1020,6 +1117,10 @@ struct NpcPacingTestState {
 };
 bool FindNpcPacing();                 // locate everything (no patching); false = fix unavailable (logged)
 bool InstallNpcPacing();              // vtable slot writes, safe at any time
+void SetNpcPacingFadeAware(int mode);  // PacingFadeAware (live; public 0/1, lab also 2/3); no effect if the fade tick was not found
+bool NpcPacingFadeInfo(uint32_t offsets[5], void** staticClass);  // self-test: state, value, owner, actor's component, floor
+void NpcPacingTestFade(const uint8_t* (*staticClass)());           // self-test: a fake owner class
+void NpcPacingTestRendered(bool (*rendered)(const void* actor));   // self-test: fake "recently rendered" (nullptr = fakes never are)
 void SetNpcPacing(bool enabled, int budgetMs, int minDistance, int maxLagFrames, bool useSlack, bool flowWait = true,
                   int flowWaitFrames = 8);  // switchable live
 void SetNpcPacingLeanFlowDrain(bool on);  // PacingLeanFlowDrain (live)

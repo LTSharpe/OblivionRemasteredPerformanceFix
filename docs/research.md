@@ -380,6 +380,80 @@ loading itself is unchanged (arrival 2.7-3.1 s after the door is used, both).
   Lumen's hardware ray tracing off (profile `cpu-nort`) the game still builds these structures; the switch batches them
   (1,841 builds in the first minute, 13 batches, longest call 5.4 ms) without errors.
 
+<a id="physanimnoemptylock"></a>
+
+### No exclusive physics lock for animation parts with nothing to move (`PhysAnimNoEmptyLock`, 1.2.3)
+
+- **What the game does:** each character's `UPhysicalAnimationComponent` ticks in TG_PrePhysics and calls
+  `UpdateTargetActors` (exe+0x354EA80), which takes the physics scene's write lock, copies the mesh's bone-space
+  transforms and loops over `DriveData` (the bodies a physical-animation profile drives). In ~600,000 calls (Brindle Home
+  corral, its control spot, `actors-battle`) `DriveData` was always empty. At the corral the horses' Control Rig traces
+  hold read locks on helper threads, so each empty call waited ~38-41 us (6 us elsewhere): ~0.9 ms per frame for 23
+  components, and the waiting writer held up the helpers' next traces.
+- **The fix:** return at once when `DriveData.Num() <= 0` and the mesh has no pending parallel animation task (the
+  lambda's first call, `GetBoneSpaceTransforms`, would complete such a task; possible on the teleport path). Identical:
+  without a pending task the skipped code only locks (a TLS recursion count and an SRW lock), fills and frees a
+  temporary and loops zero times. Found by pattern (entry, the lambda's `DriveData` compare, the pending-task compare);
+  any mismatch leaves it off with a log line. Start-up only (version.dll route), then live.
+- **Measured** (1.2.3 candidate, Ryzen 7 5800X + RX 9070 XT, `playlog-spots` scene `brindle-corral-hold`): `small`, live
+  A/B in one game: TG_PrePhysics -0.98 ms, frame -0.59 ms. 4K, FSR Performance, frame generation, 60 fps cap, together
+  with `RigTraceReuse`, live ABBA x2: game-thread work 11.02 / 10.48 / 10.24 / 10.59 -> 9.68 / 8.85 / 8.79 / 9.36 ms
+  (-1.41), period 16.99 -> 16.74 ms (excess over 16.7 ms 0.29 -> 0.04, 87 % removed). Riding among the horses was
+  measured too, but without a public way to mount a horse in the benchmark yet, so we give no number.
+
+<a id="rigtracereuse"></a>
+
+### A horse's repeated ground traces answered once (`RigTraceReuse`, 1.2.3)
+
+- **What the game does:** the horses' Control Rig runs `FRigUnit_SphereTraceByTraceChannel` (exe+0x4B83E90, a
+  `SweepSingleByChannel` against the ground) as a pure node that the rig VM re-runs for each consumer of its result.
+  At the corral each horse made 106 traces per frame, 91.5 % of them bit-identical repeats of an earlier trace of the
+  same rig run, on the same thread, 20 us to 2 ms later (~9 distinct traces, each ~12 times): 6-10 ms of helper time
+  per frame, each trace holding the scene's read lock.
+- **The fix:** inside one `UControlRig::Execute` (exe+0x4AB6250; a per-thread generation bumped at its entry and exit),
+  a trace whose inputs (rig context, owner component, owner actor, world, start, end, radius, channel and the
+  rig-to-world transform) are bit-identical to an earlier one of the same run gets that trace's outputs (hit flag,
+  location, normal). Anything else runs the game's trace; nothing is kept across runs.
+- **Equivalent, not identical:** the repeat asks the same scene the same question microseconds later on the same
+  thread; a different answer needs a body write from another thread in between, an interleaving the game does not
+  order. One caveat: if such a write lands between a trace and its repeat, another trace made in between can already
+  see the new state while the repeat keeps the old answer, a combination the game would not produce in that order;
+  it is the same unordered race the game already varies from frame to frame. Verify mode (`RigTraceReuse=2`, the
+  repeats run and are compared): 0 differences in ~536,000 repeats standing at the corral, ~960,000 riding among the
+  horses and ~1.09 million with wolves and a troll fighting by them.
+- **Measured** (`small`, live ABBA x2 at `brindle-corral-hold`, with `PhysAnimNoEmptyLock` on): standing -0.53 ms
+  frame, -0.47 ms TG_PrePhysics; the game thread's scene-lock waits
+  0.57-0.86 -> 0.08-0.13 ms per frame, the helpers' read-lock waits 2.0-2.9 -> 0.2-0.4 ms. The NPCs' rig trace (another
+  unit) repeats 67-75 % in crowds too, but reusing it showed no measurable gain: not shipped.
+
+<a id="chaosmaxpayloadsize"></a>
+
+### Large collision shapes filed in the search tree (`ChaosMaxPayloadSize`, 1.2.3)
+
+- **What the game does:** every Chaos scene query (`TAABBTree` sweep, overlap, raycast; game thread, helpers' rig
+  traces, the physics thread's broad phase) first tests every element of the tree's `GlobalPayloads` list: elements whose
+  bounds exceed `p.MaxPayloadSize` (100000 cm). This game's static tree holds ~730 of them (~713 columns with z exactly
+  -80000..+80000 cm, 4-50 m wide, spread over the whole map, and a few boxes up to 8 km), so each query made ~730
+  pre-filter calls and bounds tests before the tree found ~14 candidates: 117-154 thousand list tests per game-thread
+  frame at the Imperial City Waterfront, Vilverin and the Skingrad forest, 95 % of all elements visited.
+- **The fix:** `p.MaxPayloadSize` 100000 -> 10000000 at start-up, before the engine reads its settings and before any
+  physics scene exists (both routes), only while it holds the game's 100000; an Engine.ini line is applied later and
+  wins; the trees read the value when they are created. Found through the console variable's registration (found once,
+  value in .data, read elsewhere in the code); otherwise off with a log line. The live value is logged.
+- **Equivalent, not identical:** the list loop and the tree's leaves run the same pre-filter and the same bounds test on
+  the same stored bounds and call the visitor with the same payload; tree nodes only skip elements whose bounds miss the
+  query. So overlaps visit the same set and sweeps/raycasts keep the same closest hit; only the visit order changes
+  (stock visits the big elements first). That matters only for an exact tie: a raycast starting inside a column and
+  another body at once (distance 0) stops at the first one visited. The columns' distance-0 stops kept the same share of
+  raycast visits (0.278 % stock vs 0.287 % with the fix, Vilverin + `sk-d`); ties among the tree's own bodies already
+  depend on its shape, which the game varies as cells stream in. Overlap candidates per overlap query 2.766 vs 2.756.
+- **Measured** (1.2.3 candidate, Ryzen 7 5800X + RX 9070 XT). `small`, live ABBA: game-thread ms per frame -0.65
+  (`skingrad-spots` `sk-d`) and -0.72 (`ic-spots` `ic-vilverin-pass`); query time on the game thread 3.07 -> 1.32 ms per
+  frame, elements per query 385 -> 14. 4K, FSR Performance, frame generation, 60 fps cap, start-up key A/B/A over three
+  launches: game-thread tick work 9.36 / 9.81 / 9.37 / 10.14 -> 8.11 / 8.85 ms (`sk-d`, -1.19) and 8.60 / 8.72 / 8.99 /
+  9.02 -> 7.60 / 7.61 ms (Vilverin, -1.22); time over 16.7 ms per frame 0.51 -> 0.25 (-50 %) and 0.83 -> 0.56 (-32 %).
+  Doors (tree rebuilds with the extra leaves), `small`, A/B/A: no added hitch. End screenshots: same positions within 1 cm.
+
 ## Travelling: memory and threads
 
 <a id="lumenkeeparraycapacity"></a>
@@ -883,6 +957,14 @@ more 149 -> 134 (within the run-to-run noise: one block showed the gain, the oth
   pulled its pieces into the same frame: one measured frame held 4 units, 115 ms of them (an appearance apply of 59 ms
   plus three hair units), presented at 117.7 ms. Nested completions inherit the running unit's distance.
 
+- **Owner walk (lab key `PacingOwnerWalk`, not shipped):** an equipment delegate's owner is the character's
+  `VCharacterBodyPairingComponent`, whose word at the actor's root-component offset is data, not a pointer; reading it
+  faults and ends the owner walk, so the unit counts as near and runs whatever the budget. Pull request #25's first
+  version let the walk go on to the outer (the character); its author withdrew that part on 2026-10-27 after re-runs
+  showed no measurable gain. Our AMD check agrees (4K, FSR Performance, frame generation, 60 fps cap, RX 9070 XT;
+  `ic-spots` scene `ic-waterfront-pass`, one game, live toggles): about 10 more equipment units per pass are paced,
+  frame-level numbers within the noise. It stays a lab switch.
+
 - **Area-loading order:** the game's per-area "level flows" (set-up for each newly loaded area, run at the end of the frame's world
   update) met an owed queue and forced the waiting creates through: 2-3 creates plus equipment, 17-27 ms of units in
   one frame, 25-40 ms frames at fixed spots of the Silver Road climb. The flow waits (at most three frames without progress, up to eight while creation progresses), and so does the frame's end command to the old engine,
@@ -921,20 +1003,32 @@ more 149 -> 134 (within the run-to-run noise: one block showed the gain, the oth
   frames): the two creates the old bound would have drained into one ~29 ms frame ran in frames of 20.1 and 21.7 ms. The order of every command between the threads is unchanged; the OT waits up to 8 GT frames instead of
   3 (it waits for the stock game's single long frame the same way).
 
-- **The bound's drain runs the main queue only (`PacingLeanFlowDrain`, 2026-10-20):** at y -56660 on the Imperial City
-  flight one level flow (its RunSession called from exe+0x4881C55) reaches its 3-frame bound in most runs, the queue
-  owing 4-6 older OT frames with 13-21 delegates waiting, and `Drain` then ran the owed queue and every waiting
-  delegate in one frame. A flow on a complete queue already leaves the delegates queued (in the game the flows run
-  before the frame's delegates); at the bound the flow needs only the main queue before it, so `Drain(manager, false)`
-  leaves the delegates to the frame's replay. Travel and other sessions drain as before. 1.2.2-beta + this switch,
-  stock Engine.ini (`showcase`, `promo`, fresh games, 3 rounds, the first side alternating; `-FixIni @{
-  PacingLeanFlowDrain = 0 }` / `1`): the flow reached its bound in 4 of the 6 runs (not in one off and one on run).
-  Off, the drain frame ran 18 / 24 units (14 / 13 delegates), 32.6 / 42.9 ms; on, it ran the main queue only (3 / 2
-  units, 21.7 / 16.8 ms) and the 20 / 21 delegates followed 1-7 frames later in two frames: the most NPC unit time in
-  one frame there 32.6 / 42.9 -> 30.4 / 21.4 ms. In PresentMon the second around that spot is slow in every run for
-  other reasons (frames up to 47-72 ms off, 50-54 ms on), with the same time lost either way. Whole flight, no gain:
-  worst frame 62.5 / 72.2 / 58.4 -> 60.4 / 61.1 / 56.4 ms, hitches 37 / 40 / 29 -> 39 / 35 / 31, 1% low 27.8 / 26.9 /
-  28.0 -> 27.3 / 27.5 / 27.5 fps.
+- **The bound's drain runs the main queue only (`PacingLeanFlowDrain`, pull request #25 by mkusm, 1.2.3):** at
+  y -56660 on the Imperial City flight one level flow (its RunSession called from exe+0x4881C55) reaches its 3-frame
+  bound in most runs, the queue owing 4-6 older OT frames with 13-21 delegates waiting, and `Drain` then ran the owed
+  queue and every waiting delegate in one frame. A flow on a complete queue already leaves the delegates queued (in the
+  game the flows run before the frame's delegates); at the bound the flow needs only the main queue before it, so
+  `Drain(manager, false)` leaves the delegates to the frame's replay. Travel and other sessions drain as before. The
+  same idea had been a lab switch of ours since 2026-10-20 (`PacingFlowDrainLite`), with no measurable gain on its own
+  at our settings; the pull request's version ships.
+  mkusm measured it on NVIDIA (pull request #25). Our check (2026-10-27, 1.2.3 candidate, RX 9070 XT, 4K, FSR
+  Performance, frame generation, 60 fps cap; `ic-spots` scene `ic-waterfront-pass`, one game, live toggles in a
+  palindrome): with the switch on, the drain frame at the Waterfront flow's bound ran the owed main queue only in 4 of 4
+  runs, the 10-12 kept delegates following in later frames, and it was shorter than the one off run whose flow reached
+  its bound (that off run also had a lab-only change to the owner walk, so we give no number). Whole passes within the
+  noise.
+
+- **Fade-aware "seen" test (1.2.3, hidden key `PacingFadeAware`, on):** the pacing let a far character's pieces wait only
+  while the engine had not drawn it in the last half second. New far characters failed that test although nobody could
+  see them: every character that appears dither-fades in (fully invisible at first; the fade component's value 5 -> 0,
+  >= 3 for about the first 0.75 s of 1.25 s), and at Namira's Shrine on the Bruma night route (`bench/scenarios/bruma-night.json`)
+  the worshippers about 180 m away were behind terrain and trees as well: the engine draws a newly shown object as visible
+  until its first occlusion result comes back. In our runs (4K, FSR Performance, frame generation, 60 fps cap) every far
+  character the test called "seen" while its pieces were due was still fully faded out. A far character whose fade
+  component (found from its tick by byte pattern, owner class checked) is fading in at 3 or above now counts as unseen,
+  and the first waiting piece is re-checked every frame so it runs as soon as the character could be seen. Bruma night
+  route: about 28 % less of the frame-time jitter from building characters; Imperial City Waterfront: no change; no
+  piece of a far character ran after it had become visible. Near characters are untouched.
 
 <a id="clothregisterlite"></a>
 
@@ -1568,6 +1662,47 @@ Game bugs (they also happen without OblivionPerfFix). Bugs in our own fixes are 
   sharpness of screenshots confirms the render scale (FSR on 545, off 263, back 548). `Save_Settings.sav` was
   byte-identical before and after every test.
 
+<a id="menuopenflashfix"></a>
+
+### No bright flash when the menu opens (`MenuOpenFlashFix`)
+
+[Explanation](how-it-works.md#menuopenflashfix).
+
+- **Found (GitHub issue #5):** the first time the pause menu, inventory or map opens after some play, one frame shows a
+  bright, washed-out landscape behind the menu panels. It happens without OblivionPerfFix too.
+
+- **Cause:** the player menu does not draw its background in 2D. The view switches to a Blueprint preview box
+  (`BP_Box_Preview_Inventory`) placed about 336 km outside the playable world: its camera looks at a translucent plane
+  showing the menu's screenshot of the game view, inside a large unlit cube that hides the world around the box. On the
+  open frame the menu widget (`VBackgroundWidgetBase::RequestCapture`) requests that screenshot and the box's parts are
+  shown while the camera is still the game's. When the box's far-away location lies in the game camera's view (UE has
+  no far plane), occlusion culling judges the just-shown cube and plane from the old camera, where they are hidden; on
+  the next frame, inside the box, it culls both, and that frame shows the world outside the box. It needs more than about
+  8 s since the last menu (the engine trusts recent "proven visible" results for that long), which is why a quick second
+  open is fine.
+
+- **The change:** `r.AllowOcclusionQueries` is 0 for the open frame only. The request call (game thread, before that
+  frame's scene goes to the render thread) sets it with the variable's own set-by priority, and
+  `UGameViewportClient::ProcessScreenShots`, which the viewport calls on the game thread every frame right after the
+  frame's scene was sent, sets it back to 1. The variable is render-thread-safe, so the render thread sees each change in
+  command order and only the open frame renders without occlusion culling. The fix switches nothing unless the restore
+  point ran within the last second, the call is on that game thread and the variable's interface checked out on the
+  live object; if a restore does not take three times, it stops for the session and the log says what the variable was
+  left at.
+
+- **Why the picture is otherwise the same:** without occlusion culling a frame draws more, never less; whatever the
+  culling would have removed lies behind opaque geometry and is depth-tested away. Custom depth and stencil effects are
+  never occlusion-culled by UE, so they cannot change. UE switches occlusion off the same way for its high-resolution
+  screenshots. Not on screen: for that one frame the hidden objects get a fresh "last rendered" time while the game is
+  entering the paused menu.
+
+- **Measured:** hidden game, the frame rate capped low so every rendered frame is captured, camera facing the box: fix
+  off: the wrong frame in 6 of 6 opens (854x480 and 4K, FSR, frame generation), fix on: 0 of 7; with the fix
+  the second frame shows the menu's normal background. It costs one longer frame at menu open.
+
+- **Where:** `src/menus/menu_open_flash.cpp`, `[menuflash]`; installed at start-up with the version.dll route (not on
+  the OBSE64 route, which loads after the game's code has started; the log says so), then switched live.
+
 <a id="frameratelimitatstart"></a>
 
 ### The saved frame-rate cap works from the start with frame generation (`FrameRateLimitAtStart`)
@@ -1698,6 +1833,18 @@ Game bugs (they also happen without OblivionPerfFix). Bugs in our own fixes are 
 [Explanation](how-it-works.md#hitchledger).
 
 **Verification.** The self-test measured about 0.15 microseconds per frame. In-game overhead has not been quantified here. The diagnostic records frames of at least 25 ms by default, including the cap wait, plus ten-second summaries for rates per hour. A fixed memory queue keeps disk writes off the main thread; a background thread writes once a second, up to 48 MB, keeping the previous recording. It reads clocks and counters without changing game results. Garbage collection is part of the remaining frame time rather than separately timed; missing instrumentation is recorded as -1. `HitchLedger=0` is the default; set it to 1 before starting the game to install the recording hooks.
+
+**The tick split (`HitchLedgerTickSplit`, lab since 2026-10-16, public since 1.2.3, off).** Redirects the
+tick task's `ExecuteTick`, `FTickableGameObject::TickObjects`' per-object `Tick`, the timer manager's native, dynamic
+and TFunction delegate calls, plus six of UWorld::Tick's direct calls (physics set-up, the collision tree, latent actions,
+timers, tickables, streaming) to timing stubs, each found by pattern and checked as a call into the game's code; any
+mismatch leaves that part untimed with a log line. Game-thread time per (kind = the tick function's `ExecuteTick`,
+class of the ticked object, released group), exclusive of nested ticks; ticks on other threads per kind. Fixed tables,
+no locks or allocation on the game thread; the monitor thread writes 2 s windows and each slow frame's top 3 to
+`OblivionPerfFix-ticksplit.csv` (~0.3 MB per minute in our runs, capped at 64 MB). Cost: ~45 ns per timed call in the
+self-test; in a held crowd (~1,300 timed calls per frame, a 2026-10-16 lab build) live A/B 4 x 30 s: 33.37 vs 32.93 ms per frame
+(+0.44 ms, +1.3 %, within the noise). With 0 at start-up nothing is installed. `tools/tick_split.py` names the kinds
+and ranks the windows (per benchmark scene with `--run`).
 
 ## Tried and not shipped
 

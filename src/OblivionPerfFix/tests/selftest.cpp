@@ -571,6 +571,7 @@ static uint64_t HashWords(uint64_t seed, const void* data, size_t bytes)
 #include "selftest_objreplace.h"   // ObjectReplaceCrashGuard: the in-place destroy site and the stub with a fake GUObjectArray
 #include "selftest_taskwait.h"     // TaskWaitDeadlockGuard: the task graph's worker wait, the wake-up protocol against fakes
 #include "selftest_scan.h"         // FindAll: the fast pattern search against the reference search
+#include "selftest_ticksplit.h"        // diagnostic TickSplit: sites, entries/windows/top rows, cost per call (lab: perception split)
 
 // ---- fakes for the parallel flush test (physics_flush.cpp, PhysicsFlushParallel) ----
 namespace pfl {
@@ -2372,6 +2373,8 @@ int wmain(int argc, wchar_t** argv)
     pso::Run(game);
     // Diagnostic HitchLedger (selftest_ledger.h): before BulkIndexInsert's test (its lab probe times the same tick-group entry).
     hl::Run(game);
+    // Diagnostic TickSplit (selftest_ticksplit.h): rides on the ledger's tick-group hook.
+    tsp::Run(game);
     // AnimTeardownParallel (lab prototype): dying NPC animation data's interpolators on helper threads (selftest_animpar.h).
     apar::Run(game);
     // CellBufferPacedEvict (lab prototype): spare cell buffer slots, overflow torn down one cell per OT frame (selftest_cellbuf.h); after
@@ -2529,6 +2532,153 @@ int wmain(int argc, wchar_t** argv)
             *fr.fsrCvarSlot = nullptr;
             *fr.altarFsrCvarSlot = nullptr;
             LogFocusRestoreStats();
+        }
+    }
+
+    // MenuOpenFlashFix (issue #5, game bug): occlusion culling off for the player menu's open frame (RequestCapture ->
+    // the same frame's ProcessScreenShots). After RestoreFsrAfterAltTab's test (the console-variable offsets come from its search).
+    {
+        Check(InstallMenuOpenFlashFix(true), "menu-open flash: RequestCapture, ProcessScreenShots and r.AllowOcclusionQueries found");
+        MenuOpenFlashInfoOut mf{};
+        if (Installed(MenuOpenFlashInfo(&mf), "MenuOpenFlashFix (menu-open flash)")) {
+            Check(mf.request == game.base + 0x492A120, "RequestCapture at exe+0x492A120");
+            Check(mf.jmpSite == game.base + 0x4620C55, "the exec thunk's jmp at exe+0x4620C55");
+            Check(mf.processShots == game.base + 0x3222CE0, "ProcessScreenShots at exe+0x3222CE0");
+            Check(mf.numShotSlots == 3 && mf.shotSlots[0] == reinterpret_cast<void**>(game.base + 0x767AA68) &&
+                      mf.shotSlots[1] == reinterpret_cast<void**>(game.base + 0x7868C18) &&
+                      mf.shotSlots[2] == reinterpret_cast<void**>(game.base + 0x7B1B2F8),
+                  "its three vtable slots exe+0x767AA68, 0x7868C18, 0x7B1B2F8");
+            bool slotsHooked = true;
+            for (int i = 0; i < mf.numShotSlots; ++i) slotsHooked &= *mf.shotSlots[i] == mf.shotsHook;
+            Check(slotsHooked, "every ProcessScreenShots slot now holds the hook");
+            Check(mf.cvarSlot == reinterpret_cast<void**>(game.base + 0x91D4C80), "r.AllowOcclusionQueries' IConsoleVariable* at exe+0x91D4C80");
+            Check(mf.cvarRef == reinterpret_cast<const bool*>(game.base + 0x8DD2395), "the bool it binds at exe+0x8DD2395");
+            const auto stubTo = [](uint8_t* stub, void* hook) {
+                void* target = nullptr;
+                memcpy(&target, stub + 6, sizeof target);
+                return MatchesAt(stub, ParsePattern("FF 25 00 00 00 00")) && target == hook;
+            };
+            Check(mf.jmpSite[0] == 0xE9 && stubTo(RipTarget(mf.jmpSite, 1, 5), mf.requestHook), "the thunk jumps to a stub to the request hook");
+            Check(InstallMenuOpenFlashFix(true), "second installation finds it installed");
+
+            // behaviour with a fake console variable (GetFlags / Set / GetBool / GetInt / GetFloat) and fake originals
+            static FakeCvar occ{g_fakeCvarVtable, true, 0x04000020, 0, 0};  // set by the system settings ini, render-thread safe
+            static void* occSlot = nullptr;
+            static int requests = 0, shotsCalls = 0;
+            static bool occAtRequest = true;
+            static int fakeIntBias = 0;
+            g_fakeCvarVtable[0x88 / sizeof(void*)] = reinterpret_cast<void*>(&FakeGetBool);
+            g_fakeCvarVtable[0x18 / sizeof(void*)] = reinterpret_cast<void*>(&FakeGetFlags);
+            g_fakeCvarVtable[0x80 / sizeof(void*)] = reinterpret_cast<void*>(&FakeSet);
+            g_fakeCvarVtable[0x90 / sizeof(void*)] =
+                reinterpret_cast<void*>(+[](void* c) -> int32_t { return (static_cast<FakeCvar*>(c)->value ? 1 : 0) + fakeIntBias; });
+            g_fakeCvarVtable[0x98 / sizeof(void*)] =
+                reinterpret_cast<void*>(+[](void* c) -> float { return static_cast<FakeCvar*>(c)->value ? 1.0f : 0.0f; });
+            const auto setup = [&](uint32_t setOff) {
+                occSlot = &occ;
+                MenuOpenFlashTestSetup(&occSlot, &occ.value, reinterpret_cast<void*>(+[](void*) { ++requests; occAtRequest = occ.value; }),
+                                       reinterpret_cast<void*>(+[](void*, void*) -> bool { ++shotsCalls; return true; }), setOff, 0x88);
+            };
+            using Request = void (*)(void*);
+            using Shots = bool (*)(void*, void*);
+            const auto request = [&] { reinterpret_cast<Request>(mf.requestHook)(nullptr); };
+            const auto shots = [&] { return reinterpret_cast<Shots>(mf.shotsHook)(nullptr, nullptr); };
+            const auto st = [&] { MenuOpenFlashInfoOut i{}; MenuOpenFlashInfo(&i); return i; };
+            setup(0x80);
+            SetMenuOpenFlashFix(true);
+            request();
+            Check(requests == 1 && occ.value && occ.sets == 0, "no ProcessScreenShots seen yet (restore point not live): nothing switched");
+            Check(shots() && shotsCalls == 1, "ProcessScreenShots: the game's result passed through");
+            request();
+            Check(requests == 2 && !occ.value && !occAtRequest && occ.lastSetBy == 0x04000000 && occ.sets == 1 && st().armed,
+                  "request: occlusion off before the game's request, with the variable's own set-by priority");
+            shots();
+            Check(occ.value && occ.sets == 2 && !st().armed, "that frame's ProcessScreenShots: occlusion back on");
+            request();
+            request();
+            Check(!occ.value && occ.sets == 5 && st().armed, "two requests in a row: the second restores first, then switches off again");
+            shots();
+            Check(occ.value && occ.sets == 6, "... and the next ProcessScreenShots switches it back on");
+            occ.value = false;
+            request();
+            shots();
+            Check(!occ.value && occ.sets == 6, "occlusion already off (player or ini): left alone");
+            occ.value = true;
+            HANDLE th = CreateThread(nullptr, 0, [](void* p) -> DWORD { reinterpret_cast<void (*)(void*)>(p)(nullptr); return 0; },
+                                     mf.requestHook, 0, nullptr);
+            if (th) {
+                WaitForSingleObject(th, INFINITE);
+                CloseHandle(th);
+            }
+            Check(occ.value && occ.sets == 6 && !st().armed, "a request off the game thread: nothing switched (the game's call still runs)");
+            SetMenuOpenFlashFix(false);
+            shots();
+            request();
+            Check(occ.value && occ.sets == 6, "switched off: the game's behaviour");
+            // the interface checks: a wrong GetInt, a Set that does nothing, flags without ECVF_RenderThreadSafe
+            SetMenuOpenFlashFix(true);
+            setup(0x80);
+            fakeIntBias = 5;
+            shots();
+            request();
+            Check(occ.value && occ.sets == 6 && st().broken, "GetInt disagrees with the bound bool: off for the session, nothing set");
+            fakeIntBias = 0;
+            g_fakeCvarVtable[0xA0 / sizeof(void*)] = reinterpret_cast<void*>(+[](void*, const wchar_t*, int32_t) {});
+            setup(0xA0);  // a "Set" slot that does nothing
+            shots();
+            request();
+            Check(occ.value && st().broken && !st().armed, "Set has no effect: off for the session, not armed");
+            setup(0x80);
+            occ.flags = 0x04000000;
+            shots();
+            request();
+            Check(occ.value && occ.sets == 6 && st().broken, "no ECVF_RenderThreadSafe in the flags: off for the session");
+            occ.flags = 0x04000020;
+            setup(0x80);
+            occSlot = nullptr;
+            shots();
+            request();
+            Check(occ.value && !st().broken, "variable not registered yet: nothing switched, the game's call still runs");
+            // a stale restore point: ProcessScreenShots not seen for over 1 s (e.g. a viewport class that overrides the slot)
+            setup(0x80);
+            shots();
+            MenuOpenFlashTestAgeRestorePoint(1100);
+            request();
+            Check(occ.value && !st().armed && !st().broken, "restore point stale (no ProcessScreenShots for over 1 s): nothing switched");
+            shots();
+            request();
+            Check(!occ.value && st().armed, "... live again after the next ProcessScreenShots: switched off for the open frame");
+            shots();
+            Check(occ.value && !st().armed && !st().broken, "... and back on at that frame's ProcessScreenShots");
+            // the Broken() path: three restores in a row that do not take: off for the session, the variable left as it
+            // is, and the log line names that value
+            setup(0x80);
+            shots();
+            request();
+            Check(!occ.value && st().armed, "restore failures: armed (occlusion off for the open frame)");
+            g_fakeCvarVtable[0x80 / sizeof(void*)] = reinterpret_cast<void*>(+[](void*, const wchar_t*, int32_t) {});
+            shots();
+            shots();
+            Check(!occ.value && st().armed && !st().broken, "two restores that did not take: still armed, retried at the next frame");
+            shots();
+            Check(!occ.value && !st().armed && st().broken && strstr(MenuOpenFlashLastBrokenLog(), "left at 0") != nullptr,
+                  "the third: off for the session, the variable left at 0 and named in the log line");
+            g_fakeCvarVtable[0x80 / sizeof(void*)] = reinterpret_cast<void*>(&FakeSet);
+            const int setsBefore = occ.sets;
+            shots();
+            request();
+            Check(!occ.value && occ.sets == setsBefore && !st().armed, "... nothing switched or restored after that (left as it is)");
+            occ.value = true;
+            // a failed interface check names the value too (1: the game's)
+            setup(0x80);
+            fakeIntBias = 5;
+            shots();
+            request();
+            fakeIntBias = 0;
+            Check(occ.value && st().broken && strstr(MenuOpenFlashLastBrokenLog(), "left at 1") != nullptr,
+                  "interface check failed: the log line names the value left (1, the game's)");
+            SetMenuOpenFlashFix(false);
+            LogMenuOpenFlashStats();
         }
     }
 
@@ -2784,6 +2934,207 @@ int wmain(int argc, wchar_t** argv)
             NpcFadeInTestCall(comp, 0.0f);
             Check(dirties == 1 && updates == 1, "fade on: no scene proxy: the game's way");
             SetNpcFadeInNoRebuild(false);
+        }
+        // PhysAnimNoEmptyLock (public since 1.2.3): UpdateTargetActors' entry (exe+0x354EA80) redirected; the trampoline runs
+        // the game's prologue; the hook against a fake game function
+        Check(!InstallPhysAnimNoEmptyLock(false), "physanim: refuses to install after game code started");
+        Check(InstallPhysAnimNoEmptyLock(true) && game.base[0x354EA80] == 0xE9, "physanim: UpdateTargetActors exe+0x354EA80 now jumps to the hook");
+        {
+            static int gameCalls = 0;
+            static uint8_t lastTeleport = 0xFF;
+            alignas(16) static uint8_t comp[0x200] = {};
+            auto fakeGame = [](uint8_t*, uint8_t tt) { ++gameCalls; lastTeleport = tt; };
+            void* fg = reinterpret_cast<void*>(static_cast<void (*)(uint8_t*, uint8_t)>(fakeGame));
+            int32_t* const num = reinterpret_cast<int32_t*>(comp + 0xE0);  // DriveData.Num in build 19115871
+            SetPhysAnimNoEmptyLock(false);
+            *num = 0; gameCalls = 0;
+            PhysAnimTestCall(comp, 0, fg);
+            Check(gameCalls == 1 && lastTeleport == 0, "physanim off: no driven body still runs the game's code");
+            SetPhysAnimNoEmptyLock(true);
+            gameCalls = 0;
+            PhysAnimTestCall(comp, 0, fg);
+            PhysAnimTestCall(comp, 1, fg);
+            Check(gameCalls == 0, "physanim on: no driven body skips the game's code (tick and teleport)");
+            *num = 3;
+            PhysAnimTestCall(comp, 1, fg);
+            Check(gameCalls == 1 && lastTeleport == 1, "physanim on: driven bodies run the game's code with its teleport type");
+            *num = -1; gameCalls = 0;
+            PhysAnimTestCall(comp, 0, fg);
+            Check(gameCalls == 0, "physanim on: a negative count is no driven body");
+            SetPhysAnimNoEmptyLock(false);
+            *num = 0;
+            PhysAnimTestCall(comp, 0, fg);
+            Check(gameCalls == 1, "physanim off again: the game's code");
+            // a mesh with a pending parallel animation task: the game's code (GetBoneSpaceTransforms completes it there)
+            Check(PhysAnimTestOffset(0) == 0xE0 && PhysAnimTestOffset(1) == 0xC0 && PhysAnimTestOffset(2) == 0xDC0,
+                  "physanim: offsets read from the code (DriveData.Num +0xE0, mesh +0xC0, pending task +0xDC0)");
+            alignas(16) static uint8_t mesh[0x1000] = {};
+            *reinterpret_cast<uint8_t**>(comp + 0xC0) = mesh;
+            SetPhysAnimNoEmptyLock(true);
+            *num = 0; gameCalls = 0;
+            PhysAnimTestCall(comp, 0, fg);
+            Check(gameCalls == 0, "physanim on: a mesh without a pending task, no driven body: skipped");
+            *reinterpret_cast<void**>(mesh + 0xDC0) = mesh;  // any non-null task
+            PhysAnimTestCall(comp, 1, fg);
+            Check(gameCalls == 1 && lastTeleport == 1, "physanim on: a pending parallel animation task runs the game's code");
+            *reinterpret_cast<void**>(mesh + 0xDC0) = nullptr;
+            *reinterpret_cast<uint8_t**>(comp + 0xC0) = nullptr;
+            SetPhysAnimNoEmptyLock(false);
+            // the trampoline: the game's 9-byte prologue, then jmp [rip+0] to UpdateTargetActors + 9
+            const uint8_t* const tr = PhysAnimTestTrampoline();
+            static const uint8_t prologue[9] = {0x88, 0x54, 0x24, 0x10, 0x53, 0x48, 0x83, 0xEC, 0x60};
+            Check(tr && memcmp(tr, prologue, 9) == 0 && tr[9] == 0xFF && tr[10] == 0x25 &&
+                      *reinterpret_cast<const int32_t*>(tr + 11) == 0 &&
+                      *reinterpret_cast<uint8_t* const*>(tr + 15) == game.base + 0x354EA80 + 9,
+                  "physanim: trampoline = the original prologue + an absolute jump to UpdateTargetActors + 9");
+            LogPhysAnimNoEmptyLockStats();
+        }
+        // ChaosMaxPayloadSize (public since 1.2.3, sqprobe): p.MaxPayloadSize's bound value found once on the mapped exe (its registration and
+        // a read in the code), the game's 100000.0f; set on both start-up routes, only over the game's value
+        {
+            float* const v = FindChaosMaxPayloadVar();
+            Check(v && *v == 100000.0f, "chaosmps: p.MaxPayloadSize's value found (registration + a read in the code), the game's 100000");
+            if (v) {
+                Check(!SetChaosMaxPayloadSize(0, true) && !SetChaosMaxPayloadSize(50000, true) && *v == 100000.0f,
+                      "chaosmps: 0 and values up to 100000 leave the game's value");
+                Check(SetChaosMaxPayloadSize(10000000, true) && *v == 10000000.0f, "chaosmps: 10000000 set (version.dll route)");
+                Check(!SetChaosMaxPayloadSize(20000000, true) && *v == 10000000.0f,
+                      "chaosmps: a value that is no longer the game's 100000 is left alone");
+                LogChaosMaxPayloadSizeLive();
+                *v = 100000.0f;  // .data of the mapped image is writable, as in the game
+                Check(SetChaosMaxPayloadSize(10000000, false) && *v == 10000000.0f, "chaosmps: 10000000 set (OBSE64 route)");
+                *v = 100000.0f;
+                LogChaosMaxPayloadSizeLive();
+            }
+        }
+        // RigTraceReuse (public since 1.2.3, corral2): the sphere-trace rig unit and UControlRig::Execute found once by pattern
+        // (discovery only; no writes); the lab's second world-trace unit (RigTraceReuse2)
+        Check(RigTraceUnitDiscover(game) == 0x4B83E90, "rigtrace: the sphere-trace rig unit at exe+0x4B83E90");
+        Check(RigTraceExecuteDiscover(game) == 0x4AB6250, "rigtrace: UControlRig::Execute at exe+0x4AB6250");
+        {
+            // RigTraceReuse with a fake unit and a fake Execute: a repeat with identical inputs inside one execution reuses the
+            // first result (bit for bit); a different input, another execution, a call outside any execution, or the key
+            // off: the game's unit runs
+            static int unitCalls = 0;
+            alignas(16) static uint8_t ctx[0x100] = {};
+            *reinterpret_cast<uint64_t*>(ctx + 0xE0) = 0x1234;  // world
+            auto fakeUnit = [](uint8_t*, const double* s, const double*, const uint8_t*, float r, uint8_t* hit, double* loc, double* nrm) {
+                ++unitCalls;
+                *hit = 1;
+                loc[0] = s[0] + unitCalls; loc[1] = s[1]; loc[2] = r;
+                nrm[0] = 0; nrm[1] = 0; nrm[2] = 1;
+            };
+            void* fu = reinterpret_cast<void*>(static_cast<void (*)(uint8_t*, const double*, const double*, const uint8_t*, float, uint8_t*, double*, double*)>(fakeUnit));
+            static void* s_fu = nullptr;
+            s_fu = fu;
+            static double outA[2][3], outB[2][3];
+            static uint8_t hitA = 0, hitB = 0;
+            static int mode = 0;
+            auto fakeExec = [](void*, void*, void*, void*) -> uint64_t {
+                const double st[3] = {1, 2, 3}, en[3] = {1, 2, -100}, st2[3] = {1, 2, 4};
+                const uint8_t ch = 3;
+                RigTraceTestCall(ctx, st, en, &ch, 10.0f, &hitA, outA[0], outA[1], s_fu);
+                if (mode == 0) RigTraceTestCall(ctx, st, en, &ch, 10.0f, &hitB, outB[0], outB[1], s_fu);
+                else RigTraceTestCall(ctx, st2, en, &ch, 10.0f, &hitB, outB[0], outB[1], s_fu);
+                return 1;
+            };
+            void* fe = reinterpret_cast<void*>(static_cast<uint64_t (*)(void*, void*, void*, void*)>(fakeExec));
+            RigTraceTestSetReuse(true);
+            unitCalls = 0; mode = 0;
+            const uint64_t r0 = RigTraceTestReused();
+            Check(RigTraceTestExecute(fe, nullptr) == 1 && unitCalls == 1 && RigTraceTestReused() == r0 + 1 && hitB == 1 &&
+                  memcmp(outA, outB, sizeof outA) == 0, "rigtrace on: an identical repeat in one execution reuses the first result");
+            Check(RigTraceTestExecute(fe, nullptr) == 1 && unitCalls == 2 && RigTraceTestReused() == r0 + 2,
+                  "rigtrace on: the next execution runs its first trace again");
+            mode = 1;
+            RigTraceTestExecute(fe, nullptr);
+            Check(unitCalls == 4 && RigTraceTestReused() == r0 + 2, "rigtrace on: a different start runs the game's unit");
+            const double st[3] = {1, 2, 3}, en[3] = {1, 2, -100};
+            const uint8_t ch = 3;
+            RigTraceTestCall(ctx, st, en, &ch, 10.0f, &hitA, outA[0], outA[1], fu);
+            RigTraceTestCall(ctx, st, en, &ch, 10.0f, &hitB, outB[0], outB[1], fu);
+            Check(unitCalls == 6 && RigTraceTestReused() == r0 + 2, "rigtrace on: outside an execution every trace runs");
+            RigTraceTestSetReuse(false);
+            mode = 0;
+            RigTraceTestExecute(fe, nullptr);
+            Check(unitCalls == 8 && RigTraceTestReused() == r0 + 2, "rigtrace off: every trace runs");
+            // verify mode: the repeat runs the game's unit and is compared (the fake unit's location differs per call)
+            RigTraceTestSetMode(2);
+            uint64_t d0 = 0, d1 = 0;
+            const uint64_t v0 = RigTraceTestVerified(&d0);
+            unitCalls = 0; mode = 0;
+            RigTraceTestExecute(fe, nullptr);
+            Check(unitCalls == 2 && RigTraceTestReused() == r0 + 2 && RigTraceTestVerified(&d1) == v0 + 1 && d1 == d0 + 1 &&
+                  outB[0][0] == 3.0, "rigtrace verify: the repeat runs the game's unit, is compared and keeps the game's result");
+            // key fields: one mismatch each (context, rig-to-world transform, radius, channel, world), then the identical repeat
+            RigTraceTestSetReuse(true);
+            static int kmode = 0;
+            alignas(16) static uint8_t ctx2[0x100] = {};
+            auto keyExec = [](void*, void*, void*, void*) -> uint64_t {
+                const double st[3] = {5, 6, 7}, en[3] = {5, 6, -50};
+                uint8_t ch = 2;
+                float r = 8.0f;
+                double l[3], n[3];
+                uint8_t h = 0;
+                RigTraceTestCall(ctx, st, en, &ch, r, &h, l, n, s_fu);
+                if (kmode == 0) {
+                    memcpy(ctx2, ctx, sizeof ctx2);
+                    RigTraceTestCall(ctx2, st, en, &ch, r, &h, l, n, s_fu);  // another context, same contents
+                } else if (kmode == 1) {
+                    ctx[0x90] ^= 1;  // the transform's translation
+                    RigTraceTestCall(ctx, st, en, &ch, r, &h, l, n, s_fu);
+                    ctx[0x90] ^= 1;
+                } else if (kmode == 2) {
+                    RigTraceTestCall(ctx, st, en, &ch, 8.5f, &h, l, n, s_fu);
+                } else if (kmode == 3) {
+                    const uint8_t ch2 = 1;
+                    RigTraceTestCall(ctx, st, en, &ch2, r, &h, l, n, s_fu);
+                } else if (kmode == 4) {
+                    *reinterpret_cast<uint64_t*>(ctx + 0xE0) = 0x5678;
+                    RigTraceTestCall(ctx, st, en, &ch, r, &h, l, n, s_fu);
+                    *reinterpret_cast<uint64_t*>(ctx + 0xE0) = 0x1234;
+                } else {
+                    RigTraceTestCall(ctx, st, en, &ch, r, &h, l, n, s_fu);
+                }
+                return 1;
+            };
+            void* ke = reinterpret_cast<void*>(static_cast<uint64_t (*)(void*, void*, void*, void*)>(keyExec));
+            const char* const keyNames[5] = {"rigtrace on: another context runs the game's unit",
+                                             "rigtrace on: another rig-to-world transform runs the game's unit",
+                                             "rigtrace on: another radius runs the game's unit",
+                                             "rigtrace on: another channel runs the game's unit",
+                                             "rigtrace on: another world runs the game's unit"};
+            for (int k = 0; k < 5; ++k) {
+                kmode = k; unitCalls = 0;
+                const uint64_t rk = RigTraceTestReused();
+                RigTraceTestExecute(ke, nullptr);
+                Check(unitCalls == 2 && RigTraceTestReused() == rk, keyNames[k]);
+            }
+            kmode = 5; unitCalls = 0;
+            const uint64_t rk5 = RigTraceTestReused();
+            RigTraceTestExecute(ke, nullptr);
+            Check(unitCalls == 1 && RigTraceTestReused() == rk5 + 1, "rigtrace on: the identical repeat after them is reused");
+            // nested Execute: a repeat in the outer run after an inner Execute returned is not reused
+            static void* s_inner = nullptr;
+            s_inner = fe;
+            auto outerExec = [](void*, void*, void*, void*) -> uint64_t {
+                const double st[3] = {9, 9, 9}, en[3] = {9, 9, -9};
+                const uint8_t ch = 3;
+                double l[3], n[3];
+                uint8_t h = 0;
+                RigTraceTestCall(ctx, st, en, &ch, 4.0f, &h, l, n, s_fu);
+                static void* const self = nullptr;
+                RigTraceTestExecute(s_inner, self);  // the inner run (its own two traces)
+                RigTraceTestCall(ctx, st, en, &ch, 4.0f, &h, l, n, s_fu);
+                return 1;
+            };
+            void* oe = reinterpret_cast<void*>(static_cast<uint64_t (*)(void*, void*, void*, void*)>(outerExec));
+            mode = 0; unitCalls = 0;
+            const uint64_t rn = RigTraceTestReused();
+            RigTraceTestExecute(oe, nullptr);
+            Check(unitCalls == 3 && RigTraceTestReused() == rn + 1,
+                  "rigtrace on: after a nested Execute the outer run's repeat runs the game's unit (inner repeat reused)");
+            RigTraceTestSetReuse(false);
         }
 
         // the scheduler, with fakes for every game function it calls
@@ -3113,6 +3464,7 @@ int wmain(int argc, wchar_t** argv)
                   "pacing: the delegates run afterwards, queue in step");
         }
 
+
         // PacingLeanFlowDrain: a level flow reaches its bound (3 frames: the queue owes an older OT frame) and the owed
         // main queue drains before it; off: the waiting delegates drain with it (as before), on: they stay queued and
         // replay one per frame afterwards, in order
@@ -3163,6 +3515,85 @@ int wmain(int argc, wchar_t** argv)
             Check(doneOn && inDrainOn == 0 && orderOn == wantOn && NpcPacingTestRead().fifo == 0 && !g_pcDeadlock &&
                       NpcPacingTestRead().S == NpcPacingTestRead().E,
                   "pacing: flow bound drain, PacingLeanFlowDrain=1: the main queue drains, the delegates stay queued and run after, in order");
+        }
+        // PacingFadeAware (public since 1.2.3, npcjitter): the fade component's layout from its tick; a far actor that the
+        // rendered test counts as seen but that is still invisible in its spawn fade-in (dither >= 3) waits like an unseen
+        // one, and the re-check releases it once its dither falls below 3; key 0 and a far actor not fading: as 1.2.2
+        {
+            uint32_t fo[5] = {};
+            void* fcls = nullptr;
+            const bool ff = NpcPacingFadeInfo(fo, &fcls);
+            Check(ff && fo[0] == 0xD8 && fo[1] == 0xBC && fo[2] == 0xA8 && fo[3] == 0x7A0 && fo[4] == 0xCC && at(fcls, 0x46B19E0),
+                  "pacing: spawn fade-in tick: state +0xD8, value +0xBC, owner +0xA8, actor's component +0x7A0, floor +0xCC, class exe+0x46B19E0");
+            if (ff) {
+                static uint8_t pClass[0x80], pObjClass[0x80], pActor[0x800], pRoot[0x300], pComp[0x100];
+                static void* pChain[4];
+                memset(pActor, 0, sizeof pActor);
+                memset(pRoot, 0, sizeof pRoot);
+                memset(pComp, 0, sizeof pComp);
+                *reinterpret_cast<int32_t*>(pClass + 0x38) = 2;
+                *reinterpret_cast<int32_t*>(pObjClass + 0x38) = 3;
+                *reinterpret_cast<void**>(pObjClass + 0x30) = pChain;
+                pChain[2] = pClass + 0x30;
+                *reinterpret_cast<void**>(pActor + 0x10) = pObjClass;
+                *reinterpret_cast<void**>(pActor + 0x1A0) = pRoot;
+                *reinterpret_cast<void**>(pRoot + 0x20) = pActor;
+                *reinterpret_cast<double*>(pRoot + 0x280) = 30000.0;  // far
+                *reinterpret_cast<void**>(pActor + 0x7A0) = pComp;
+                *reinterpret_cast<void**>(pComp + 0xA8) = pActor;
+                *reinterpret_cast<int32_t*>(pComp + 0xD8) = 1;     // FadeIn
+                *reinterpret_cast<float*>(pComp + 0xBC) = 4.0f;    // dither 4: invisible
+                struct C { static const uint8_t* Cls() { return pClass; } };
+                NpcPacingTestFade(&C::Cls);
+                NpcPacingTestRendered(+[](const void* a) { return a == static_cast<const void*>(pActor); });  // "seen"
+                SetNpcPacingFadeAware(1);
+                static FakeDelInst pd[3]{};
+                for (int k = 0; k < 3; ++k) {
+                    pd[k].vtable = reinterpret_cast<void*>(0x1234);
+                    pd[k].weak = k == 0 ? static_cast<void*>(&g_pcActors[0]) : static_cast<void*>(pActor);
+                    pd[k].id = 100 + k;
+                    pd[k].costUs = 6000;
+                }
+                PcActor(0, 30000.0);
+                g_pcDelRan.clear();
+                PcPost(kFakeEnd, 0, 0);
+                run(fakeMgr, -1);
+                for (int k = 0; k < 3; ++k) del(&pd[k]);  // 100 (far, unseen) runs; 101, 102 (far, seen, invisible) wait
+                Check(g_pcDelRan == std::vector<int>({100}) && NpcPacingTestRead().fifo == 2,
+                      "pacing: far actor counted as seen but invisible in its fade-in waits like an unseen one (PacingFadeAware=1)");
+                end(fakeMgr, nullptr, 2, 0);
+                PcPost(kFakeEnd, 0, 0);
+                run(fakeMgr, -1);  // 101 runs first; 102 still fading: waits
+                Check(g_pcDelRan == std::vector<int>({100, 101}) && NpcPacingTestRead().fifo == 1, "pacing: one per frame while fading");
+                *reinterpret_cast<float*>(pComp + 0xBC) = 2.0f;  // below 3: becoming visible
+                end(fakeMgr, nullptr, 2, 0);   // the post-tick replay re-checks 102: seen and visible, runs now
+                Check(g_pcDelRan == std::vector<int>({100, 101, 102}) && NpcPacingTestRead().fifo == 0,
+                      "pacing: the re-check releases it once its dither falls below 3");
+                // key 0 (1.2.2): the same seen, invisible actor runs at once
+                *reinterpret_cast<float*>(pComp + 0xBC) = 4.0f;
+                SetNpcPacingFadeAware(0);
+                g_pcDelRan.clear();
+                PcPost(kFakeEnd, 0, 0);
+                run(fakeMgr, -1);
+                for (int k = 0; k < 3; ++k) del(&pd[k]);
+                end(fakeMgr, nullptr, 2, 0);
+                Check(g_pcDelRan == std::vector<int>({100, 101, 102}) && NpcPacingTestRead().fifo == 0,
+                      "pacing: PacingFadeAware=0: a seen actor runs at once whatever its fade (as 1.2.2)");
+                // key 1, the actor seen and not fading in (fade over): runs at once
+                SetNpcPacingFadeAware(1);
+                *reinterpret_cast<int32_t*>(pComp + 0xD8) = 0;
+                g_pcDelRan.clear();
+                PcPost(kFakeEnd, 0, 0);
+                run(fakeMgr, -1);
+                for (int k = 0; k < 3; ++k) del(&pd[k]);
+                end(fakeMgr, nullptr, 2, 0);
+                Check(g_pcDelRan == std::vector<int>({100, 101, 102}) && NpcPacingTestRead().fifo == 0 && !g_pcDeadlock &&
+                          NpcPacingTestRead().S == NpcPacingTestRead().E,
+                      "pacing: PacingFadeAware=1, a seen actor whose fade-in is over runs at once; queue in step");
+                SetNpcPacingFadeAware(0);
+                NpcPacingTestRendered(nullptr);
+                NpcPacingTestFade(reinterpret_cast<const uint8_t* (*)()>(fcls));
+            }
         }
         SetNpcPacing(false, 4, 4096, 15, false);
         LogNpcPacingStats();

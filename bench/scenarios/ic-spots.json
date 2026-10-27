@@ -1,0 +1,566 @@
+{
+ "name": "ic-spots",
+ "description": "Mini-scenario (save-free): short slices of the Imperial City showcase flight (rumare-loop-flight in showcase.json) around its CPU hitch spots: the Waterfront, Vilverin and the far bridge. Each scene starts ~9 s before its spot at full speed (no fade), so the spot's cells and NPCs attach during the timed flight, and ends ~3 s after it. Same waypoints, speeds, hour (18:15), weather and timescale as the flight. Used for the 1.2.3 numbers of ChaosMaxPayloadSize (ic-vilverin-pass) and PacingLeanFlowDrain (ic-waterfront-pass).",
+ "settings": {},
+ "record": [
+  "r.ScreenPercentage",
+  "Altar.UpscalingMethod",
+  "Altar.FSR3.Quality",
+  "r.FidelityFX.FSR3.QualityMode",
+  "r.FidelityFX.FI.Enabled",
+  "r.VSync",
+  "Altar.GraphicsOptions.VSync",
+  "Altar.GraphicsOptions.FrameRateLimit",
+  "Altar.GraphicsOptions.Brightness",
+  "Altar.GraphicsOptions.HDR",
+  "t.MaxFPS",
+  "sg.ViewDistanceQuality",
+  "sg.ShadowQuality",
+  "sg.GlobalIlluminationQuality",
+  "sg.ReflectionQuality",
+  "sg.PostProcessQuality",
+  "sg.TextureQuality",
+  "sg.EffectsQuality",
+  "sg.FoliageQuality",
+  "sg.ShadingQuality",
+  "r.Lumen.HardwareRayTracing",
+  "r.Lumen.HardwareRayTracing.LightingMode",
+  "r.RayTracing.Culling.Radius",
+  "r.Streaming.PoolSize",
+  "Altar.SaveOnLoading",
+  "Altar.SaveOnFastTravel"
+ ],
+ "masks": [
+  [
+   0.94,
+   0.0,
+   0.06,
+   0.035
+  ]
+ ],
+ "defaults": {
+  "hour": 12,
+  "settle": 8,
+  "measure": 20,
+  "hold": 12
+ },
+ "weathers": {
+  "Clear": "00038EEE",
+  "Cloudy": "00038EF0",
+  "Overcast": "00038EEC",
+  "Fog": "00038EEF",
+  "Rain": "00038EF2",
+  "Thunderstorm": "00038EF1",
+  "Oblivion": "00032E15",
+  "OblivionStorm": "00067199",
+  "SEClear": "00078801",
+  "SECloudy": "00044F59",
+  "SEFog": "00044F5A",
+  "SERain": "00044F5C",
+  "SEThunderstorm": "00044F5D",
+  "SEManiaFog": "00079D76"
+ },
+ "scenes": [
+  {
+   "id": "ic-waterfront-pass",
+   "type": "fly",
+   "world": "Tamriel",
+   "hour": 18.25,
+   "timescale": 1,
+   "weather": "Clear",
+   "speed": 2475,
+   "pitch": -4,
+   "flyopt": "ease=0 easeout=0 clip=1 camlook=2.5 camtau=1.2 camsmooth=2",
+   "tags": [
+    "traversal",
+    "outdoor",
+    "npc",
+    "icspot"
+   ],
+   "comment": "Slice of rumare-loop-flight, waypoints 17-34 (full-flight seconds 14.7-29.6; the spot is 23.9-26.5 s there, i.e. 9.2-11.8 s into this flight): the Waterfront channel: ~10 NPCs created (guards, the Marie Elena pirates, Amusei, a beggar); 61 % of the spike excess is NPC units.",
+   "path": [
+    [
+     42814,
+     30983,
+     890,
+     -4.0,
+     2051
+    ],
+    [
+     41033,
+     30755,
+     899,
+     -4.0,
+     2050
+    ],
+    [
+     39239,
+     30757,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     37491,
+     31147,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     35903,
+     31978,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     34478,
+     33069,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     33142,
+     34270,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     31819,
+     35485,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     30437,
+     36632,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     28947,
+     37634,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     27325,
+     38400,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     25611,
+     38932,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     23854,
+     39308,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     22083,
+     39605,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     20308,
+     39883,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     18536,
+     40177,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     16771,
+     40509,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     15019,
+     40904,
+     900,
+     -4.0,
+     2050
+    ]
+   ]
+  },
+  {
+   "id": "ic-vilverin-pass",
+   "type": "fly",
+   "world": "Tamriel",
+   "hour": 18.25,
+   "timescale": 1,
+   "weather": "Clear",
+   "speed": 2475,
+   "pitch": -4,
+   "flyopt": "ease=0 easeout=0 clip=1 camlook=2.5 camtau=1.2 camsmooth=2",
+   "tags": [
+    "traversal",
+    "outdoor",
+    "npc",
+    "icspot"
+   ],
+   "comment": "Slice of rumare-loop-flight, waypoints 70-94 (full-flight seconds 57.9-75.4; the spot is 67.5-72.0 s there, i.e. 9.6-14.1 s into this flight): Vilverin: levelled-list bandits, slaughterfish, 52 Ayleid statics; NPC units 37 %, Chaos 22 %.",
+   "path": [
+    [
+     15725,
+     85890,
+     900,
+     -4.0,
+     2475
+    ],
+    [
+     17479,
+     86276,
+     900,
+     -4.0,
+     2475
+    ],
+    [
+     19222,
+     86710,
+     900,
+     -4.0,
+     2475
+    ],
+    [
+     20964,
+     87149,
+     900,
+     -4.0,
+     2475
+    ],
+    [
+     22711,
+     87567,
+     900,
+     -4.0,
+     2475
+    ],
+    [
+     24464,
+     87957,
+     900,
+     -4.0,
+     2475
+    ],
+    [
+     26222,
+     88325,
+     900,
+     -4.0,
+     2475
+    ],
+    [
+     27985,
+     88672,
+     900,
+     -4.0,
+     2475
+    ],
+    [
+     29751,
+     88998,
+     900,
+     -4.0,
+     2475
+    ],
+    [
+     31521,
+     89304,
+     900,
+     -4.0,
+     2475
+    ],
+    [
+     33295,
+     89589,
+     900,
+     -4.0,
+     2474
+    ],
+    [
+     35073,
+     89846,
+     901,
+     -4.0,
+     2473
+    ],
+    [
+     36855,
+     90064,
+     903,
+     -4.0,
+     2472
+    ],
+    [
+     38644,
+     90227,
+     910,
+     -4.0,
+     2470
+    ],
+    [
+     40438,
+     90305,
+     923,
+     -4.0,
+     2468
+    ],
+    [
+     42232,
+     90240,
+     949,
+     -4.0,
+     2464
+    ],
+    [
+     43991,
+     89895,
+     1002,
+     -4.0,
+     2460
+    ],
+    [
+     45579,
+     89080,
+     1102,
+     -4.0,
+     2456
+    ],
+    [
+     46837,
+     87814,
+     1251,
+     -4.0,
+     2451
+    ],
+    [
+     47838,
+     86334,
+     1427,
+     -4.0,
+     2446
+    ],
+    [
+     48675,
+     84757,
+     1609,
+     -4.0,
+     2441
+    ],
+    [
+     49369,
+     83110,
+     1782,
+     -4.0,
+     2437
+    ],
+    [
+     49910,
+     81404,
+     1935,
+     -4.0,
+     2434
+    ],
+    [
+     50268,
+     79649,
+     2056,
+     -4.0,
+     2431
+    ],
+    [
+     50423,
+     77862,
+     2131,
+     -4.0,
+     2429
+    ]
+   ]
+  },
+  {
+   "id": "ic-farbridge-pass",
+   "type": "fly",
+   "world": "Tamriel",
+   "hour": 18.25,
+   "timescale": 1,
+   "weather": "Clear",
+   "speed": 2475,
+   "pitch": -4,
+   "flyopt": "ease=0 easeout=0 clip=1 camlook=2.5 camtau=1.2 camsmooth=2",
+   "tags": [
+    "traversal",
+    "outdoor",
+    "npc",
+    "icspot"
+   ],
+   "comment": "Slice of rumare-loop-flight, waypoints 111-130 (full-flight seconds 88.0-103.8; the spot is 97.5-100.0 s there, i.e. 9.5-12.0 s into this flight): the stone bridge on the way back / marauder camp and water creatures: NPC units 42 %, Chaos 18 %.",
+   "path": [
+    [
+     51166,
+     47586,
+     1271,
+     -4.0,
+     2426
+    ],
+    [
+     51577,
+     45839,
+     1341,
+     -4.0,
+     2425
+    ],
+    [
+     52000,
+     44095,
+     1418,
+     -4.0,
+     2423
+    ],
+    [
+     52432,
+     42353,
+     1503,
+     -4.0,
+     2419
+    ],
+    [
+     52873,
+     40614,
+     1596,
+     -4.0,
+     2411
+    ],
+    [
+     53323,
+     38879,
+     1700,
+     -4.0,
+     2399
+    ],
+    [
+     53785,
+     37147,
+     1819,
+     -4.1,
+     2380
+    ],
+    [
+     54262,
+     35421,
+     1957,
+     -4.2,
+     2353
+    ],
+    [
+     54756,
+     33701,
+     2117,
+     -4.4,
+     2316
+    ],
+    [
+     55267,
+     31988,
+     2289,
+     -4.7,
+     2269
+    ],
+    [
+     55793,
+     30278,
+     2455,
+     -5.0,
+     2214
+    ],
+    [
+     56332,
+     28571,
+     2603,
+     -5.3,
+     2152
+    ],
+    [
+     56891,
+     26869,
+     2736,
+     -5.6,
+     2087
+    ],
+    [
+     57480,
+     25177,
+     2862,
+     -6.0,
+     2024
+    ],
+    [
+     58102,
+     23496,
+     2986,
+     -6.4,
+     1966
+    ],
+    [
+     58754,
+     21828,
+     3116,
+     -6.9,
+     1916
+    ],
+    [
+     59429,
+     20170,
+     3260,
+     -7.4,
+     1877
+    ],
+    [
+     60124,
+     18521,
+     3425,
+     -7.9,
+     1847
+    ],
+    [
+     60835,
+     16883,
+     3621,
+     -8.4,
+     1826
+    ],
+    [
+     61558,
+     15254,
+     3844,
+     -9.0,
+     1812
+    ]
+   ]
+  }
+ ]
+}

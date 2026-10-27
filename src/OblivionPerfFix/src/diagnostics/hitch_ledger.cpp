@@ -204,10 +204,12 @@ void TgHook(void* sequencer, int group, uint8_t block)
 {
     if (!g_on.load(std::memory_order_relaxed) || g_tgDepth || !OnGt()) return g_tgOrig(sequencer, group, block);
     ++g_tgDepth;
+    TickSplitGroup(group, true);  // TickSplit: the group being released (no-op unless installed and on)
     const uint64_t t0 = Us();
     g_tgOrig(sequencer, group, block);
     const uint64_t dt = Us() - t0;
     --g_tgDepth;
+    TickSplitGroup(group, false);
     if (g_on.load(std::memory_order_relaxed) && g_tgDepth == 0 && group >= 0 && group < kGroups) f.tg[group] += U32(dt);
 }
 
@@ -571,6 +573,7 @@ void HitchLedgerDrain()
     if (foreground && windowPid)
         if (HWND fg = foreground()) windowPid(fg, &pid);
     g_focused.store(!foreground || pid == GetCurrentProcessId(), std::memory_order_relaxed);
+    TickSplitDrain();  // TickSplit: its windows and slow-frame rows (no-op unless installed)
     if (!g_on.load(std::memory_order_relaxed) && g_head.load() == g_tail.load(std::memory_order_relaxed)) {
         if (g_file) fflush(g_file);
         return;
@@ -599,6 +602,7 @@ void LedgerPreActorTick()
 {
     if (g_on.load(std::memory_order_relaxed) && !f.preTs && OnGt()) {
         f.preTs = Us();
+        TickSplitPreActor();
     }
 }
 
@@ -640,6 +644,7 @@ void LedgerFrameEnd(const LedgerPacing& p)
         g_gridUs.store(0, std::memory_order_relaxed);
         g_gridN.store(0, std::memory_order_relaxed);
         if (st.psoTasks) { g_lastPsoTasks = *st.psoTasks; g_lastPsoTime = *st.psoTime; }
+        TickSplitFrameEnd(TickSplitFrame{});  // not recording: only resets its per-frame state
         return;
     }
     const bool first = !g_wasOn;
@@ -726,6 +731,21 @@ void LedgerFrameEnd(const LedgerPacing& p)
             r.pz = static_cast<float>(z);
         }
         Push(r);
+    }
+    {
+        // TickSplit: every frame's tick groups and actor phase (the window's denominators), slow frames' top entries
+        TickSplitFrame tf{};
+        tf.recording = !first;
+        tf.slow = period >= threshold && !first;
+        tf.frame = g_frames;
+        tf.endUs = now;
+        tf.periodUs = U32(period);
+        const bool hasPre = f.preTs >= f.startUs && f.preTs && f.preTs <= sleepTs;
+        const bool hasPost = hasPre && f.postTs >= f.preTs && f.postTs <= sleepTs;
+        tf.actorUs = hasPost ? U32(f.postTs - f.preTs) : hasPre ? U32(sleepTs - f.preTs) : 0;
+        tf.pairUs = U32(p.pairCumUs - g_lastPacing.pairCumUs);
+        for (int i = 0; i < kGroups; ++i) tf.tgUs[i] = f.tg[i];
+        TickSplitFrameEnd(tf);
     }
     if (now - g_summaryStart >= kSummaryUs) FlushSummary(now);
     g_lastPacing = p;

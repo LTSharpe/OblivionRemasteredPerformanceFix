@@ -229,6 +229,58 @@ switch on a stand-in value (on, off, a player's own value).
 
 **Measured (2026-10-25, the Imperial City flight, 4K, DLSS Performance, ray tracing on, RTX 4090; a fresh game per run, off and on in turn, three rounds):** the two frames that waited for the builds, graphics card busy: at 97.6 s 37.1 / 45.1 / 31.9 -> 18.8 / 20.0 / 21.0 ms, at 41.2 s 52.1 / 67.3 / 62.6 -> 22.1 / 20.4 / 23.9 ms. Frames of 33 ms or more on the flight 158 -> 133.
 
+## Horses and collision checks: work the game repeated every frame
+
+These three are new in 1.2.3. They came from one spot: the horse corral at Brindle Home, west of the Imperial City, where the game's main thread ran slower than anywhere else on the route with only a farmer and four horses in view.
+
+<a id="physanimnoemptylock"></a>
+
+### No exclusive physics lock for animation parts with nothing to move (`PhysAnimNoEmptyLock`)
+
+[Evidence](research.md#physanimnoemptylock).
+
+**The problem.** Every character, creature and horse has a "physical animation" part. Each frame the game updates it: it takes the physics world's exclusive lock, copies the skeleton's pose and then sets the targets of the bodies it drives. In every case we measured it drove none, so the update did nothing, but the exclusive lock still had to wait until every other thread reading the physics world had finished. Next to horses, whose animation reads the physics world on helper threads every frame, that wait came to 0.6-0.9 ms of the main thread's frame for about 23 such parts, and while it waited, the helpers' next reads waited for it.
+
+*Analogy:* closing a shop to take stock of an empty shelf.
+
+**What we did.** When the part drives no body and its skeleton has no animation step still running, the update returns at once. With a driven body, or an animation step still running (which the update would finish first), the game's own update runs as before.
+
+**Why the game can't change.** With nothing to drive, the skipped update only takes and releases the lock, fills a temporary copy that is thrown away and runs a loop zero times: nothing in the game's state changes. The animation-step case, which would change something, is left to the game.
+
+**Measured** (1.2.3 candidate, together with `RigTraceReuse`; 4K, FSR Performance, frame generation, 60 fps cap, Ryzen 7 5800X + RX 9070 XT; scenario `playlog-spots`, scene `brindle-corral-hold`, switched live in one game, off/on/on/off twice): the main thread's work per frame at the corral 10.6 -> 9.2 ms, and the time over the 16.7 ms frame budget 87 % lower (0.29 -> 0.04 ms per frame). With OBSE64 it is not available (the log says so).
+
+<a id="rigtracereuse"></a>
+
+### A horse's repeated ground checks answered once (`RigTraceReuse`)
+
+[Evidence](research.md#rigtracereuse).
+
+**The problem.** A horse's animation rig checks the ground under it with small sweep tests: about 106 of them per horse per frame. The rig's program runs a test again each time a later step uses its result (about 12 times each), so 9 in 10 of those tests repeat one the same rig made a few microseconds earlier in the same step, with exactly the same position, size, direction and pose. Each test holds the physics world's read lock and costs helper-thread time (6-10 ms of it per frame at the corral, with four horses).
+
+*Analogy:* looking out of the window to check the weather each time someone asks, ten times a minute.
+
+**What we did.** Within one run of a rig's program (one animation step on one thread), a test whose inputs are bit for bit the same as an earlier one of that run gets that test's answer. Anything different (another position, another rig, another step) runs the game's own test.
+
+**Why the game can't change.** The repeat asks the same physics world the same question on the same thread microseconds later. Its answer could only differ if another thread moved something in between, and when exactly the game's main thread moves bodies relative to the helpers' tests is left to chance in the game itself; the reused answer is one the game could have given. We checked it with a mode that runs every repeat anyway and compares: 0 differences in 2.6 million repeats, standing among the horses, riding through them, and with wolves and a troll fighting by them. `RigTraceReuse=2` runs that check (results in the log).
+
+**Measured.** See `PhysAnimNoEmptyLock` above (both together). On their own in a small-window test at the corral: the main thread's pre-physics work -0.5 ms per frame, the main thread's waits for the physics lock 0.6-0.9 -> about 0.1 ms per frame. With OBSE64 it is not available (the log says so).
+
+<a id="chaosmaxpayloadsize"></a>
+
+### Collision checks no longer walk a list of the whole map first (`ChaosMaxPayloadSize`)
+
+[Evidence](research.md#chaosmaxpayloadsize).
+
+**The problem.** Every collision check (characters walking, sight lines, horses' ground checks, objects landing; hundreds per frame on the main thread alone) asks the physics world's search trees what is near. Before using a tree, each check went through the tree's list of shapes "too big for the tree", one by one: shapes larger than 1 km (the engine's setting `p.MaxPayloadSize`, 100000 cm). This game's world has about 730 of them, most of them 1.6 km tall columns 4-50 m wide spread over the whole map. So every check tested about 730 shapes from all over the map before the tree found the 10-20 that are actually close.
+
+*Analogy:* a library that keeps its oversized atlases on a cart by the door, and makes everyone look through the whole cart before going to the shelves.
+
+**What we did.** At start-up, before the engine reads its settings, the setting is raised to 10000000 cm (100 km), so those shapes are filed in the trees like everything else. The same as the line `p.MaxPayloadSize=10000000` in Engine.ini; a line of your own there still wins.
+
+**Why the game can't change.** The list and the tree run the same test on the same shapes, and the tree only skips shapes that cannot touch the check. So every check finds the same objects, and a sweep or a sight line the same nearest one. Only the order in which shapes are looked at changes: before, the big shapes always came first. That order could only matter for an exact tie, a sight line starting inside two shapes at once; in our scenes the share of such stops on the columns stayed the same (0.28 % vs 0.29 % of sight-line tests), and ties among other shapes already depend on the tree's shape, which the game varies as areas load. Nothing drawn uses these trees.
+
+**Measured** (1.2.3 candidate; 4K, FSR Performance, frame generation, 60 fps cap, Ryzen 7 5800X + RX 9070 XT; on/off/on over three game starts): the main thread's tick work per frame at the Skingrad forest spot (`skingrad-spots`, scene `sk-d`) 9.7 -> 8.5 ms and in Vilverin's flight slice (`ic-spots`, scene `ic-vilverin-pass`) 8.8 -> 7.6 ms; the time over the 16.7 ms frame budget 50 % and 32 % lower. Shapes tested per check 385 -> 14. No added hitch at doors (loading builds the trees). Works on both routes, also with OBSE64.
+
 ## Travelling: memory and threads
 
 <a id="lumenkeeparraycapacity"></a>
@@ -871,9 +923,11 @@ leaves the same physics state.
 
 **What it does not fix (yet).** Some single steps cannot be split: applying a character's real body and head (18-20 ms) or putting on a robe (13-21 ms) still take one frame each, so a burst becomes a series of shorter hitches rather than none.
 
+**In view but not visible yet** (since 1.2.3). Every character that appears fades in, and for the first part of the fade it cannot be seen at all. The "out of sight" test used to count a far character as seen as soon as the engine drew it, even fully faded out, so a crowd appearing far away in front of you (the worshippers at Namira's Shrine on the Bruma night route, also behind trees) was still built all at once. Such a character now counts as out of sight until its fade makes it visible, and the first waiting piece is checked again every frame so it runs as soon as the character could be seen. On that route this removed about 28 % of the frame-time jitter from building characters; no waiting character was visible. `PacingFadeAware=0` goes back to the old test.
+
 **Keeping area loading in order.** Each newly loaded area's set-up must wait for all earlier world-logic messages. It waits up to three frames rather than forcing the waiting characters through at once. While each held frame completes a create or head unit from the same world-logic frame, it may wait up to eight frames; without that progress the three-frame limit applies. The game thread's frame-done message waits too, pausing the old engine just as the long frame would. Every message stays in order. On the Silver Road the shorter wait avoided 2-3 creates in a single 25-40 ms frame; on the Echo Mine walk at 4K, allowing continued progress avoided two creates being drained into one ~30 ms frame instead of ~20 ms frames.
 
-**... and only what it needs** (`PacingLeanFlowDrain`). When an area's set-up has waited its three frames, the waiting characters' create steps run before it, as in the game. Until now their clothes, hair and body steps ran in that same frame too (13-21 of them on the Imperial City flight). In the game those steps come after an area's set-up anyway, so they now stay queued and run in the frames after it, paced like the rest, as they already did when the set-up met a complete queue. Measured on the Imperial City flight (2026-10-27, 1.2.2, 4K, FSR Performance; a fresh game per run, off and on in turn), where an area's set-up reached its three frames (4 of 6 runs): the most character work in one frame there 32.6 / 42.9 -> 30.4 / 21.4 ms. Over the whole flight it made no measurable difference (slowest frame, hitches, 1% low).
+**... and only what it needs** (`PacingLeanFlowDrain`, since 1.2.3, pull request #25 by mkusm). When an area's set-up has waited its three frames, the waiting characters' create steps run before it, as in the game. Until now their clothes, hair and body steps ran in that same frame too (13-21 of them on the Imperial City flight). In the game those steps come after an area's set-up anyway, so they now stay queued and run in the frames after it, paced like the rest, as they already did when the set-up met a complete queue. mkusm measured it on an NVIDIA card (see pull request #25 and issue #18), and we checked it on our RX 9070 XT (4K, FSR Performance, frame generation, 60 fps cap; the Waterfront slice of that flight, `ic-spots`): where an area's set-up reaches its three frames, that frame is shorter. Over a whole flight it makes no measurable difference (slowest frame, hitches, 1% low).
 
 ---
 
@@ -1224,6 +1278,22 @@ switched live on/off/off/on, four opens each):** the frame that opens the invent
 -19 ms); the time the screen stood still ~70 ms instead of ~88 ms. Each 33 MB copy now ~3 ms (was 6-9). With `ScreenshotReadbackConvert`:
 170 ms -> ~121 ms, screen still ~115 ms -> ~70 ms. Pictures of the inventory and of the world after closing look the
 same with and without. Closing the menu is not affected (that hitch is the world's first frame being drawn again).
+
+<a id="menuopenflashfix"></a>
+
+### No bright flash when the menu opens (`MenuOpenFlashFix`)
+
+[Evidence](research.md#menuopenflashfix).
+
+**The problem.** A game bug (GitHub issue #5): when you opened the pause menu, the inventory or the map after a while without one, one frame could show a bright, washed-out landscape behind the menu. The menu's background is not a flat picture: the game switches the camera to a small room placed far outside the map, which shows a blurred screenshot of your view, with the menu on top. On the frame the menu opens, that room has just appeared, and if its far-away place happened to be in your view, the engine's "what can be seen" check (occlusion culling) judged it from your old camera, where it is hidden behind the landscape. On the next frame, inside the room, the check left out its walls and the screenshot, and you saw the world around that far-away place. The check trusts recent results for about eight seconds, so it happened at the first menu after some play, not at a quick second one.
+
+*Analogy:* a stage set built behind the curtain; on opening night the stagehands' list still says the set is hidden behind the theatre, so the curtain rises on the empty street behind it.
+
+**What we did.** The frame on which the menu opens is drawn without the "what can be seen" check, and the check is switched back on right after that frame has been handed to the graphics side. So on the next frame the room is known to be there, and the menu opens straight onto its normal blurred background.
+
+**Why the game can't change.** Without the check a frame draws more, never less: whatever the check would have left out lies behind something solid and is covered anyway, so the opening frame looks the same; effects such as outlines are never subject to the check. The check is the engine's own setting, switched with its own priority, and nothing is switched unless every part was found and checked. It costs one longer frame at menu open. `MenuOpenFlashFix=0` keeps the game's way. With OBSE64 the fix is not available (the log says so).
+
+**Measured.** Hidden game, frame rate capped low so that every frame is captured, camera facing the room's direction: without the fix the wrong frame came in 6 of 6 opens (854x480 and 4K, FSR and frame generation), with it in 0 of 7.
 
 ## Saving
 
@@ -1687,6 +1757,20 @@ rest). Where a piece of the game's code is not found, its column is left empty (
 file into its capture and writes `ledger.md`; or run `python tools/stutter_ledger.py <Win64 folder or csv>`. With the
 switch at 0 at start-up nothing is installed; once installed, the switch stops and restarts the recording while the
 game runs.
+
+**The tick split** (`HitchLedgerTickSplit`, since 1.2.3, off by default). The ledger says how long the main thread's
+"tick" work took (the per-frame updates of characters, horses, their animation and physics parts, timers); the tick
+split says what it was made of. With `HitchLedger=1` and `HitchLedgerTickSplit=1` at start-up the DLL times every update
+the main thread runs, keyed by its kind and the class of what it updates (for example `SkeletalMeshComponent` or
+`VPairedPawnMovementComponent`), adds the rest of the world update in a few buckets (timers, the camera, streaming), and
+writes a row for each every 2 seconds to `OblivionPerfFix-ticksplit.csv` next to the log (about 0.3 MB a minute, at most
+64 MB, the previous session's kept as `.1.csv`), plus the top three entries of every slow frame. `python
+tools/tick_split.py <csv>` ranks it (`--run <benchmark run folder>` gives one table per scene). It only reads the clock
+around the game's own calls: about 45 ns per timed update in the self-test, about 0.4 ms per frame in a crowd of ~1,300
+updates per frame (within the noise); with the switch at 0 at start-up nothing is installed. Only with the `version.dll`
+install (with OBSE64 it stays off); `tools/tick_split.py` is in the GitHub repository, not in the mod's zips. It helped
+us confirm where the horse corral's time went (stack samples named the cause) for `PhysAnimNoEmptyLock` and
+`RigTraceReuse`.
 
 ## All together (Cheydinhal, 720p, FSR Performance, frame generation off)
 

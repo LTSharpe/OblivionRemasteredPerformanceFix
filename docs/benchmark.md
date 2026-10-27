@@ -84,6 +84,8 @@ numbers are yours, not the README's.
 | Cheydinhal flight, 4K, no frame generation | `tools\Bench-Report.ps1 -Scenario cheydinhal-show -Profile promo -Rounds 2` | as above |
 | Cheydinhal streets when the CPU is the limit | `tools\Bench-Report.ps1 -Profile cpu -Rounds 2` | 1280x720 window, FSR Performance, no frame generation |
 | Your own settings, any scene | `tools\Bench-Report.ps1 -Scenario showcase -Profile own` | nothing: the game as you set it up |
+| 1.2.3: the horse corral (`PhysAnimNoEmptyLock` + `RigTraceReuse` off vs on) | `tools\Run-Benchmark.ps1 -Scenario playlog-spots -Scenes brindle-corral-hold -Profile native-cap60 -Label corral-off -FixIni @{ PhysAnimNoEmptyLock = 0; RigTraceReuse = 0; HitchLedger = 1; HitchLedgerTickSplit = 1 }`, then the same with `-Label corral-on` and both keys at 1, in turn, fresh games | as the first row; compare the game thread's tick work per frame with `py -3 tools\tick_split.py <ticksplit csv> --run <run folder>` |
+| 1.2.3: collision checks (`ChaosMaxPayloadSize` 0 vs 10000000) | the same pattern with `-Scenario skingrad-spots -Scenes sk-d` and `-Scenario ic-spots -Scenes ic-vilverin-pass`, `-FixIni @{ ChaosMaxPayloadSize = 0; ... }` vs `10000000` (start-up key: a fresh game per side) | as above |
 
 The report's numbers are means over the rounds. Run-to-run noise is about ±5-10 % on fps, more on stutter counts, so
 use `-Rounds 3` or more for small differences, and close heavy programs while it runs (we saw a busy PC double the
@@ -222,7 +224,7 @@ tools\Sample-Timeline.ps1 -OutPrefix captures\t1 -Seconds 10          # the samp
 | a run was stopped half-way, or the game is still running hidden | `tools\Run-Benchmark.ps1 -Close`: closes it and restores settings, saves and UE4SS |
 | `BENCH-RESULT partial` | some scenes failed; the report says which and why (often a crash, then the runner restarted the game) |
 | `frameCapture: cpu-only` in a result | PresentMon could not follow frames to the display; frame times are CPU-side, GPU busy is missing. The log has a `PresentMon diagnosis:` line |
-| your game or Documents folder isn't found | set `$env:OBLIVION_GAME_DIR` (the folder with `OblivionRemastered\`) or `$env:OBLIVION_SAVED_DIR` (`...\My Games\Oblivion Remastered\Saved`); `tools\GamePaths.ps1` shows what it found |
+| your game or Documents folder isn't found | set `$env:OBLIVION_GAME_DIR` (the folder with `OblivionRemastered\`) or `$env:OBLIVION_SAVED_DIR` (`...\My Games\Oblivion Remastered\Saved`); `tools\GamePaths.ps1` shows what it found. A copy of the game outside Steam (no `steam_api64.dll` in the folder) is started directly |
 | UE4SS state unclear | `tools\Install-UE4SS.ps1 -Status` |
 
 **Paths and privacy.** The game and its Documents folder are found through Steam's library list (`tools\GamePaths.ps1`;
@@ -266,6 +268,23 @@ py -3 tools\slice_flight.py --src showcase --scene rumare-loop-flight --out my-s
 Spot times are seconds into the full flight (the plots' time axis). Check once that the slice shows the problem before
 you iterate on it. Runs are made comparable by default (pinned conditions, a fixed random seed: below); start each pass from a fresh
 world (the default), and note what still differs between runs (characters' behaviour, GPU state).
+
+### The challenge scenes (`challenges`)
+The open problems we invite help on (GitHub issues labelled "challenge") each have a save-free scene in
+`bench/scenarios/challenges.json`: `ic-waterfront-pass` (the Imperial City Waterfront's character bursts),
+`brindle-corral-hold`, `brindle-control-hold` and `brindle-corral-walk` (the Brindle Home horse corral, a control spot
+~120 m west, and a walk inside the corral), `ride-track-fly` and `ride-track-foot` (a riding track flown at horse speed
+and walked; riding a horse itself is not in the benchmark yet). Iterate small with one game kept open, then confirm at
+your own settings; with `HitchLedger=1` and `HitchLedgerTickSplit=1` in the ini (set before the game starts) each run
+also leaves the tick split, which `py -3 tools\tick_split.py <csv> --run <run folder>` ranks per scene:
+
+```
+.\tools\Run-Benchmark.ps1 -Scenario challenges -Scenes brindle-corral-hold, brindle-control-hold -Profile small -Session reuse
+.\tools\Run-Benchmark.ps1 -Scenario challenges -Scenes brindle-corral-hold -Profile own
+```
+
+Run the hold and its control in the same game, one after the other, so they differ only in the place. The issue for each
+challenge says what we know and what we already tried.
 
 ### Identical runs: pinned conditions, `-FixedSeed` and `tools\Repro-Check.ps1`
 Every run is pinned by default (`-NoPin` for the old behaviour): every scene gets the same conditions in every run: the weather (the scene's, else the scenario's default, else

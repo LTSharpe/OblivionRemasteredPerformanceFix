@@ -110,6 +110,10 @@ namespace OblvBench
         [DllImport("ntdll.dll")] static extern int NtQuerySystemInformation(int cls, byte[] buf, int len, out int ret);
         [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
         [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+        // CPU used by other processes (2026-10-26, worker brumaburst: other agents' parallel builds during runs made
+        // 0.8-12 s bursts of 25-80 ms game frames): system busy time (GetSystemTimes, all logical processors) minus the game's.
+        [DllImport("kernel32.dll")] static extern bool GetSystemTimes(out long idle, out long kernel, out long user);
+        [DllImport("kernel32.dll")] static extern bool GetProcessTimes(IntPtr h, out long c, out long e, out long k, out long u);
         const uint QUERY_LIMITED = 0x1000, THREAD_QUERY_LIMITED = 0x0800;
 
         sealed class Th
@@ -131,6 +135,8 @@ namespace OblvBench
         readonly List<double> pageIns = new List<double>();     // cumulative system pages read for hard faults
         readonly List<double> hardFaults = new List<double>();  // cumulative hard page faults of the game itself
         readonly List<bool> fgOwn = new List<bool>();           // the game owned the foreground window at this sample
+        readonly List<double> sysBusy = new List<double>();     // cumulative busy CPU ms of the whole system (all processes)
+        readonly List<double> gameCpu = new List<double>();     // cumulative CPU ms of the game process
         readonly byte[] spi = new byte[0x400];
         byte[] procInfo = new byte[1 << 20];
         double pageInBase; uint pageInLast; bool pageInSeen;
@@ -252,6 +258,9 @@ namespace OblvBench
                     uint fgPid = 0; IntPtr fgw = GetForegroundWindow();
                     if (fgw != IntPtr.Zero) GetWindowThreadProcessId(fgw, out fgPid);
                     fgOwn.Add(fgPid == (uint)pid);
+                    long si, sk, su, pc, pe, pk, pu;
+                    sysBusy.Add(GetSystemTimes(out si, out sk, out su) ? (sk + su - si) / 10000.0 : (sysBusy.Count > 0 ? sysBusy[sysBusy.Count - 1] : 0));
+                    gameCpu.Add(GetProcessTimes(hProc, out pc, out pe, out pk, out pu) ? (pk + pu) / 10000.0 : (gameCpu.Count > 0 ? gameCpu[gameCpu.Count - 1] : 0));
                 }
                 n++;
                 next += intervalMs;
@@ -385,6 +394,38 @@ namespace OblvBench
             lock (gate) { return (At(hardFaults, 0, Pos(t1)) - At(hardFaults, 0, Pos(t0))) / ((t1 - t0) / 1000.0); }
         }
 
+        /// CPU used by all other processes inside [t0, t1], in cores (CPU ms per ms of wall time): other programs that
+        /// compete with the game for the processors (a compiler, a scan, another game). 0 if unknown.
+        public double OtherCores(double t0, double t1)
+        {
+            if (t1 <= t0) return 0;
+            lock (gate)
+            {
+                double p0 = Pos(t0), p1 = Pos(t1);
+                double v = (At(sysBusy, 0, p1) - At(sysBusy, 0, p0)) - (At(gameCpu, 0, p1) - At(gameCpu, 0, p0));
+                return Math.Max(0, v / (t1 - t0));
+            }
+        }
+
+        /// The highest OtherCores over any ~1 s stretch inside [t0, t1].
+        public double OtherCoresMax(double t0, double t1)
+        {
+            lock (gate)
+            {
+                double max = 0; int j = 0;
+                for (int i = 0; i < times.Count && i < sysBusy.Count && i < gameCpu.Count; i++)
+                {
+                    if (times[i] < t0) continue;
+                    if (times[i] > t1) break;
+                    if (j < i) j = i;
+                    while (j < times.Count - 1 && j < sysBusy.Count - 1 && j < gameCpu.Count - 1 && times[j] - times[i] < 1000 && times[j + 1] <= t1) j++;
+                    double dt = times[j] - times[i];
+                    if (dt >= 500) max = Math.Max(max, ((sysBusy[j] - sysBusy[i]) - (gameCpu[j] - gameCpu[i])) / dt);
+                }
+                return max;
+            }
+        }
+
         /// The game's page faults (soft and hard) per second inside [t0, t1].
         public double FaultsPerSec(double t0, double t1)
         {
@@ -441,6 +482,7 @@ namespace OblvBench
                 {
                     w.Write("Sec,IoReadMBps,PrivateGB");
                     foreach (string nme in names) w.Write("," + nme.Replace(',', ' '));
+                    w.Write(",OtherCores");                                   // last column (2026-10-26): other processes' CPU, cores
                     w.WriteLine();
                     for (double t = times[0]; t + 1000 <= times[times.Count - 1]; t += 1000)
                     {
@@ -455,6 +497,8 @@ namespace OblvBench
                         w.Write("," + ((At(ioRead, 0, p1) - At(ioRead, 0, p0)) / 1048576.0).ToString("F1", CultureInfo.InvariantCulture));
                         w.Write("," + (At(priv, 0, p1) / 1073741824.0).ToString("F2", CultureInfo.InvariantCulture));
                         foreach (string nme in names) { double v; sum.TryGetValue(nme, out v); w.Write("," + (v / 10.0).ToString("F1", CultureInfo.InvariantCulture)); }
+                        double oc = (At(sysBusy, 0, p1) - At(sysBusy, 0, p0)) - (At(gameCpu, 0, p1) - At(gameCpu, 0, p0));
+                        w.Write("," + Math.Max(0, oc / 1000.0).ToString("F2", CultureInfo.InvariantCulture));
                         w.WriteLine();
                     }
                 }

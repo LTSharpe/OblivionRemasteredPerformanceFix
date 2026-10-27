@@ -125,7 +125,7 @@ if (-not $Base -and -not $Test) {
                     $t = $Matches[1]; $m = $Matches[2]
                     $say = switch -Regex ($m) {
                         '^starting the game' {
-                            if ((Get-OblivionGame).LaunchMethod -eq 'Steam') { 'Steam starts the game; it opens by itself (no save is loaded, your characters are not touched)' }
+                            if ($game.LaunchMethod -ne 'Direct') { 'Steam starts the game; it opens by itself (no save is loaded, your characters are not touched)' }
                             else { 'the game opens by itself (no save is loaded, your characters are not touched)' }
                         }
                         '^waiting for the main menu' { 'skipping the start-up videos' }

@@ -63,6 +63,7 @@ std::atomic<bool> g_allocTrimHooked{false};  // CommandAllocatorTrim installed
 std::atomic<bool> g_navLinkHooked{false};    // NavLinkFast installed
 std::atomic<bool> g_saveBytesHooked{false};  // SaveBytesBulk / SaveThumbnailAsync (lab: and SaveStallTimers) installed
 std::atomic<bool> g_saveRefIdHooked{false};  // SaveRefIdIndex installed
+std::atomic<bool> g_physAnimHooked{false};   // PhysAnimNoEmptyLock installed (start-up)
 
 // Re-reads the ini every second so AtmosphereDirtyFilter, AtmosphereLightFastPath, AtmosphereLightCloudPath, RdgParallelTranslate,
 // RdgSubmitBatch, ClothConfigCache, FrozenClothStretchFix, NpcFadeInNoRebuild, PrepareCollisionBehindLoadingScreen, NameLookupCrashGuard, TrapCrashGuard, HavokPickWarningGuard,
@@ -155,6 +156,9 @@ DWORD WINAPI MonitorThread(LPVOID)
         SetReadbackConvertMode(cfg.screenshotReadbackConvert);  // ScreenshotReadbackConvert: no-op unless installed at start-up
         SetScreenshotParallel(cfg.screenshotParallel);          // ScreenshotParallel: no-op unless installed at start-up
         if (g_focusHooked) SetFocusRestoreEnabled(cfg.restoreFsrAfterAltTab);
+        SetMenuOpenFlashFix(cfg.menuOpenFlashFix);  // MenuOpenFlashFix: no-op unless installed at start-up
+        if (g_physAnimHooked) SetPhysAnimNoEmptyLock(cfg.physAnimNoEmptyLock);
+        SetRigTraceReuse(cfg.rigTraceReuse);  // RigTraceReuse: no-op unless installed at start-up
         if (g_lumenHooked) SetLumenKeepCapacityEnabled(cfg.lumenKeepArrayCapacity && !relief.lumen);
         if (g_uploadHooked)
             SetUploadMemoryKeep(cfg.uploadMemoryKeep && !relief.upload, cfg.uploadMemoryKeepFrames, cfg.uploadPagesToKeep,
@@ -168,8 +172,10 @@ DWORD WINAPI MonitorThread(LPVOID)
         if (g_pacingHooked)
             SetNpcPacing(cfg.npcCreationPacing, cfg.pacingBudgetMs, cfg.pacingMinDistance, cfg.pacingMaxLagFrames, cfg.pacingUseSlack,
                          cfg.pacingFlowWait, cfg.pacingFlowWaitFrames);
+        if (g_pacingHooked) SetNpcPacingFadeAware(cfg.pacingFadeAware);
         if (g_pacingHooked) SetNpcPacingLeanFlowDrain(cfg.pacingLeanFlowDrain);  // PacingLeanFlowDrain: live
         SetHitchLedger(cfg.hitchLedger, cfg.hitchLedgerMs);  // diagnostic: no-op unless installed at start-up
+        SetTickSplit(cfg.hitchLedger && cfg.hitchLedgerTickSplit);  // diagnostic: no-op unless installed at start-up
         HitchLedgerDrain();                                  // ... its slow-frame records into OblivionPerfFix-ledger.csv
         if (g_clothRegHooked) SetClothRegisterLite(cfg.clothRegisterLite);  // ClothRegisterLite: live once installed
         if (g_bodiesHooked) SetParallelStaticBodies(ParallelHelpersAllowed(cfg) && cfg.parallelStaticBodies, cfg.parallelStaticBodiesMin);
@@ -245,6 +251,10 @@ DWORD WINAPI MonitorThread(LPVOID)
             LogAnimTeardownParallelStats();
             LogCellBufferPacedEvictStats();
             LogFocusRestoreStats();
+            LogMenuOpenFlashStats();
+            if (g_physAnimHooked) LogPhysAnimNoEmptyLockStats();
+            LogRigTraceReuseStats();
+            LogChaosMaxPayloadSizeLive();
             LogStreamChurnStats();
             LogAllocatorTrimStats();
             LogNpcPacingStats();
@@ -286,7 +296,7 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
     g_iniPath = dir + L"\\OblivionPerfFix.ini";
     const Config cfg = LoadConfig(g_iniPath.c_str());  // before the log opens: [General] LogFile decides whether it does
     LogOpen((dir + L"\\OblivionPerfFix.log").c_str(), 2, cfg.logFile);  // the last two sessions stay as .1.log and .2.log
-    Log("OblivionPerfFix " OPF_VERSION " loaded as %s in %s", loadedVia,
+    Log("OblivionPerfFix " OPF_VERSION OPF_RELEASE_SUFFIX " loaded as %s in %s", loadedVia,
         steamExe ? "the Steam build (OblivionRemastered-Win64-Shipping.exe)"
                  : "the Xbox / PC Game Pass build (OblivionRemastered-WinGDK-Shipping.exe, experimental)");
     if (!proxyOk) Log("warning: could not resolve all System32\\version.dll exports");
@@ -449,6 +459,11 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
     // RestoreFsrAfterAltTab (a bug fix, not a speed-up): installed only if enabled at startup; afterwards the ini switches it live.
     if (cfg.restoreFsrAfterAltTab) g_focusHooked = ApplyFocusRestoreFix(beforeGameCode);
     else Log("[focus] disabled in OblivionPerfFix.ini (takes a restart to switch on)");
+    // MenuOpenFlashFix (issue #5, game bug): installed only if enabled at start-up (after RestoreFsrAfterAltTab, whose
+    // console-variable offsets it reuses); afterwards the ini switches it live. The OBSE64 route logs it as not installed.
+    if (cfg.menuOpenFlashFix) {
+        if (InstallMenuOpenFlashFix(beforeGameCode)) SetMenuOpenFlashFix(true);
+    } else Log("[menuflash] disabled in OblivionPerfFix.ini (takes a restart to switch on)");
     // LumenKeepArrayCapacity and UploadMemoryKeep (traversal stutter): installed only if enabled at startup; afterwards the ini switches them live.
     if (cfg.lumenKeepArrayCapacity) {
         g_lumenHooked = ApplyLumenKeepCapacityFix(beforeGameCode);
@@ -489,11 +504,11 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
     // runs the backlog at once).
     if (cfg.npcCreationPacing) {
         g_pacingHooked = InstallNpcPacing();
-        if (g_pacingHooked) {
+        if (g_pacingHooked)
             SetNpcPacing(true, cfg.pacingBudgetMs, cfg.pacingMinDistance, cfg.pacingMaxLagFrames, cfg.pacingUseSlack, cfg.pacingFlowWait,
                          cfg.pacingFlowWaitFrames);
-            SetNpcPacingLeanFlowDrain(cfg.pacingLeanFlowDrain);
-        }
+        if (g_pacingHooked) SetNpcPacingFadeAware(cfg.pacingFadeAware);
+        if (g_pacingHooked) SetNpcPacingLeanFlowDrain(cfg.pacingLeanFlowDrain);  // PacingLeanFlowDrain: live
     } else Log("[pacing] disabled in OblivionPerfFix.ini (takes a restart to switch on)");
     // ClothRegisterLite: installed only if != 0 at startup and only as version.dll (the cloth component's native function table is
     // read when the engine registers the class); afterwards the ini switches it live. The lab's ClothRegisterSkip uses the same
@@ -531,6 +546,10 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
     // probe times the same entry; the frame-end sync call; read-only counters); afterwards the ini switches recording live.
     if (cfg.hitchLedger) {
         if (InstallHitchLedger(beforeGameCode, dir.c_str(), g_pacingHooked)) SetHitchLedger(true, cfg.hitchLedgerMs);
+        // Diagnostic TickSplit (HitchLedgerTickSplit): the tick task's ExecuteTick call, the tickables' Tick call and
+        // UWorld::Tick's calls, installed only if on at start-up (then the ini switches it live; off = nothing installed).
+        const bool tickHooks = cfg.hitchLedgerTickSplit;
+        if (tickHooks && InstallTickSplit(beforeGameCode, dir.c_str())) SetTickSplit(cfg.hitchLedgerTickSplit);
     }
     // AnimTeardownParallel: three calls redirected, only if not 0 at startup; afterwards the ini switches it live.
     if (cfg.animTeardownParallel && ParallelHelpersAllowed(cfg)) {
@@ -630,6 +649,20 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
     if (cfg.rayTracingBuildBatch) {
         if (InstallRayTracingBuildBatch(beforeGameCode)) SetRayTracingBuildBatch(true);
     } else Log("[rtbatch] RayTracingBuildBatch off in OblivionPerfFix.ini (takes a restart to switch on)");
+    // PhysAnimNoEmptyLock and RigTraceReuse (the Brindle Home corral's horses): entry detours written only before the game's
+    // code runs (version.dll route; the OBSE64 route logs them as not installed), installed only if on at start-up, then
+    // live.
+    const bool physAnimInstall = cfg.physAnimNoEmptyLock, rigTraceInstall = cfg.rigTraceReuse != 0;
+    if (physAnimInstall) {
+        g_physAnimHooked = InstallPhysAnimNoEmptyLock(beforeGameCode);
+        if (g_physAnimHooked) SetPhysAnimNoEmptyLock(cfg.physAnimNoEmptyLock);
+    } else Log("[physanim] PhysAnimNoEmptyLock disabled in OblivionPerfFix.ini (takes a restart to switch on)");
+    if (rigTraceInstall) {
+        if (InstallRigTraceReuse(beforeGameCode, g_iniPath.c_str())) SetRigTraceReuse(cfg.rigTraceReuse);
+    } else Log("[rigtrace] RigTraceReuse disabled in OblivionPerfFix.ini (takes a restart to switch on)");
+    // ChaosMaxPayloadSize: p.MaxPayloadSize before the engine reads its settings and before any physics scene (start-up,
+    // both routes; only over the game's 100000; an Engine.ini value applied later wins).
+    SetChaosMaxPayloadSize(cfg.chaosMaxPayloadSize, beforeGameCode);
 
     {
         // Start-up cost: the whole Init and its pattern searches (OBSE route: the game's main thread waits for it).
@@ -684,7 +717,7 @@ struct OBSEPluginVersionData {
 extern "C" {
 __declspec(dllexport) OBSEPluginVersionData OBSEPlugin_Version = {
     OBSEPluginVersionData::kVersion,
-    0x010202,  // plugin version 1.2.2
+    0x010203,  // plugin version 1.2.3
     "OblivionPerfFix",
     "OblivionPerfFix",
     // Addresses come from byte-pattern scans and we use no OBSE game structures,

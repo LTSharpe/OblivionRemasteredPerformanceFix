@@ -94,7 +94,7 @@ foreach ($d in 'tools', 'bench', 'mods', 'fix') {
 
 if ($VerdictFrom) { $Mode = 'GpuCheck' } else {
 # ---------------------------------------------------------------- the game
-try { $game = Get-OblivionGame } catch { Stop-Kit "Oblivion Remastered was not found: $($_.Exception.Message)`nFor a non-Steam install, set OBLIVION_GAME_DIR to the game root folder." }
+try { $game = Get-OblivionGame } catch { Stop-Kit "Oblivion Remastered was not found: $($_.Exception.Message)`nThe benchmark needs the Steam build of the game (the Game Pass version is not supported). For a copy of it outside Steam's libraries, set OBLIVION_GAME_DIR to the game root folder." }
 $win64 = $game.Win64
 $running = Get-Process OblivionRemastered-Win64-Shipping -ErrorAction SilentlyContinue
 if ($running) {

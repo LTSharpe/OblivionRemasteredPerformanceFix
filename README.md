@@ -34,16 +34,31 @@ with NVIDIA and AMD graphics cards, DLSS and FSR, Intel and AMD CPUs, on Steam a
 
 ## Results
 
-| Measured on our test PC (yours will differ: see below) | Stock game | With the fix |
-|---|---|---|
-| **Flight round the Imperial City** at 4K with frame generation, frame rate capped at 60 before frame generation | 72 fps, 1% low 33, 19.5 hitches of 50 ms or more per flight, worst frame 135 ms | **102 fps** (+41%), 1% low 45, **4.8 hitches**, worst frame 66 ms |
-| **Flight through Cheydinhal** at 4K, no frame generation | 55 fps, 1% low 26, 4-6 hitches of 50 ms or more | **63 fps**, 1% low **43**, **no hitch** |
-| **Cheydinhal streets** at 4K with frame generation (3 views) | 64 fps (1% low 50) | **91 fps** (1% low 68), +43% |
-| **Cheydinhal when the CPU is the limit** (720p, no frame generation) | 45 fps | **57 fps**, +25% |
-| **Stepping out of a door** at 4K: the worst frame as the picture comes back | 187 ms | **95 ms** |
-| **Opening the menu** on the Graphics page at 4K | 0.74 s freeze | **0.43 s** |
-| **Opening the pause menu or the inventory** at 4K | 0.36 s freeze | **0.20 s** |
-| **Alt-tab** after using the inventory or the map | FSR and frame generation stay off | back on at once |
+| Measured on our test PC (yours will differ: see below) | Stock game | With the fix | Measured on |
+|---|---|---|---|
+| **Flight round the Imperial City** at 4K with frame generation, frame rate capped at 60 before frame generation | 72 fps, 1% low 33, 19.5 hitches of 50 ms or more per flight, worst frame 135 ms | **102 fps** (+41%), 1% low 45, **4.8 hitches**, worst frame 66 ms | 1.0.0-beta |
+| **Flight through Cheydinhal** at 4K, no frame generation | 55 fps, 1% low 26, 4-6 hitches of 50 ms or more | **63 fps**, 1% low **43**, **no hitch** | 0.16.2 (before the first public release) |
+| **Cheydinhal streets** at 4K with frame generation (3 views) | 64 fps (1% low 50) | **91 fps** (1% low 68), +43% | 0.11.0 |
+| **Cheydinhal when the CPU is the limit** (720p, no frame generation) | 45 fps | **57 fps**, +25% | 0.11.0 |
+| **Stepping out of a door** at 4K: the worst frame as the picture comes back | 187 ms | **95 ms** | 0.11.0 |
+| **Opening the menu** on the Graphics page at 4K | 0.74 s freeze | **0.43 s** | 0.11.0 |
+| **Opening the pause menu or the inventory** at 4K | 0.36 s freeze | **0.20 s** | 0.11.0 |
+| **Alt-tab** after using the inventory or the map | FSR and frame generation stay off | back on at once | 0.11.0 |
+| **Pause menu, first open after a while** (game bug, issue #5) | one bright wrong frame, every time in our test | **never** | 1.2.3-beta |
+
+**New in 1.2.3** (the main thread's work per frame, which decides the frame rate where the CPU is the limit; 4K, FSR
+Performance, frame generation, frame rate capped at 60; public scenes in `bench/scenarios/`):
+
+| Where (scenario, scene) | Switch off | Switch on (the 1.2.3-beta default) | Fixes |
+|---|---|---|---|
+| Brindle Home horse corral (`playlog-spots`, `brindle-corral-hold`) | 10.6 ms | **9.2 ms**: time over 16.7 ms per frame -87% | `PhysAnimNoEmptyLock`, `RigTraceReuse` |
+| Skingrad forest (`skingrad-spots`, `sk-d`) | 9.7 ms (tick work) | **8.5 ms**: time over 16.7 ms -50% | `ChaosMaxPayloadSize` |
+| Vilverin, Imperial City flight (`ic-spots`, `ic-vilverin-pass`) | 8.8 ms (tick work) | **7.6 ms**: -32% | `ChaosMaxPayloadSize` |
+| Imperial City Waterfront (`ic-spots`, `ic-waterfront-pass`): the one frame where an area's set-up meets waiting characters | every waiting character's clothes, hair and body steps in that frame | **a shorter frame** in our tests; the steps follow in the next frames | `PacingLeanFlowDrain` (pull request #25) |
+
+These compare 1.2.3 with those switches off and on (everything else on), not with the stock game, measured on
+pre-release builds with the same code for these switches. `PhysAnimNoEmptyLock` and `RigTraceReuse` need the
+`version.dll` route (with OBSE64 they stay off); `ChaosMaxPayloadSize` and `PacingLeanFlowDrain` work on both.
 
 ![Cheydinhal at 4K, average fps, stock game vs the fix](docs/images/cheydinhal-4k.png)
 
@@ -52,9 +67,10 @@ RX 9070 XT (16 GB), 32 GB RAM, Windows 11, Steam build 19115871. The fix itself 
 on yours depends on whether your CPU or your graphics card is the limit (below). "4K" = FSR Performance, hardware ray
 tracing, Ultra with Shadows High. Every number is the mean or median of 2-4 runs per side, each
 in a freshly started game, stock and fix taken in turn, driven by this repository's benchmark (you can re-run every
-row: see [Check it on your PC](#check-it-on-your-pc-before--after)). The Imperial City row was measured with this release; the Cheydinhal
-flight with an earlier build that had about two thirds of today's fixes; the street, door and menu rows with the first
-third of them (the later fixes target travel, so those rows are unchanged or better now).
+row: see [Check it on your PC](#check-it-on-your-pc-before--after)). The last column says which version each row was
+measured on: the Cheydinhal flight with a build that had about two thirds of today's fixes, the street, door and menu
+rows with the first third of them. Later versions only add fixes (the later ones target travel, towns and crowds), so
+we expect those rows to be unchanged or better now; we have not re-measured them on 1.2.3.
 
 - **Your gain depends on your PC.** It is largest where the CPU holds the game back: towns, crowds, travel, high frame
   rates, frame generation (which needs a high base frame rate). **Where your graphics card is the limit** (say native 4K
@@ -82,7 +98,7 @@ third of them (the later fixes target travel, so those rows are unchanged or bet
 |---|---|
 | Steam, no mod manager | the four steps above |
 | Vortex or Mod Organizer 2 | install the same zip as a mod: it has the game's folder layout. In Mod Organizer 2 the files must land in the game's folder, not in `Data` (use its Root Builder plugin, or extract by hand) |
-| OBSE64, or another mod that already uses `version.dll` (some upscaler mods do) | don't overwrite that `version.dll`: download `OblivionPerfFix-<version>-OBSE.zip` instead and extract it into the game folder. It puts `OblivionPerfFix.dll` and its ini into `OblivionRemastered\Binaries\Win64\OBSE\Plugins\`, where OBSE64 loads it. A few fixes can only be installed before the game's own code runs and stay off on this route (the log says which). If both are installed, the fix loads once |
+| OBSE64, or another mod that already uses `version.dll` (some upscaler mods do) | don't overwrite that `version.dll`: download `OblivionPerfFix-<version>-OBSE.zip` instead and extract it into the game folder. It puts `OblivionPerfFix.dll` and its ini into `OblivionRemastered\Binaries\Win64\OBSE\Plugins\`, where OBSE64 loads it. Many fixes can only be put in place before the game's own code runs and stay off on this route ([which ones](#obse64-route-what-stays-off)); the log says so for each. If both are installed, the fix loads once |
 | Xbox / PC Game Pass (experimental) | download `OblivionPerfFix-<version>-GamePass.zip`; its files go into `OblivionRemastered\Binaries\WinGDK\` in the game's folder (usually `C:\XboxGames\The Elder Scrolls IV - Oblivion Remastered\`). Reported working by a few players; less tested than Steam: the log says which fixes found their code, and no log at all means it didn't load. A [test report](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/new/choose) helps everyone |
 | Steam Deck / Linux (one Linux report so far; Steam Deck untested) | as for Steam, then add `WINEDLLOVERRIDES="version=n,b" %command%` to the game's launch options |
 
@@ -95,6 +111,13 @@ third of them (the later fixes target travel, so those rows are unchanged or bet
 | `OblivionPerfFix-<version>-GamePass.zip` | `version.dll`, `OblivionPerfFix.ini` | `OblivionRemastered\Binaries\WinGDK\` |
 
 The log, `OblivionPerfFix.log`, appears next to the DLL at the first start; no log means the fix was not loaded.
+
+### OBSE64 route: what stays off
+
+OBSE64 loads its plugins after the game's own code has started, and many fixes can only be put in place before that.
+With the OBSE package these stay off (the log says so for each): `ViewRenameGuard`, `NpcFadeInNoRebuild`, `FrozenClothStretchFix`, the four `WaterCapture*` fixes, `RayTracingBuildBatch`, `RtSceneBufferKeep`, `InstanceClearReserve`, `OsPageCache`, `NavLinkFast`, `ParallelStaticBodies`, `PipelinedBodyCreation`, `DirtyTreeQuickInsert`, `BulkIndexInsert`, `PhysicsPushParallel`, `PhysicsDestroyBatch`, `PhysAnimNoEmptyLock`, `NpcBodiesOneLock`, `ClothRegisterLite`, `RigVmHashMemo`, `RigLogicMapCache`, `RigTraceReuse`, `AnimTeardownParallel`, `CellBufferPacedEvict`, `ScreenshotReadbackConvert`, `ScreenshotParallel`, `SaveBytesBulk`, `SaveRefIdIndex`, `MenuOpenFlashFix`, `FrameGenCameraInfo`, `FrameGenPacingTuning`, `TaskWaitDeadlockGuard` (and `PsoCompileThreadPool`, which needs it), and the diagnostics `HitchLedger` and `HitchLedgerTickSplit`; `FrameGenAsyncCompute` keeps the game's value. The others work on both routes,
+among them `ChaosMaxPayloadSize`, `NpcCreationPacing`, `NaniteInitialRootPages`, `FrameRateLimitAtStart`,
+`PsoPrecompileFast` and the Lumen, upload and GPU-scene memory fixes. If you can, use the `version.dll` package.
 
 **Updates:** track the mod on [Nexus Mods](https://www.nexusmods.com/oblivionremastered/mods/5709) (Vortex and Mod Organizer 2
 then show when a new version is out), or on GitHub choose *Watch > Custom > Releases*. To update, extract the new zip
@@ -184,7 +207,9 @@ time a new part of the world streams in.
 The fix is one small DLL that loads with the game. For each of its fixes (about forty) it finds the specific place in
 the game's code, checks that it is exactly what it expects, and changes how that code works, in memory only. Each change does **the same work in a
 cheaper way**. Two of them change only *when* something happens: far-away characters you can't see are built a few
-frames later, and the cells behind you are unloaded a few frames later, both in the game's own order.
+frames later, and the cells behind you are unloaded a few frames later, both in the game's own order. Two more can at
+most settle an exact tie or a split-second race differently, in ways the game itself already varies (a horse's repeated
+ground check, the order in which collision checks look at nearby shapes).
 
 | Area | What was slow or broken | What the fix does |
 |---|---|---|
@@ -196,7 +221,8 @@ frames later, and the cells behind you are unloaded a few frames later, both in 
 | **Doors and start-up** | The first frame after a door or fast travel took in all the new area's physics at once; the start-up shader build held loading screens up to 5 s longer for the first minutes | do the physics part behind the loading screen without simulating anything; build shaders at full pace while you are not playing |
 | **Menus** | Opening a menu filtered and copied a full-screen picture one pixel at a time; the Graphics page asked Windows for every display mode eight times over | the same picture computed many times faster; the mode list kept and re-checked |
 | **Frame generation** | AMD's frame generation work waited in line behind the game's own frames: -20-25% rendered fps with it on | run it on the graphics card's second queue (an AMD plugin setting the game leaves off): **+22-29% rendered fps with frame generation** |
-| **Crashes and bugs** | crashes in the game's name table, its trap code, Unreal's video-memory tidying (UE-217692) and AMD's frame generation library; FSR left off after an alt-tab | each guarded so the game carries on as it would have; FSR comes back by itself |
+| **Horses and collision checks** (1.2.3) | Near horses, the game's main thread waited for an exclusive physics lock that animation parts with nothing to move took every frame, and the horses repeated the same ground check about 12 times a frame; every collision check in the game first went through a list of about 730 huge shapes from all over the map | skip the empty update, answer a repeated check with its first answer, file the huge shapes in the search tree like everything else: **about 1.2-1.4 ms less main-thread work per frame** at those places |
+| **Crashes and bugs** | crashes in the game's name table, its trap code, Unreal's video-memory tidying (UE-217692) and AMD's frame generation library; FSR left off after an alt-tab; a bright flash when the menu opens | each guarded so the game carries on as it would have; FSR comes back by itself; the menu opens onto its normal background |
 
 Every fix, its switch and its numbers, in plain words: [docs/how-it-works.md](docs/how-it-works.md). The measurements
 and the ideas we tested and rejected: [docs/research.md](docs/research.md).
@@ -246,6 +272,10 @@ To undo that, copy the files from the kit's `backup\<time>\` folder back into th
 folder.
 
 **Want to use the PC meanwhile?** Double-click **`Benchmark-Hidden.cmd`** instead: the same runs, hidden and muted.
+
+**Game not in a Steam library** (a copy elsewhere)? Since 1.2.3 the benchmark starts it directly: set the environment
+variable `OBLIVION_GAME_DIR` to the game's folder (the one with `OblivionRemastered\` in it) before you start the kit
+(pull request #19 by cgisquet). A Steam install keeps its Steam launch.
 
 "Stock" means the DLL is loaded with every fix switched off, so the game's own code runs, except the fix for the
 game's frame-cap bug (`FrameRateLimitAtStart`: with frame generation on, the game forgets the frame-rate limit you saved
@@ -313,7 +343,7 @@ with the count where we have one. Thin rows say **please report**: a
 | Steam version, game build 19115871 | tested; works for most of the 40+ players who reported |
 | NVIDIA GeForce RTX 20, 30, 40 and 50 series (driver 617.x), DLSS and DLSS frame generation | works: about 25 reports, from RTX 2070 Super to RTX 5090. Higher frame rates where the CPU is the limit, far fewer hitches in the Imperial City flight (for example 24 -> 2 hitches per flight on an RTX 4080, [#14](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/14)). Problem reports on two cards with 6-8 GB, causes not found yet: hitches on a PC short of RAM ([#16](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/16)), a GPU hang with DLSS ([#17](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/17)) |
 | AMD Radeon RX 7000 and 9000 series | works: a handful of reports (RX 7800 XT, 7900 XT, 9060 XT, 9070, 9070 XT), for example 95 -> 104 fps and 11 -> 3 hitches in the flight on an RX 7900 XT ([#10](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/10)). Older Radeon cards: **please report** |
-| Intel Arc graphics, XeSS | no report yet: **please report**. The fixes are in the game and the engine, not in the driver |
+| Intel Arc graphics, XeSS | works: a community report on an Arc B580 with XeSS ([#24](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/24), thanks to nyannoying1337). More Arc reports welcome |
 | CPUs | reported working on AMD Ryzen 3000, 5000, 7000 and 9000 (X3D models included) and Intel Core 9th, 13th and 14th generation; all of them with 12 or more logical processors |
 | CPUs with fewer threads | should work. Helper threads scale with the cores Windows gives the game. Below 8 logical processors (for example 4 cores without SMT, or 6 cores / 6 threads) the fixes that lean most on helper threads stay off and the log says so: we could only test with 16 (and with the game limited to 6 of them, where they were not slower than with them off). To try them anyway, add `ParallelMinProcessors=6` under `[Fixes]` in `OblivionPerfFix.ini`. **Please report** |
 | CPUs with AVX-512, older CPUs without AVX2 | the game uses separate code paths there, each covered by the self-test (the AVX-512 one byte for byte under Intel's CPU emulator). Ryzen 7000 and 9000 (AVX-512) are reported working; Intel CPUs with AVX-512 and CPUs without AVX2: **please report** |
@@ -331,9 +361,17 @@ with the count where we have one. Thin rows say **please report**: a
 ## FAQ
 
 **Does it change graphics or gameplay?** No. Every fix does the same work in a cheaper way, and screenshots with the fix
-on and off match within the noise between two identical runs. Physics and AI are untouched. The only timing changes:
+on and off match within the noise between two identical runs. Physics and AI do the same work. The only timing changes:
 far-away characters you can't see are built a few frames later, and the cells you left behind are unloaded a few frames
-later (about a tenth of a second).
+later (about a tenth of a second). Since 1.2.3 two fixes can at most settle an exact tie or a split-second race
+differently, as the game itself already does from one moment to the next: a horse's repeated ground check gets the
+answer of the identical check made microseconds earlier (`RigTraceReuse`; never different in 2.6 million checked
+repeats), and collision checks look at nearby shapes in another order (`ChaosMaxPayloadSize`; they find the same ones).
+Each has its switch.
+
+**Which version do I have?** Right-click `version.dll` (or `OBSE\Plugins\OblivionPerfFix.dll`) > *Properties* >
+*Details*: since 1.2.3 it shows the product name and version (issue #27). The first line of `OblivionPerfFix.log` says
+it too.
 
 **Does it only work on the maintainer's PC, or on my hardware?** It works on any PC that runs the game. Nothing in it is
 set up for one PC: it finds its code in the game itself, has no paths or per-PC settings, and sizes its helper threads
@@ -398,6 +436,12 @@ game update.
 - **Found a problem?** [Open a bug report](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/new/choose)
   and attach `OblivionPerfFix.log`. For stutter, switch on `HitchLedger=1` first and attach `OblivionPerfFix-ledger.csv`
   too: it says where each slow frame's time went.
+- **Want to find out what makes a place slow?** Set `HitchLedger=1` and `HitchLedgerTickSplit=1` in
+  `OblivionPerfFix.ini` before starting the game (since 1.2.3; both off by default). The game's main-thread updates are
+  then timed by what they update, every 2 seconds, into `OblivionPerfFix-ticksplit.csv` (about 0.3 MB a minute);
+  `python tools\tick_split.py OblivionPerfFix-ticksplit.csv` ranks them (the script is in this GitHub repository, not in
+  the mod's zips). It costs well under a microsecond per update (about 0.4 ms per frame in a big crowd) and nothing
+  when off. Only with the `version.dll` install (with OBSE64 it stays off). [How it works](docs/how-it-works.md#hitchledger).
 - **Tried it on your PC?** A [test report](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/new/choose)
   (hardware, did it load, how it felt) helps us get out of beta.
 - **Want to measure?** Run the [benchmark kit](#check-it-on-your-pc-before--after) (`Benchmark.cmd`) and share its

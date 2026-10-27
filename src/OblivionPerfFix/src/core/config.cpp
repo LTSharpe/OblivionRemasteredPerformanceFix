@@ -96,6 +96,11 @@ Config LoadConfig(const wchar_t* iniPath)
     if (c.saveThumbnailAsync) c.saveThumbnailAsync = 1;
     if (c.taskWaitDeadlockGuard) c.taskWaitDeadlockGuard = 1;          // lab 2 (measure only) reads as on
     if (c.psoCompileThreadPool < -1) c.psoCompileThreadPool = -1;      // 0 the game's, N threads, -1 automatic
+    c.menuOpenFlashFix = get(L"Fixes", L"MenuOpenFlashFix", c.menuOpenFlashFix) != 0;
+    c.physAnimNoEmptyLock = get(L"Fixes", L"PhysAnimNoEmptyLock", c.physAnimNoEmptyLock) != 0;
+    c.rigTraceReuse = get(L"Fixes", L"RigTraceReuse", c.rigTraceReuse);
+    if (c.rigTraceReuse < 0 || c.rigTraceReuse > 2) c.rigTraceReuse = 1;  // 0 off, 1 on, 2 verify; anything else = on
+    c.chaosMaxPayloadSize = get(L"Fixes", L"ChaosMaxPayloadSize", c.chaosMaxPayloadSize);
     c.osPageCache = get(L"Fixes", L"OsPageCache", c.osPageCache);
     c.osPageCacheMB = get(L"Fixes", L"OsPageCacheMB", c.osPageCacheMB);
     c.osPageCacheTrimSeconds = get(L"Fixes", L"OsPageCacheTrimSeconds", c.osPageCacheTrimSeconds);
@@ -112,6 +117,7 @@ Config LoadConfig(const wchar_t* iniPath)
     c.gpuSceneParallelUpload = get(L"Fixes", L"GpuSceneParallelUpload", c.gpuSceneParallelUpload) != 0;
     c.hitchLedger = get(L"Fixes", L"HitchLedger", c.hitchLedger) != 0;
     c.hitchLedgerMs = get(L"Fixes", L"HitchLedgerMs", c.hitchLedgerMs);
+    c.hitchLedgerTickSplit = get(L"Fixes", L"HitchLedgerTickSplit", c.hitchLedgerTickSplit) != 0;
     c.npcCreationPacing = get(L"Fixes", L"NpcCreationPacing", c.npcCreationPacing) != 0;
     c.pacingBudgetMs = get(L"Fixes", L"PacingBudgetMs", c.pacingBudgetMs);
     c.pacingMinDistance = get(L"Fixes", L"PacingMinDistance", c.pacingMinDistance);
@@ -120,6 +126,8 @@ Config LoadConfig(const wchar_t* iniPath)
     c.pacingFlowWait = get(L"Fixes", L"PacingFlowWait", c.pacingFlowWait) != 0;
     c.pacingFlowWaitFrames = get(L"Fixes", L"PacingFlowWaitFrames", c.pacingFlowWaitFrames);
     c.pacingLeanFlowDrain = get(L"Fixes", L"PacingLeanFlowDrain", c.pacingLeanFlowDrain) != 0;
+    c.pacingFadeAware = get(L"Fixes", L"PacingFadeAware", c.pacingFadeAware);
+    if (c.pacingFadeAware > 1) c.pacingFadeAware = 1;  // lab modes 2 / 3 read as on
     c.memoryRelief = get(L"Fixes", L"MemoryRelief", c.memoryRelief) != 0;
     c.memoryReliefRamMB = get(L"Fixes", L"MemoryReliefRamMB", c.memoryReliefRamMB);
     c.memoryReliefCommitMB = get(L"Fixes", L"MemoryReliefCommitMB", c.memoryReliefCommitMB);

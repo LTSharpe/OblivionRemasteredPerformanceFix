@@ -16,6 +16,13 @@
 .PARAMETER OutDir
   Build folder (default: build next to this script). Use a scratch folder to build without touching build\.
 
+.PARAMETER WaitForGame
+  If Oblivion Remastered is running, wait until it is closed, then build (default: refuse with a message). A compile
+  next to a running game makes it stutter, even at below-normal priority.
+
+.PARAMETER IgnoreRunningGame
+  Build even while Oblivion Remastered is running (also $env:OPF_BUILD_IGNORE_GAME=1).
+
 .NOTES
   The compiler is found with vswhere (any VS 2022+ edition with the C++ x64 tools: Build Tools, Community,
   Professional, Enterprise as on GitHub's windows-2022 runners), else the Build Tools default path.
@@ -25,11 +32,43 @@ param(
     [switch]$Debug,
     [switch]$SelfTest,
     [string]$Exe,
-    [string]$OutDir
+    [string]$OutDir,
+    [switch]$WaitForGame,
+    [switch]$IgnoreRunningGame
 )
 # Not 'Stop', also when the caller (or the CI shell) set it: vcvars writes a harmless vswhere warning to stderr, which
 # Windows PowerShell would turn into a terminating error. Every step checks its exit code instead.
 $ErrorActionPreference = 'Continue'
+
+# A compile next to a game someone is playing makes the game stutter, even at below-normal priority (2026-10-26: a build
+# during play tripled the frame-time jitter). So the build refuses while the game runs, or waits for it (-WaitForGame);
+# -IgnoreRunningGame or $env:OPF_BUILD_IGNORE_GAME=1 builds anyway.
+function Test-PlayerGameRunning {
+    if (-not (Get-Process -Name 'OblivionRemastered-Win64-Shipping' -ErrorAction SilentlyContinue)) { return $false }
+    return $true
+}
+if (-not ($IgnoreRunningGame -or $env:OPF_BUILD_IGNORE_GAME -eq '1') -and (Test-PlayerGameRunning)) {
+    if (-not $WaitForGame) {
+        Write-Host ('build: refused: Oblivion Remastered is running, and a compile now would make it stutter. Close the game ' +
+            'and build again, or use -WaitForGame (builds once it is closed) or -IgnoreRunningGame (builds anyway; also ' +
+            '$env:OPF_BUILD_IGNORE_GAME=1).')
+        exit 3
+    }
+    Write-Host 'build: Oblivion Remastered is running: waiting until it is closed (-WaitForGame) ...'
+    while (Test-PlayerGameRunning) { Start-Sleep -Seconds 15 }
+    Write-Host 'build: the game was closed: building'
+}
+
+# The parallel compiles (cl /MP: one process per logical processor) run at below-normal priority, so a game running on
+# the same PC keeps its processors (2026-10-26: builds during benchmark runs made 0.8-12 s bursts of 25-80 ms game
+# frames). The child processes inherit the priority class; it is put back afterwards (also in a caller that runs this
+# script in its own process). The output does not depend on it.
+function Invoke-BelowNormal([scriptblock]$block) {
+    $me = [Diagnostics.Process]::GetCurrentProcess(); $was = $me.PriorityClass
+    $want = if ($env:OPF_BUILD_PRIORITY) { $env:OPF_BUILD_PRIORITY } else { 'BelowNormal' }   # e.g. Normal: as before
+    try { $me.PriorityClass = $want } catch { }
+    try { & $block } finally { try { $me.PriorityClass = $was } catch { } }
+}
 
 function Find-VcVars {
     if ($env:OPF_VCVARS) { return $env:OPF_VCVARS }
@@ -74,6 +113,48 @@ $sources = Get-Sources @()
 # Link exactly the objects of this build (a folder used for another build may hold others).
 $objs = (@('proxy_stubs.obj') + @($sources | ForEach-Object { [IO.Path]::GetFileNameWithoutExtension($_) + '.obj' }) |
     ForEach-Object { "`"$obj\$_`"" })
+# The version resource (Explorer: Properties > Details), from the one version source: OPF_VERSION and OPF_RELEASE_SUFFIX
+# in src\core\common.h (GitHub issue #27). Written as a .rc next to the objects and compiled with the SDK's rc.
+function New-VersionResource([string]$rcPath, [string]$fileName, [string]$description, [string]$fileType) {
+    $common = Join-Path $PSScriptRoot 'src\core\common.h'
+    $ver = (Select-String -LiteralPath $common -Pattern '#define OPF_VERSION "([^"]+)"').Matches[0].Groups[1].Value
+    $sfx = (Select-String -LiteralPath $common -Pattern '#define OPF_RELEASE_SUFFIX "([^"]*)"').Matches[0].Groups[1].Value
+    if ($ver -notmatch '^\d+\.\d+\.\d+$') { throw "OPF_VERSION '$ver' is not major.minor.patch" }
+    $num = ($ver -replace '\.', ',') + ',0'
+    $text = @(
+        '1 VERSIONINFO',
+        "FILEVERSION $num",
+        "PRODUCTVERSION $num",
+        'FILEFLAGSMASK 0x3fL',
+        'FILEFLAGS 0x0L',
+        'FILEOS 0x40004L',
+        "FILETYPE $fileType",
+        'FILESUBTYPE 0x0L',
+        'BEGIN',
+        '  BLOCK "StringFileInfo"',
+        '  BEGIN',
+        '    BLOCK "040904b0"',
+        '    BEGIN',
+        '      VALUE "CompanyName", "LTSharpe and contributors"',
+        "      VALUE `"FileDescription`", `"$description`"",
+        "      VALUE `"FileVersion`", `"$ver$sfx`"",
+        '      VALUE "InternalName", "OblivionPerfFix"',
+        '      VALUE "LegalCopyright", "Copyright (c) 2026 LTSharpe and contributors. MIT License."',
+        "      VALUE `"OriginalFilename`", `"$fileName`"",
+        '      VALUE "ProductName", "Oblivion Remastered Performance Fix"',
+        "      VALUE `"ProductVersion`", `"$ver$sfx`"",
+        '      VALUE "Comments", "https://github.com/LTSharpe/OblivionRemasteredPerformanceFix"',
+        '    END',
+        '  END',
+        '  BLOCK "VarFileInfo"',
+        '  BEGIN',
+        '    VALUE "Translation", 0x409, 1200',
+        '  END',
+        'END')
+    [IO.File]::WriteAllLines($rcPath, [string[]]$text, [Text.Encoding]::ASCII)
+}
+New-VersionResource (Join-Path $obj 'version.rc') 'OblivionPerfFix.dll' 'Oblivion Remastered Performance Fix (OblivionPerfFix; installed as version.dll or as an OBSE64 plugin)' '0x2L'
+$objs += "`"$obj\version.res`""
 # The source and object lists go to cl and link in response files: on the command line they pass cmd's 8,191-character
 # limit in a long checkout path (CI's D:\a\<repo>\<repo>\...).
 $srcRsp = Join-Path $obj 'sources.rsp'
@@ -84,10 +165,11 @@ $cmd = @(
     "call `"$vcvars`" >nul",
     "cd /d `"$PSScriptRoot`"",
     "ml64 /nologo /c /Fo`"$obj\proxy_stubs.obj`" src\core\proxy_stubs.asm",
+    "rc /nologo /fo `"$obj\version.res`" `"$obj\version.rc`"",
     "cl /nologo /MP /std:c++20 $opt /EHsc /W4 /WX /permissive- /Zi /DUNICODE /D_UNICODE $defs /Isrc\core /c `"@$srcRsp`" /Fo`"$obj\\`" /Fd`"$obj\\`"",
     "link /nologo /DLL $ltcg /DEF:OblivionPerfFix.def /OUT:`"$out\OblivionPerfFix.dll`" /PDB:`"$out\OblivionPerfFix.pdb`" /DEBUG /OPT:REF /OPT:ICF `"@$objRsp`" kernel32.lib"
 ) -join ' && '
-cmd /c $cmd
+Invoke-BelowNormal { cmd /c $cmd }
 if ($LASTEXITCODE) { throw "build failed ($LASTEXITCODE)" }
 Get-Item (Join-Path $out 'OblivionPerfFix.dll') | Select-Object Name, Length, LastWriteTime
 
@@ -105,7 +187,7 @@ if ($SelfTest) {
     $skip = @('src\core\main.cpp', 'src\core\proxy.cpp')
     $testRsp = Join-Path $test 'sources.rsp'
     [IO.File]::WriteAllLines($testRsp, [string[]](@('tests\selftest.cpp') + (Get-Sources $skip)))
-    cmd /c "call `"$vcvars`" >nul && cd /d `"$PSScriptRoot`" && cl /nologo /MP /std:c++20 /O2 /MT /EHsc /W4 /WX /permissive- /DUNICODE /D_UNICODE $defs /Isrc\core `"@$testRsp`" /Fo`"$test\\`" /Fe`"$test\selftest.exe`" /link /DYNAMICBASE"
+    Invoke-BelowNormal { cmd /c "call `"$vcvars`" >nul && cd /d `"$PSScriptRoot`" && cl /nologo /MP /std:c++20 /O2 /MT /EHsc /W4 /WX /permissive- /DUNICODE /D_UNICODE $defs /Isrc\core `"@$testRsp`" /Fo`"$test\\`" /Fe`"$test\selftest.exe`" /link /DYNAMICBASE" }
     if ($LASTEXITCODE) { throw "selftest build failed ($LASTEXITCODE)" }
     Push-Location $test
     try {

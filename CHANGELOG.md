@@ -9,11 +9,79 @@ Downloads, checksums and build attestations: https://github.com/LTSharpe/Oblivio
 Bug fixes say whose bug it was: **game bug** = also happens without OblivionPerfFix (in the game, its engine or a
 driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 
-## Unreleased
-- NpcCreationPacing: when a newly loaded area's set-up has waited its three frames for far-away characters, only their
-  creation runs first; their clothes, hair and body steps no longer all run in that frame but stay paced
-  (`PacingLeanFlowDrain`, on; 0 = as before). Imperial City flight, at the spot where this happens: the most character
-  work in one frame there 33-43 -> 21-30 ms; over the whole flight no measurable change.
+## 1.2.3-beta
+For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Thanks to MitochondriaOverlords for issue #5,
+to mkusm for pull request #25, to cgisquet for pull request #19, to Hexaae for issue #27, and to everyone who reported
+results and problems. Numbers below: our test PC (Ryzen 7 5800X, RX 9070 XT), 4K, FSR Performance, frame generation on,
+frame rate capped at 60, unless a line says otherwise; the scenes are public (`bench/scenarios/`).
+
+- **New: horses no longer slow the game's main thread** (`PhysAnimNoEmptyLock`, `RigTraceReuse`, both on; improvements,
+  not bug fixes). Near horses (the corral at Brindle Home, west of the Imperial City) the game's main thread was slower
+  than anywhere else nearby, for two reasons. Every character, creature and horse has a physical-animation part that the
+  game updated every frame under the physics world's exclusive lock although it had nothing to move: that update is now
+  skipped when there is nothing to move (the skipped code changes nothing). And a horse checks the ground about 106
+  times a frame, 9 in 10 of them exact repeats of a check it made microseconds earlier in the same animation step: such a
+  repeat now gets the earlier answer (it could only differ by a split-second race between threads that the game leaves
+  to chance; in 2.6 million checked repeats, standing, riding and with a fight among the horses, it never did;
+  `RigTraceReuse=2` checks instead of reusing). Together, at the corral (`playlog-spots`, scene `brindle-corral-hold`):
+  the main thread's work per frame 10.6 -> 9.2 ms, the time over the 16.7 ms frame budget 87 % lower. Installed at start-up with the version.dll route; with OBSE64 they are not
+  available and the log says so. New keys `PhysAnimNoEmptyLock` (1) and `RigTraceReuse` (1; 2 = check only; 0 = off).
+- **New: collision checks no longer go through a list of the whole map first** (`ChaosMaxPayloadSize`, 10000000; an
+  improvement, not a bug fix). Every collision check (walking, sight lines, horses' ground checks, falling objects) first
+  went through about 730 very large shapes spread over the whole map (most of them 1.6 km tall columns), one by one,
+  before looking at what is nearby: the engine keeps shapes over 1 km (`p.MaxPayloadSize`, 100000 cm) out of its search
+  tree. The fix raises that setting at start-up, so a check tests about 14 shapes instead of 385. Every check finds the
+  same objects; only the order in which they are looked at changes, which could settle an exact tie differently (the
+  tree's shape already varies in the game). The main thread's tick work per frame at the Skingrad forest (`skingrad-spots`,
+  `sk-d`) 9.7 -> 8.5 ms and at Vilverin (`ic-spots`, `ic-vilverin-pass`) 8.8 -> 7.6 ms; the time over 16.7 ms 50 % and
+  32 % lower. No added hitch at doors. Both routes, also OBSE64. A `p.MaxPayloadSize` line in your Engine.ini wins. New
+  key `ChaosMaxPayloadSize` (10000000; 0 = the game's value).
+- **Changed: an area's set-up no longer pulls waiting characters' clothes into one frame** (`NpcCreationPacing`,
+  `PacingLeanFlowDrain`, on; pull request #25 by mkusm, thanks; an improvement, not a bug fix): when a newly loaded
+  area's set-up has waited its three frames for far-away characters, their creation runs first, as before, but their
+  clothes, hair and body steps now stay paced instead of all running in that frame. At the Imperial City Waterfront
+  (`ic-spots`, `ic-waterfront-pass`) that frame was shorter in our tests; over whole passes within the noise.
+  New key `PacingLeanFlowDrain` (1; 0 = as before).
+- **The DLL now carries version information** (issue #27, thanks to Hexaae): Explorer's Properties > Details shows the
+  product name, version (1.2.3-beta) and copyright, so you can check which build is installed as `version.dll` or in
+  `OBSE\Plugins`. The log's first line says `1.2.3-beta` too.
+
+- **Game bug fixed: a bright flash when opening the menu** (`MenuOpenFlashFix`, on; issue #5, thanks to
+  MitochondriaOverlords; happens without OblivionPerfFix too): when you opened the pause menu, inventory or map after a
+  while without one, one frame could show a bright, washed-out view of a far-away landscape behind the menu. The menu's
+  background is a small scene far outside the world, filmed by its own camera. On the frame the menu opens, the
+  engine's visibility check (occlusion culling) still judges that scene from your old camera, and on the next frame it
+  hides the scene's walls and backdrop, so the world around it shows through. That one opening frame is now drawn
+  without occlusion culling, which is switched back on right after; the frame looks the same (only things hidden behind
+  others are drawn and then covered), it is one longer frame at menu open, and the menu opens straight onto its normal
+  background. In our tests the wrong frame went from every time to never. Installed at start-up with the version.dll
+  route; with OBSE64 it is not available and the log says so. New key `MenuOpenFlashFix` (1; 0 = the game's way).
+- **Changed: far characters still invisible in their fade-in count as out of sight** (`NpcCreationPacing`; not a bug
+  fix): every character that appears fades in, and for its first part it cannot be seen at all. The pacing builds
+  far-away characters a piece per frame only while they are out of sight, and its "seen" test counted a character as
+  seen as soon as the engine drew it, even fully faded out (and, behind trees or buildings, only drawn because the
+  engine had not yet learnt that it is hidden). Such characters are now treated as out of sight until they become
+  visible, so a crowd appearing far away (the worshippers at a shrine on the Bruma night route) no longer builds all at
+  once. On that route about 28 % less of the frame-time jitter from building characters (4K, FSR Performance, frame
+  generation, RX 9070 XT); no change at the Imperial City Waterfront, and no frame in which a waiting character was
+  visible. Hidden key `PacingFadeAware` (1; 0 = the 1.2.2 test).
+- **Benchmark: copies of the game outside Steam** (pull request #19 by cgisquet, thanks): with `$env:OBLIVION_GAME_DIR`
+  set to a game folder that has no Steam library the benchmark starts the game's exe directly; a Steam install keeps
+  its Steam launch (we fixed one detail: Steam keeps `steam_api64.dll` under `Engine\Binaries\ThirdParty\Steamworks\`,
+  not next to the exe). PresentMon's permission (administrator or *Performance Log Users*) is now checked before a run,
+  with the command that fixes it, instead of showing up later as "PresentMon got no frames".
+- **New diagnostic: the tick split** (`HitchLedgerTickSplit`, off): with `HitchLedger=1` it times the game's main-thread
+  updates by what they update (characters, horses, their animation and physics parts, timers) and writes them every 2 s
+  to `OblivionPerfFix-ticksplit.csv` (about 0.3 MB a minute); `tools/tick_split.py` ranks it. It helped us confirm where
+  the horses' time went, and it is there for anyone who wants to find what makes a place slow. Nothing is installed while it is
+  0 at start-up; when on, well under a microsecond per update. Only with the version.dll install (with OBSE64 it stays
+  off); `tools/tick_split.py` is in the GitHub repository, not in the mod's zips.
+- **Benchmark:** three mini-scenarios are public, so the numbers above can be measured again: `ic-spots` (the Imperial
+  City flight's hitch spots), `skingrad-spots` (the Skingrad forest's) and `playlog-spots` (the Brindle Home corral and
+  three cell crossings).
+- **Building from source:** `build.ps1` compiles at below-normal priority and refuses to build while Oblivion
+  Remastered is running (a compile next to the game made it stutter in our tests); `-WaitForGame` waits until it is
+  closed, `-IgnoreRunningGame` builds anyway.
 
 ## 1.2.2-beta
 For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Thanks to mkusm for pull requests #20 and #21,

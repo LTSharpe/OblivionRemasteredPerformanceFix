@@ -1,0 +1,677 @@
+{
+ "name": "challenges",
+ "description": "Scenes for the open challenges (GitHub issues labelled \"challenge\"): each reproduces one problem spot save-free from a new game in 30-80 s. Pinned: 12:00 or the flight's hour, Clear, timescale 1. Iterate at -Profile small with one game kept open (-Session reuse); confirm at your own settings (-Profile own) or native-cap60. Not part of full; select with -Scenario challenges.",
+ "settings": {},
+ "record": [
+  "r.ScreenPercentage",
+  "Altar.UpscalingMethod",
+  "Altar.FSR3.Quality",
+  "r.FidelityFX.FSR3.QualityMode",
+  "r.FidelityFX.FI.Enabled",
+  "r.VSync",
+  "Altar.GraphicsOptions.VSync",
+  "Altar.GraphicsOptions.FrameRateLimit",
+  "Altar.GraphicsOptions.Brightness",
+  "Altar.GraphicsOptions.HDR",
+  "t.MaxFPS",
+  "sg.ViewDistanceQuality",
+  "sg.ShadowQuality",
+  "sg.GlobalIlluminationQuality",
+  "sg.ReflectionQuality",
+  "sg.PostProcessQuality",
+  "sg.TextureQuality",
+  "sg.EffectsQuality",
+  "sg.FoliageQuality",
+  "sg.ShadingQuality",
+  "r.Lumen.HardwareRayTracing",
+  "r.Lumen.HardwareRayTracing.LightingMode",
+  "r.RayTracing.Culling.Radius",
+  "r.Streaming.PoolSize",
+  "Altar.SaveOnLoading",
+  "Altar.SaveOnFastTravel"
+ ],
+ "masks": [
+  [
+   0.94,
+   0.0,
+   0.06,
+   0.035
+  ]
+ ],
+ "weathers": {
+  "Clear": "00038EEE",
+  "Cloudy": "00038EF0",
+  "Overcast": "00038EEC",
+  "Fog": "00038EEF",
+  "Rain": "00038EF2",
+  "Thunderstorm": "00038EF1",
+  "Oblivion": "00032E15",
+  "OblivionStorm": "00067199",
+  "SEClear": "00078801",
+  "SECloudy": "00044F59",
+  "SEFog": "00044F5A",
+  "SERain": "00044F5C",
+  "SEThunderstorm": "00044F5D",
+  "SEManiaFog": "00079D76"
+ },
+ "defaults": {
+  "hour": 12,
+  "settle": 20,
+  "measure": 20,
+  "hold": 12,
+  "weather": "Clear",
+  "timescale": 1
+ },
+ "places": {
+  "brindle-corral": {
+   "world": "Tamriel",
+   "pos": [
+    -55105,
+    46976,
+    7937
+   ],
+   "heading": 291,
+   "pitch": -5
+  },
+  "brindle-control": {
+   "world": "Tamriel",
+   "pos": [
+    -63573,
+    51055,
+    9577
+   ],
+   "heading": 270,
+   "pitch": -5
+  },
+  "ride-track-start": {
+   "world": "Tamriel",
+   "pos": [
+    -63074,
+    17500,
+    6432
+   ],
+   "heading": 229,
+   "pitch": -3
+  }
+ },
+ "scenes": [
+  {
+   "id": "ic-waterfront-pass",
+   "type": "fly",
+   "world": "Tamriel",
+   "hour": 18.25,
+   "timescale": 1,
+   "weather": "Clear",
+   "speed": 2475,
+   "pitch": -4,
+   "settle": 8,
+   "flyopt": "ease=0 easeout=0 clip=1 camlook=2.5 camtau=1.2 camsmooth=2",
+   "path": [
+    [
+     42814,
+     30983,
+     890,
+     -4.0,
+     2051
+    ],
+    [
+     41033,
+     30755,
+     899,
+     -4.0,
+     2050
+    ],
+    [
+     39239,
+     30757,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     37491,
+     31147,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     35903,
+     31978,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     34478,
+     33069,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     33142,
+     34270,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     31819,
+     35485,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     30437,
+     36632,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     28947,
+     37634,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     27325,
+     38400,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     25611,
+     38932,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     23854,
+     39308,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     22083,
+     39605,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     20308,
+     39883,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     18536,
+     40177,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     16771,
+     40509,
+     900,
+     -4.0,
+     2050
+    ],
+    [
+     15019,
+     40904,
+     900,
+     -4.0,
+     2050
+    ]
+   ],
+   "tags": [
+    "challenge",
+    "traversal",
+    "outdoor",
+    "npc"
+   ],
+   "comment": "Challenge \"Imperial City Waterfront\": the Imperial City flight (showcase, rumare-loop-flight) from 14.7 to 29.6 s, the same cut as tools/slice_flight.py --spot ic-waterfront-pass:23.9:26.5 makes. The Waterfront district is 9.2-11.8 s into this flight: a dozen characters (guards, the ship crew, a beggar) are created while the camera arrives, on a game thread that has ~2 ms to spare at a 60 fps cap. Measure at your own settings (-Profile own) for the felt result, at small for game-thread work per frame."
+  },
+  {
+   "id": "brindle-corral-hold",
+   "type": "static",
+   "at": "brindle-corral",
+   "hour": 12,
+   "weather": "Clear",
+   "timescale": 1,
+   "settle": 15,
+   "measure": 40,
+   "visual": false,
+   "tags": [
+    "challenge",
+    "outdoor",
+    "npc",
+    "horses"
+   ],
+   "comment": "Challenge \"Brindle Home corral\": standing between Torbal the Sufficient's house and the corral, looking at the four horses (cells -14,10 / -14,11). Four animated horses with Control Rig ground traces and physical animation. Run brindle-control-hold right after it in the same world for the difference."
+  },
+  {
+   "id": "brindle-control-hold",
+   "type": "static",
+   "at": "brindle-control",
+   "hour": 12,
+   "weather": "Clear",
+   "timescale": 1,
+   "settle": 15,
+   "measure": 40,
+   "visual": false,
+   "tags": [
+    "challenge",
+    "outdoor",
+    "horses"
+   ],
+   "comment": "Control for brindle-corral-hold in the same world: ~120 m west of the corral, the corral cell still loaded. Run right after brindle-corral-hold."
+  },
+  {
+   "id": "brindle-corral-walk",
+   "type": "walk",
+   "at": "brindle-corral",
+   "mode": "inject",
+   "hour": 12,
+   "weather": "Clear",
+   "timescale": 1,
+   "settle": 15,
+   "measure": 60,
+   "waypoints": [
+    [
+     -55448,
+     47289
+    ],
+    [
+     -56181,
+     47368
+    ],
+    [
+     -56600,
+     47750
+    ],
+    [
+     -55900,
+     47800
+    ],
+    [
+     -55400,
+     47650
+    ],
+    [
+     -54900,
+     47300
+    ],
+    [
+     -55448,
+     47289
+    ],
+    [
+     -56181,
+     47368
+    ],
+    [
+     -56600,
+     47750
+    ],
+    [
+     -55900,
+     47800
+    ],
+    [
+     -55400,
+     47650
+    ],
+    [
+     -54900,
+     47300
+    ],
+    [
+     -55448,
+     47289
+    ],
+    [
+     -56181,
+     47368
+    ],
+    [
+     -56600,
+     47750
+    ],
+    [
+     -55900,
+     47800
+    ],
+    [
+     -55100,
+     47600
+    ]
+   ],
+   "tags": [
+    "challenge",
+    "outdoor",
+    "npc",
+    "horses"
+   ],
+   "comment": "Challenge \"Brindle Home corral\": ~45 s on foot inside the corral, twice round among the four horses (the corral is fenced, its gate shut: the route stays inside), starting at brindle-corral-hold's spot. The static hold sits at the cap on our test PC; this walk is the candidate repro for what was still over the cap in play. Then run brindle-corral-hold in the same world."
+  },
+  {
+   "id": "ride-track-fly",
+   "type": "fly",
+   "world": "Tamriel",
+   "hour": 12,
+   "weather": "Clear",
+   "timescale": 1,
+   "settle": 20,
+   "speed": 640,
+   "pitch": -3,
+   "flyopt": "ease=1.5 easeout=1.5 clip=1 camlook=0.8 camtau=0.8 camsmooth=2 cameye=90",
+   "path": [
+    [
+     -63074,
+     17500,
+     6432
+    ],
+    [
+     -64086,
+     16636,
+     6529
+    ],
+    [
+     -65097,
+     15772,
+     6748
+    ],
+    [
+     -66190,
+     14990,
+     7068
+    ],
+    [
+     -67284,
+     14209,
+     7220
+    ],
+    [
+     -68283,
+     13538,
+     7244
+    ],
+    [
+     -69282,
+     12868,
+     7172
+    ],
+    [
+     -70186,
+     11880,
+     7028
+    ],
+    [
+     -71090,
+     10891,
+     6900
+    ],
+    [
+     -72098,
+     10153,
+     6788
+    ],
+    [
+     -73107,
+     9415,
+     6559
+    ],
+    [
+     -73260,
+     8081,
+     6407
+    ],
+    [
+     -73413,
+     6747,
+     6332
+    ],
+    [
+     -74404,
+     6015,
+     6124
+    ],
+    [
+     -75395,
+     5283,
+     5993
+    ],
+    [
+     -76709,
+     5524,
+     5972
+    ],
+    [
+     -78023,
+     5765,
+     6060
+    ],
+    [
+     -79361,
+     5724,
+     6095
+    ],
+    [
+     -80699,
+     5682,
+     6220
+    ],
+    [
+     -82034,
+     5706,
+     6436
+    ],
+    [
+     -83369,
+     5730,
+     6689
+    ],
+    [
+     -84629,
+     5604,
+     6948
+    ],
+    [
+     -85889,
+     5478,
+     7164
+    ],
+    [
+     -87124,
+     4964,
+     7140
+    ],
+    [
+     -88358,
+     4451,
+     7183
+    ],
+    [
+     -89395,
+     3674,
+     7321
+    ],
+    [
+     -90432,
+     2896,
+     7529
+    ],
+    [
+     -90753,
+     1641,
+     7780
+    ],
+    [
+     -91074,
+     386,
+     7620
+    ],
+    [
+     -91988,
+     -412,
+     6825
+    ],
+    [
+     -92903,
+     -1210,
+     6151
+    ],
+    [
+     -93890,
+     -3216,
+     5727
+    ],
+    [
+     -94818,
+     -4095,
+     5652
+    ],
+    [
+     -95747,
+     -4974,
+     5876
+    ],
+    [
+     -96554,
+     -5948,
+     5391
+    ],
+    [
+     -97362,
+     -6922,
+     5249
+    ],
+    [
+     -98496,
+     -6252,
+     5452
+    ],
+    [
+     -99630,
+     -5582,
+     5764
+    ]
+   ],
+   "tags": [
+    "challenge",
+    "traversal",
+    "outdoor",
+    "crossing",
+    "riding"
+   ],
+   "comment": "Challenge \"galloping\" (being characterised): an 80 s gallop track west of Brindle Home (recorded in a play session at 633-658 units/s), flown at the same speed without a horse: if the game thread stays at the on-foot level here, the extra cost of galloping is the horse, not the speed or the place."
+  },
+  {
+   "id": "ride-track-foot",
+   "type": "walk",
+   "at": "ride-track-start",
+   "mode": "inject",
+   "hour": 12,
+   "weather": "Clear",
+   "timescale": 1,
+   "settle": 15,
+   "measure": 240,
+   "waypoints": [
+    [
+     -63074,
+     17500
+    ],
+    [
+     -65097,
+     15772
+    ],
+    [
+     -67284,
+     14209
+    ],
+    [
+     -69282,
+     12868
+    ],
+    [
+     -71090,
+     10891
+    ],
+    [
+     -73107,
+     9415
+    ],
+    [
+     -73413,
+     6747
+    ],
+    [
+     -78023,
+     5765
+    ],
+    [
+     -80699,
+     5682
+    ],
+    [
+     -83369,
+     5730
+    ],
+    [
+     -85889,
+     5478
+    ],
+    [
+     -88358,
+     4451
+    ],
+    [
+     -90432,
+     2896
+    ],
+    [
+     -91074,
+     386
+    ],
+    [
+     -92903,
+     -1210
+    ],
+    [
+     -93890,
+     -3216
+    ],
+    [
+     -95747,
+     -4974
+    ],
+    [
+     -97362,
+     -6922
+    ],
+    [
+     -99630,
+     -5582
+    ]
+   ],
+   "tags": [
+    "challenge",
+    "traversal",
+    "outdoor",
+    "riding"
+   ],
+   "comment": "Challenge \"galloping\": the same track on foot (running, ~410 units/s): the on-foot control for ride-track-fly."
+  }
+ ]
+}
