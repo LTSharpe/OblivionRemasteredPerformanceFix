@@ -46,7 +46,9 @@
 //     kMaxFlowWait frames in a row; then the queue drains as before; up to kMaxFlowWaitProgress frames while
 //     the main queue is getting through the flow's own OT frame (a create or head/BP unit ran in each held frame and
 //     nothing older is owed): the drain at the 3-frame bound ran that frame's last creates together with the paced one
-//     (two creature creates in one frame, 29-30 ms at 4K, Echo Mine -> Brotch Camp, in half the runs).
+//     (two creature creates in one frame, 29-30 ms at 4K, Echo Mine -> Brotch Camp, in half the runs). With
+//     PacingLeanFlowDrain the drain at the bound runs the main queue only: the waiting delegates stay queued, as when
+//     the flow runs on a complete queue (14-18 delegates drained with the queue there, 30-40 ms, Imperial City flight).
 //
 // Budget: PacingBudgetMs of unit time per frame (the first unit of a frame always runs). Lag bound: a unit or an OT
 // frame older than PacingMaxLagFrames runs whatever the budget. Switched off (ini, re-read every second), travel,
@@ -331,6 +333,7 @@ struct State {
     std::atomic<bool> useSlack{true};
     std::atomic<bool> flowWait{true};
     std::atomic<int> flowWaitFrames{kMaxFlowWaitProgress};
+    std::atomic<bool> leanFlowDrain{true};  // PacingLeanFlowDrain: a level flow at its wait bound drains the main queue only
 
     // game-thread state
     DWORD gtId = 0;
@@ -1309,14 +1312,19 @@ uint8_t RunSessionHook(void* manager, int32_t key)
             return r;
         }
         if (key != -1) {
-            // another session (travel, or a cell's pre-placed actor flow) keeps its stock order against the main queue
-            if ((g.E < g.S || g.count) && g.drainLogs < 12) {
+            // another session (travel, or a cell's pre-placed actor flow) keeps its stock order against the main queue.
+            // PacingLeanFlowDrain: a level flow at its wait bound needs only the main queue before it; the waiting delegates
+            // (Unreal-side load completions, which in the game run after the frame's flows) stay queued, as when a flow
+            // runs on a complete queue above. (2026-10-20, Imperial City flight: one flow at its bound drained 14-18
+            // delegates with the owed queue, 17-20 units and 30-40 ms in one frame, in every run.)
+            const bool lean = IsFlow(ret, key) && FlowWaitActive() && g.leanFlowDrain.load(std::memory_order_relaxed);
+            if ((g.E < g.S || (g.count && !lean)) && g.drainLogs < 12) {
                 ++g.drainLogs;
-                Log("[pacing] session %d run by exe+0x%llX: owed queue (%llu OT frames, %zu delegates) runs first", key,
+                Log("[pacing] session %d run by exe+0x%llX: owed queue (%llu OT frames, %zu delegates%s) runs first", key,
                     static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(ret) - reinterpret_cast<uintptr_t>(Game().base)),
-                    static_cast<unsigned long long>(g.S - g.E), g.count);
+                    static_cast<unsigned long long>(g.S - g.E), g.count, lean ? ", which stay queued" : "");
             }
-            Drain(manager);
+            Drain(manager, !lean);
         } else {
             // an unexpected RunSession(-1) on the game thread: it consumes an end command like ours
             const uint8_t r = g.origRun(manager, key);
@@ -1418,6 +1426,13 @@ void SetNpcPacing(bool enabled, int budgetMs, int minDistance, int maxLagFrames,
     g.minDistance = std::clamp(minDistance, 0, 1000000) * kOldToUe;
     g.maxLag = std::clamp(maxLagFrames, 1, 600);
     if (was != g.enabled.load()) Log("[pacing] NPC creation pacing %s", g.enabled.load() ? "on" : "off (backlog runs at once)");
+}
+
+void SetNpcPacingLeanFlowDrain(bool on)
+{
+    if (g.leanFlowDrain.exchange(on) != on)
+        Log("[pacing] a level flow at its wait bound drains %s (PacingLeanFlowDrain %d)",
+            on ? "the main queue only, the waiting delegates stay queued" : "the main queue and the waiting delegates", on);
 }
 
 

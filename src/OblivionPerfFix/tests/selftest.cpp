@@ -3112,6 +3112,58 @@ int wmain(int argc, wchar_t** argv)
             Check(NpcPacingTestRead().fifo == 0 && !g_pcDeadlock && NpcPacingTestRead().S == NpcPacingTestRead().E,
                   "pacing: the delegates run afterwards, queue in step");
         }
+
+        // PacingLeanFlowDrain: a level flow reaches its bound (3 frames: the queue owes an older OT frame) and the owed
+        // main queue drains before it; off: the waiting delegates drain with it (as before), on: they stay queued and
+        // replay one per frame afterwards, in order
+        {
+            static FakeDelInst dl[8]{};
+            auto boundDrain = [&](int idBase, int* delInDrain, std::vector<int>* delOrder) {
+                for (int k = 0; k < 8; ++k) {
+                    dl[k] = FakeDelInst{};
+                    dl[k].vtable = reinterpret_cast<void*>(0x1234);
+                    dl[k].weak = &g_pcActors[0];
+                    dl[k].id = idBase + k;
+                    dl[k].costUs = 6000;
+                }
+                const size_t d0 = g_pcDelRan.size();
+                PcPost(kFakeEnd, 0, 0);
+                run(fakeMgr, -1);
+                for (int k = 0; k < 8; ++k) del(&dl[k]);  // the first runs, seven wait
+                end(fakeMgr, nullptr, 2, 0);
+                for (int k = 0; k < 4; ++k) PcPost(kFakeCreate, idBase + 20 + k, 10000, distant);
+                PcPost(kFakeEnd, 0, 0);
+                gtFrame();
+                PcPost(kFakeEnd, 0, 0);  // the OT's next frame: the queue owes an older one, so the flow's bound is 3
+                bool done = false;
+                int fr = 0;
+                *delInDrain = -1;
+                while (!done && fr < 8) {
+                    const size_t b = g_pcDelRan.size();
+                    g_pcWriter[0x4E] = 1;
+                    run(fakeMgr, -1);
+                    done = run(fakeMgr, 1007) != 3;
+                    end(fakeMgr, nullptr, 2, 0);
+                    if (done) *delInDrain = static_cast<int>(g_pcDelRan.size() - b);
+                    ++fr;
+                }
+                for (int k = 0; k < 12 && NpcPacingTestRead().fifo; ++k) { PcPost(kFakeEnd, 0, 0); gtFrame(); }
+                delOrder->assign(g_pcDelRan.begin() + static_cast<std::ptrdiff_t>(d0), g_pcDelRan.end());
+                return done;
+            };
+            std::vector<int> wantOn, orderOff, orderOn;
+            int inDrainOff = 0, inDrainOn = 0;
+            SetNpcPacingLeanFlowDrain(false);
+            const bool doneOff = boundDrain(600, &inDrainOff, &orderOff);
+            SetNpcPacingLeanFlowDrain(true);
+            const bool doneOn = boundDrain(700, &inDrainOn, &orderOn);
+            printf("      (flow bound drain: delegates in the drain frame: off %d, on %d)\n", inDrainOff, inDrainOn);
+            for (int k = 0; k < 8; ++k) wantOn.push_back(700 + k);
+            Check(doneOff && inDrainOff >= 3, "pacing: flow bound drain, PacingLeanFlowDrain=0: the waiting delegates drain with the queue");
+            Check(doneOn && inDrainOn == 0 && orderOn == wantOn && NpcPacingTestRead().fifo == 0 && !g_pcDeadlock &&
+                      NpcPacingTestRead().S == NpcPacingTestRead().E,
+                  "pacing: flow bound drain, PacingLeanFlowDrain=1: the main queue drains, the delegates stay queued and run after, in order");
+        }
         SetNpcPacing(false, 4, 4096, 15, false);
         LogNpcPacingStats();
     }

@@ -168,6 +168,7 @@ DWORD WINAPI MonitorThread(LPVOID)
         if (g_pacingHooked)
             SetNpcPacing(cfg.npcCreationPacing, cfg.pacingBudgetMs, cfg.pacingMinDistance, cfg.pacingMaxLagFrames, cfg.pacingUseSlack,
                          cfg.pacingFlowWait, cfg.pacingFlowWaitFrames);
+        if (g_pacingHooked) SetNpcPacingLeanFlowDrain(cfg.pacingLeanFlowDrain);  // PacingLeanFlowDrain: live
         SetHitchLedger(cfg.hitchLedger, cfg.hitchLedgerMs);  // diagnostic: no-op unless installed at start-up
         HitchLedgerDrain();                                  // ... its slow-frame records into OblivionPerfFix-ledger.csv
         if (g_clothRegHooked) SetClothRegisterLite(cfg.clothRegisterLite);  // ClothRegisterLite: live once installed
@@ -488,9 +489,11 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
     // runs the backlog at once).
     if (cfg.npcCreationPacing) {
         g_pacingHooked = InstallNpcPacing();
-        if (g_pacingHooked)
+        if (g_pacingHooked) {
             SetNpcPacing(true, cfg.pacingBudgetMs, cfg.pacingMinDistance, cfg.pacingMaxLagFrames, cfg.pacingUseSlack, cfg.pacingFlowWait,
                          cfg.pacingFlowWaitFrames);
+            SetNpcPacingLeanFlowDrain(cfg.pacingLeanFlowDrain);
+        }
     } else Log("[pacing] disabled in OblivionPerfFix.ini (takes a restart to switch on)");
     // ClothRegisterLite: installed only if != 0 at startup and only as version.dll (the cloth component's native function table is
     // read when the engine registers the class); afterwards the ini switches it live. The lab's ClothRegisterSkip uses the same

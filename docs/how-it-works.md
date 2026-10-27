@@ -873,6 +873,8 @@ leaves the same physics state.
 
 **Keeping area loading in order.** Each newly loaded area's set-up must wait for all earlier world-logic messages. It waits up to three frames rather than forcing the waiting characters through at once. While each held frame completes a create or head unit from the same world-logic frame, it may wait up to eight frames; without that progress the three-frame limit applies. The game thread's frame-done message waits too, pausing the old engine just as the long frame would. Every message stays in order. On the Silver Road the shorter wait avoided 2-3 creates in a single 25-40 ms frame; on the Echo Mine walk at 4K, allowing continued progress avoided two creates being drained into one ~30 ms frame instead of ~20 ms frames.
 
+**... and only what it needs** (`PacingLeanFlowDrain`). When an area's set-up has waited its three frames, the waiting characters' create steps run before it, as in the game. Until now their clothes, hair and body steps ran in that same frame too (13-21 of them on the Imperial City flight). In the game those steps come after an area's set-up anyway, so they now stay queued and run in the frames after it, paced like the rest, as they already did when the set-up met a complete queue. Measured on the Imperial City flight (2026-10-27, 1.2.2, 4K, FSR Performance; a fresh game per run, off and on in turn), where an area's set-up reached its three frames (4 of 6 runs): the most character work in one frame there 32.6 / 42.9 -> 30.4 / 21.4 ms. Over the whole flight it made no measurable difference (slowest frame, hitches, 1% low).
+
 ---
 
 <a id="clothregisterlite"></a>
