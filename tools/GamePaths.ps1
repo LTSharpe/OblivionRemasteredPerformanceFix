@@ -48,8 +48,15 @@ function Get-OblivionGame {
     if ($env:OBLIVION_GAME_DIR) {
         $exe = Join-Path $env:OBLIVION_GAME_DIR "$bin\$exeName"
         if (-not (Test-Path -LiteralPath $exe)) { throw "OBLIVION_GAME_DIR is set, but $exe does not exist" }
-        return [pscustomobject]@{ Source = 'OBLIVION_GAME_DIR'; SteamRoot = Get-SteamRoot; Library = $null
-            GameDir = $env:OBLIVION_GAME_DIR; Win64 = Split-Path $exe; Exe = $exe; BuildId = $null }
+        $steamDll = @(
+            (Join-Path $env:OBLIVION_GAME_DIR 'steam_api64.dll'),
+            (Join-Path $env:OBLIVION_GAME_DIR 'steam_api.dll'),
+            (Join-Path (Split-Path $exe) 'steam_api64.dll'),
+            (Join-Path (Split-Path $exe) 'steam_api.dll')
+        ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+        return [pscustomobject]@{ Source = 'OBLIVION_GAME_DIR'; LaunchMethod = $(if ($steamDll) { 'Steam' } else { 'Direct' }); SteamDll = $steamDll
+            SteamRoot = Get-SteamRoot; Library = $null; GameDir = $env:OBLIVION_GAME_DIR
+            Win64 = Split-Path $exe; Exe = $exe; BuildId = $null }
     }
     $steam = Get-SteamRoot
     if (-not $steam) { throw 'Steam not found (no Valve\Steam registry key). Set $env:OBLIVION_GAME_DIR to the game folder.' }
@@ -68,7 +75,7 @@ function Get-OblivionGame {
         $gameDir = Join-Path $lib "steamapps\common\$installDir"
         $exe = Join-Path $gameDir "$bin\$exeName"
         if (-not (Test-Path -LiteralPath $exe)) { continue }
-        return [pscustomobject]@{ Source = 'Steam'; SteamRoot = $steam; Library = $lib; GameDir = $gameDir
+        return [pscustomobject]@{ Source = 'Steam'; LaunchMethod = 'Steam'; SteamRoot = $steam; Library = $lib; GameDir = $gameDir
             Win64 = Split-Path $exe; Exe = $exe; BuildId = @(Get-VdfValues $text 'buildid')[0] }
     }
     throw "Oblivion Remastered (Steam app $script:OblivionAppId) not found in the Steam libraries: $($libs -join '; '). Set `$env:OBLIVION_GAME_DIR."
@@ -109,12 +116,29 @@ function Get-OblivionSavedDir {
         Others = @($candidates | Where-Object { $_.Path -ne $pick.Path -and (Test-Path -LiteralPath $_.Path) } | ForEach-Object { $_.Path }) }
 }
 
+function Get-PresentMonAccess {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    $isMember = @($identity.Groups | ForEach-Object { $_.Value }) -contains 'S-1-5-32-559'
+    $isElevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    $member = $identity.Name.Replace("'", "''")
+    [pscustomobject]@{
+        Allowed = ($isMember -or $isElevated)
+        IsMember = $isMember
+        IsElevated = $isElevated
+        Message = if ($isMember -or $isElevated) { $null } else {
+            "PresentMon is installed, but this session cannot start its ETW trace: it needs an elevated token or membership in Performance Log Users.`nIn an elevated PowerShell opened as $($identity.Name), run:`n  Add-LocalGroupMember -Group 'Performance Log Users' -Member '$member'`nThen sign out and back in before running the benchmark again. You can also run the benchmark from an elevated PowerShell session."
+        }
+    }
+}
+
 # Run directly (not dot-sourced): print what was found.
 if ($MyInvocation.InvocationName -ne '.') {
     $g = Get-OblivionGame
     $s = Get-OblivionSavedDir
     "Game ($($g.Source)): $($g.GameDir)"
     "  exe:      $($g.Exe)"
+    "  launch:   $($g.LaunchMethod)$(if ($g.SteamDll) { ' (marker: ' + [IO.Path]::GetFileName($g.SteamDll) + ')' })"
     if ($g.BuildId) { "  build id: $($g.BuildId) (Steam)" }
     "Saved: $($s.Path)"
     "  rule:     $($s.Rule)$(if (-not $s.Exists) { ' (does not exist yet: start the game once)' })"

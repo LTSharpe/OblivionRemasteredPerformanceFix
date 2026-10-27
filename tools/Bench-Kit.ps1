@@ -64,6 +64,10 @@ $title = switch ($Mode) { 'Benchmark' { 'Imperial City flight: the game without 
 # on screen, in front, with sound (default) or hidden and muted (-Hidden); the runner's -Watch = -Visible -Audible -Profile own
 $show = if ($Hidden) { '-Profile own' } else { '-Watch' }
 Say "OblivionPerfFix benchmark kit$(if ($kitVersion) { " $kitVersion" }): $title"
+if (-not $VerdictFrom -and (Test-Path -LiteralPath (Join-Path $root 'third_party\PresentMon-2.6.0-x64.exe'))) {
+    $access = Get-PresentMonAccess
+    if (-not $access.Allowed) { Stop-Kit $access.Message }
+}
 # What is about to happen, in plain words (the README's "Check it on your PC" has the same numbered steps)
 if ($Mode -eq 'Benchmark' -and -not $VerdictFrom) {
     $n = 2 * $Rounds
@@ -90,7 +94,7 @@ foreach ($d in 'tools', 'bench', 'mods', 'fix') {
 
 if ($VerdictFrom) { $Mode = 'GpuCheck' } else {
 # ---------------------------------------------------------------- the game
-try { $game = Get-OblivionGame } catch { Stop-Kit "Oblivion Remastered was not found: $($_.Exception.Message)`nThe benchmark needs the Steam version of the game." }
+try { $game = Get-OblivionGame } catch { Stop-Kit "Oblivion Remastered was not found: $($_.Exception.Message)`nFor a non-Steam install, set OBLIVION_GAME_DIR to the game root folder." }
 $win64 = $game.Win64
 $running = Get-Process OblivionRemastered-Win64-Shipping -ErrorAction SilentlyContinue
 if ($running) {
@@ -108,6 +112,8 @@ Head "$(if ($Mode -eq 'Benchmark') { '1. ' })Benchmark tools (PresentMon, UE4SS:
 $setup = & (Join-Path $tools 'Setup-Bench.ps1') 2>&1 | ForEach-Object { "$_" }
 $setup | Where-Object { $_.Trim() -and $_ -notlike 'SETUP-RESULT ok*' } | ForEach-Object { Say "  $_" }
 if (-not ($setup | Where-Object { $_ -like 'SETUP-RESULT ok*' })) { Stop-Kit 'The benchmark tools are not ready (see "Needs attention" above).' }
+$access = Get-PresentMonAccess
+if (-not $access.Allowed) { Stop-Kit $access.Message }
 
 # ---------------------------------------------------------------- 2. the fix
 function Get-FixVersion([string]$dll) {
@@ -152,11 +158,11 @@ if ($Mode -ne 'GpuCheck') {
         if ($same) { Say "  OblivionPerfFix $kitVer is installed (the version of this kit)." }
         else {
             if ((Test-Path -LiteralPath $dll) -and -not $haveVer) {
-                Stop-Kit "$dll belongs to another mod, not to OblivionPerfFix. The benchmark starts the game through Steam and needs the fix as version.dll: remove or rename that mod's version.dll for the benchmark, or measure by hand (docs\benchmark.md)."
+                Stop-Kit "$dll belongs to another mod, not to OblivionPerfFix. The benchmark needs OblivionPerfFix as version.dll: remove or rename that mod's version.dll for the benchmark, or measure by hand (docs\benchmark.md)."
             }
             $what = if ($haveVer -eq $kitVer) { "Another build of OblivionPerfFix $haveVer is installed (not the one in this kit)." }
                     elseif ($haveVer) { "OblivionPerfFix $haveVer is installed; this kit is for $kitVer." }
-                    elseif (Test-Path -LiteralPath $obse) { "OblivionPerfFix is installed as an OBSE64 plugin. The benchmark starts the game through Steam, where OBSE64 does not load, so it needs the fix as version.dll as well (with both, the fix loads once)." }
+                    elseif (Test-Path -LiteralPath $obse) { "OblivionPerfFix is installed as an OBSE64 plugin. The benchmark needs it as version.dll for its launch path (with both, the fix loads once)." }
                     else { 'OblivionPerfFix is not installed.' }
             Say "  $what"
             $answer = $InstallFix

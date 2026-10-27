@@ -159,7 +159,7 @@ $allGame = @($allRows | Where-Object { $_.ProcessID -eq "$ProcessId" }).Count
 $allApps = ($allRows | Group-Object Application | Sort-Object Count -Descending | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ', '
 
 $verdict =
-    if (-not $etlFile) { 'no raw DXGI trace could be recorded (logman refused: not in Performance Log Users?)' }
+    if (-not $etlFile) { 'no raw DXGI trace could be recorded (logman refused: check Performance Log Users membership; after adding your account, sign out and back in so the new permission is applied, or run elevated)' }
     elseif ($calls -eq 0) { "the game called Present 0 times in $Seconds s (not presenting: loading, hung or stopped rendering)" }
     elseif ($test -eq $calls) { "the game sends only test presents ($test, DXGI_PRESENT_TEST): Windows reports its window as occluded, so no frame is shown or counted" }
     elseif ($cpuRows.Count -gt 0 -and $allGame -eq 0) { "the game presents ($calls calls) but PresentMon never sees them reach the display; CPU-side capture works ($($cpuRows.Count) frames)" }

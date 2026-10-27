@@ -19,15 +19,23 @@ $script:BenchLogFile = Join-Path $script:BenchRun 'bench.log'
 $script:BenchLockFile = Join-Path $script:BenchRun 'game.lock'
 $script:BenchHeartbeatFile = Join-Path $script:BenchRun 'bench-heartbeat.txt'   # rewritten every second by the mod's frame loop
 $script:BenchStatusFile = Join-Path $script:BenchRun 'bench-status.json'       # what the runner is doing (tools\Bench-Status.ps1)
-$script:BenchLaunchFile = Join-Path $script:BenchRun 'bench-launch.json'       # the launch a runner asked Steam for, and its game (tools\Runner-Guard.ps1)
+$script:BenchLaunchFile = Join-Path $script:BenchRun 'bench-launch.json'       # the launch a runner asked for, and its game (tools\Runner-Guard.ps1)
 $script:BenchStopFile = Join-Path $script:BenchRun 'bench-stop.json'           # Run-Benchmark.ps1 -Stop: which runner process should stop after its scene
 $script:BenchDeadline = $null                                                         # [datetime]: Assert-GameOk throws DEADLINE after it
 $script:BenchId = [int]((Get-Date).TimeOfDay.TotalSeconds) * 100
 $script:GameProcessName = 'OblivionRemastered-Win64-Shipping'
-# The game through Steam's library list, and the Saved folder where the game itself keeps config and saves
+# The resolved game install and the Saved folder where the game itself keeps config and saves
 # (GamePaths.ps1; $env:OBLIVION_GAME_DIR / $env:OBLIVION_SAVED_DIR override them).
-$script:GameDir = try { (Get-OblivionGame).GameDir } catch {
-    Write-Warning "$_ Trying the default Steam folder."; 'C:\Program Files (x86)\Steam\steamapps\common\Oblivion Remastered' }
+$script:GameInstall = try { Get-OblivionGame } catch {
+    $fallback = 'C:\Program Files (x86)\Steam\steamapps\common\Oblivion Remastered'
+    Write-Warning "$_ Trying the default Steam folder."
+    [pscustomobject]@{ Source = 'Steam'; LaunchMethod = 'Steam'; GameDir = $fallback
+        Exe = Join-Path $fallback 'OblivionRemastered\Binaries\Win64\OblivionRemastered-Win64-Shipping.exe' }
+}
+$script:GameLaunchMethod = if ($script:GameInstall.LaunchMethod) { $script:GameInstall.LaunchMethod }
+                          elseif ($script:GameInstall.Source -eq 'Steam') { 'Steam' } else { 'Direct' }
+$script:GameDir = $script:GameInstall.GameDir
+$script:GameExe = $script:GameInstall.Exe
 $script:GameWin64 = Join-Path $script:GameDir 'OblivionRemastered\Binaries\Win64'
 $script:GameSaved = (Get-OblivionSavedDir).Path
 $script:SteamAppId = 2623190
@@ -229,6 +237,15 @@ function Start-SteamLaunch([string[]]$GameArgs = @()) {
         } catch { Write-Warning "launch through WMI failed ($_): asking Steam directly" }
     }
     Start-Process $url
+}
+
+function Start-OblivionLaunch([string[]]$GameArgs = @()) {
+    if ($script:GameLaunchMethod -eq 'Steam') {
+        Start-SteamLaunch -GameArgs $GameArgs
+        return
+    }
+    if (-not (Test-Path -LiteralPath $script:GameExe)) { throw "Game executable not found: $($script:GameExe)" }
+    Start-Process -FilePath $script:GameExe -ArgumentList $GameArgs -WorkingDirectory $script:GameWin64 | Out-Null
 }
 
 <# The bench-only hook DLL (tools\benchhook), built on demand; $null (with a warning) if it cannot be built. #>
@@ -562,24 +579,29 @@ function Start-Game {
     Enable-BenchUE4SS                      # only for this game: taken out again once it has closed
     if ($Unobtrusive) { Start-Unobtrusive -Audible:$Audible } else { Start-ShownHook }
     $launchedAt = Get-Date
-    # for tools\Runner-Guard.ps1: if this process dies now, the game Steam is about to start is this runner's
+    # for tools\Runner-Guard.ps1: if this process dies now, the game about to start is this runner's
     Set-BenchLaunch @{ runnerPid = $PID; launchAt = $launchedAt.ToString('o') }
     if ($CpuMask) {                        # lab (-CpuLimit): the stub and the game join a Job object limited to these processors
         if (-not ('OblvBench.CpuLimitJob' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'CpuLimitJob.cs') }
         Write-Host ([OblvBench.CpuLimitJob]::Arm($CpuMask, [string[]]@($script:GameProcesses | ForEach-Object { "$_.exe" }), ($TimeoutSec + 30) * 1000))
     }
-    Start-SteamLaunch -GameArgs $GameArgs
+    Start-OblivionLaunch -GameArgs $GameArgs
     $sw = [Diagnostics.Stopwatch]::StartNew(); $asked = 1; $checked = 0
     while (-not ($p = Get-Game)) {
-        if ($sw.Elapsed.TotalSeconds -gt 60 * $asked -and $asked -lt 2) { Start-SteamLaunch -GameArgs $GameArgs; $asked++ }   # Steam sometimes drops the first request
-        if ($sw.Elapsed.TotalSeconds -gt $checked + 10) {   # a known Steam reason ends the wait early
-            $checked = $sw.Elapsed.TotalSeconds
-            $why = Get-SteamLaunchProblem $launchedAt
-            if ($why) { throw "The game did not start: $why" }
+        if ($script:GameLaunchMethod -eq 'Steam') {
+            if ($sw.Elapsed.TotalSeconds -gt 60 * $asked -and $asked -lt 2) { Start-SteamLaunch -GameArgs $GameArgs; $asked++ }   # Steam sometimes drops the first request
+            if ($sw.Elapsed.TotalSeconds -gt $checked + 10) {   # a known Steam reason ends the wait early
+                $checked = $sw.Elapsed.TotalSeconds
+                $why = Get-SteamLaunchProblem $launchedAt
+                if ($why) { throw "The game did not start: $why" }
+            }
         }
         if ($sw.Elapsed.TotalSeconds -gt $TimeoutSec) {
-            $why = Get-SteamLaunchProblem (Get-Date).AddHours(-12)
-            throw "The game process did not appear within $TimeoutSec s (is Steam running? Did it show an error? The benchmark keeps Steam minimised; Steam\logs\console_log.txt and webhelper_js.txt have the reason)$(if ($why) { ". Last known Steam problem: $why" })"
+            $details = if ($script:GameLaunchMethod -eq 'Steam') {
+                $why = Get-SteamLaunchProblem (Get-Date).AddHours(-12)
+                " (is Steam running? Did it show an error? The benchmark keeps Steam minimised; Steam\logs\console_log.txt and webhelper_js.txt have the reason)$(if ($why) { ". Last known Steam problem: $why" })"
+            } else { " (started directly from $($script:GameExe))" }
+            throw "The game process did not appear within $TimeoutSec s$details"
         }
         if ($script:BenchDeadline) { Assert-GameOk }
         Start-Sleep -Milliseconds 500
