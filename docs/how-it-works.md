@@ -961,8 +961,6 @@ leaves the same physics state.
 
 **Why the picture is the same.** Only the moment of the build moves, and only while the character is far away and unseen: the same robe is built from the same state by the game's own code. Until then the robe behaves as one that was just put on: no cloth movement yet, drawn as the plain skinned mesh, which nobody sees at that distance. When the character comes into view the cloth is built first. Screenshots of the shrine's robed worshippers after they come near match within the run-to-run variation (the grass in the wind and the characters' poses vary between any two runs). A timing change of the same kind as `NpcCreationPacing`'s, with the same bounds: a few frames, off-screen, an off switch. Installed when the game starts (not on the OBSE64 route), then live; it needs `NpcCreationPacing`.
 
-**Measured (2026-10-28, 1.2.3, Peryite's Shrine flight, 4K, FSR Performance, RTX 4090; a fresh game per run, the switch off and on in turn, five rounds):** where the robed worshippers appear, the slowest frame 41.0 / 44.9 / 46.5 / 44.9 / 43.0 -> 35.3 / 35.4 / 35.4 / 33.8 / 40.9 ms, lower in every run with it than in every run without. Over the whole flight the 1% low did not clearly change.
-
 ---
 
 <a id="rigvmhashmemo"></a>

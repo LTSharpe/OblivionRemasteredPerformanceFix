@@ -6,7 +6,7 @@
 // constraints, graph colouring), a few ms per robe, and the character Blueprints ask for it several times: per robe an
 // OnRegister build, a script rebuild ~5 ms later and another 40-90 ms later after the proxy ran 1-3 ticks, each inside
 // the NPC's creation unit (2026-10-20: 15 builds, 78.5 ms on the npcburst-short flight). Every rebuild starts from
-// nothing (RecreateClothSimulationProxy first resets the proxy), so only the last build's result survives.
+// nothing (RecreateClothSimulationProxy first resets the proxy), so only the last build's proxy survives.
 //
 // The rule: a request is deferred when it comes on the game thread inside a NpcCreationPacing unit whose actor may wait
 // (far, not rendered recently, a frame that defers) and the component is registered and has no proxy (its first build,
@@ -22,10 +22,12 @@
 //     screen), or 2 x kForceFrames frames after the first request;
 //   - at once before a Blueprint reads the simulation state (IsSimulationSuspended / IsSimulationEnabled: both answer
 //     from the proxy), so script logic sees the stock answer.
-// Until then the component is as a registered one before its first build (stock state right after Super::OnRegister):
-// TickComponent skips the proxy tick (null check), CalcBounds gives empty bounds (as stock gives at registration), the
-// render data falls back to plain skinning, OnUnregister resets nothing. OnUnregister (vtable slot) drops a waiting
-// build, so a destroyed component is never built. The cloth starts simulating a few frames later, off-screen.
+// Until then the component has no proxy: TickComponent skips the proxy tick (null check), the render data falls back to
+// plain skinning, OnUnregister resets nothing. Its bounds differ from stock: the registration's render state creation
+// runs UpdateBounds -> CalcBounds (exe+0x53C7500), which caches the proxy's particle bounds in local space (stock: the
+// first build's). With that build held there is no proxy, so it caches an empty box, and the build made later does not
+// refresh the cache. OnUnregister (vtable slot) drops a waiting build, so a destroyed component is never built. The
+// cloth starts simulating a few frames later, off-screen.
 //
 // With ClothRegisterLite (npcs/cloth_register.cpp, installed first; this file's hooks then run inside its own): a build
 // this file holds leaves no proxy, so ClothRegisterLite has nothing to complete at its EquipBodyPart call's end, and the
@@ -305,7 +307,7 @@ bool Fail(const char* why)
 bool InstallClothBuildDefer(bool beforeGameCode)
 {
     if (g_installed) return true;
-    if (!beforeGameCode) return Fail("only at start-up");
+    if (!beforeGameCode) return Fail("only installed when the game starts (version.dll route; not on the OBSE64 route)");
     LARGE_INTEGER f;
     QueryPerformanceFrequency(&f);
     g_freq = static_cast<uint64_t>(f.QuadPart);

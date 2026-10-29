@@ -14,9 +14,8 @@ driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
   `NpcCreationPacing`'s kind, not a bug fix): a far-away character you cannot see built its robe's or cape's cloth
   simulation in the middle of its creation, often two or three times. That first build now waits a few frames and the
   repeated requests become one build; it is made at once when the character comes near or into view, and after at most
-  60 frames. Nobody sees the robe before it is built; the cloth looks and moves the same. Peryite's Shrine at 4K, where
-  the robed worshippers appear: the slowest frame 41-47 -> 34-41 ms; the 1% low about the same. Installed at start-up
-  with the version.dll route; needs `NpcCreationPacing`. New key `ClothBuildDefer` (1; 0 = off).
+  60 frames. Nobody sees the robe before it is built; the cloth looks and moves the same. Installed at start-up with the
+  version.dll route; needs `NpcCreationPacing`. New key `ClothBuildDefer` (1; 0 = off).
 
 ## 1.2.3-beta
 For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Thanks to MitochondriaOverlords for issue #5,
