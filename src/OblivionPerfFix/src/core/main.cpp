@@ -178,6 +178,7 @@ DWORD WINAPI MonitorThread(LPVOID)
         SetTickSplit(cfg.hitchLedger && cfg.hitchLedgerTickSplit);  // diagnostic: no-op unless installed at start-up
         HitchLedgerDrain();                                  // ... its slow-frame records into OblivionPerfFix-ledger.csv
         if (g_clothRegHooked) SetClothRegisterLite(cfg.clothRegisterLite);  // ClothRegisterLite: live once installed
+        SetClothBuildDefer(cfg.clothBuildDefer, cfg.clothDeferQuietFrames);  // ClothBuildDefer: live once installed (no-op otherwise)
         if (g_bodiesHooked) SetParallelStaticBodies(ParallelHelpersAllowed(cfg) && cfg.parallelStaticBodies, cfg.parallelStaticBodiesMin);
         SetHelperThreadCaches(cfg.helperThreadCaches);  // no-op when the set-up was not found
         if (g_sceneAddHooked) SetPipelinedSceneAdd(ParallelHelpersAllowed(cfg) && cfg.pipelinedSceneAdd, cfg.pipelinedSceneAddMin);
@@ -259,6 +260,7 @@ DWORD WINAPI MonitorThread(LPVOID)
             LogAllocatorTrimStats();
             LogNpcPacingStats();
             LogClothRegisterStats();
+            LogClothBuildDeferStats();
             LogParallelStaticBodiesStats();
             LogPipelinedSceneAddStats();
             LogPipelinedBodyCreationStats();
@@ -518,6 +520,12 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
         g_clothRegHooked = InstallClothRegisterSkip(beforeGameCode);
         if (g_clothRegHooked) SetClothRegisterLite(cfg.clothRegisterLite);
     } else Log("[clothreg] off in OblivionPerfFix.ini (takes a restart to switch on)");
+    // ClothBuildDefer: RecreateClothSimulationProxy's entry, OnUnregister's vtable slot (in front of ClothRegisterLite's hook,
+    // installed above) and the two Blueprint readers, only if on at start-up (version.dll route); then live. It defers
+    // only while NpcCreationPacing runs.
+    if (cfg.clothBuildDefer) {
+        if (InstallClothBuildDefer(beforeGameCode)) SetClothBuildDefer(true, cfg.clothDeferQuietFrames);
+    } else Log("[clothdefer] off in OblivionPerfFix.ini (takes a restart to switch on)");
     // ParallelStaticBodies: one call redirected and its helper threads started, only if enabled at startup (as version.dll); afterwards
     // the ini switches it live.
     if (cfg.parallelStaticBodies && ParallelHelpersAllowed(cfg)) {

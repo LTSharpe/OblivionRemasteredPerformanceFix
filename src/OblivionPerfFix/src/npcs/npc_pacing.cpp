@@ -367,6 +367,7 @@ struct State {
     bool lastCreateFar = false;  // a distant create command ran earlier in this OT frame
     int depth = 0;           // inside a unit
     bool unitDistant = false;  // the running unit's actor may wait (what a delegate completing inside it inherits)
+    const uint8_t* unitWeak = nullptr;  // the running delegate unit's owner (weak object pointer; ClothBuildDefer)
     void* session = nullptr;
     int units = 0;
     uint64_t spentUs = 0;    // unit time + catch-up time this frame
@@ -771,6 +772,18 @@ bool ActorLocation(const uint8_t* obj, double* x, double* y, double* z)
     return std::isfinite(*x) && std::isfinite(*y) && std::isfinite(*z);
 }
 
+// ActorLocation for any object of an owner chain (ClothBuildDefer's owner lookup): an equipment delegate's owner is the
+// character's body pairing component, whose word at the actor's root-component offset holds data, not a pointer. That
+// object is no actor; the walk goes on with its outer, the character. Pacing's own walk (ResolveDelegate) ends there
+// as before: the unit counts as near and runs whatever the budget.
+bool ActorLocationGuarded(const uint8_t* obj, double* x, double* y, double* z)
+{
+    __try {
+        return ActorLocation(obj, x, y, z);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
 
 bool ReadPlayer(double* x, double* y, double* z)
 {
@@ -858,19 +871,21 @@ bool FarFrom(double x, double y, double z)
     return dx * dx + dy * dy + dz * dz > d * d;
 }
 
-// The delegate's owner (weak pointer at +0x18) -> the actor it belongs to (itself or an outer); distant = farther than
-// the minimum distance. Unknown counts as near (runs as before).
-bool ResolveDelegate(const uint8_t* inst, uintptr_t* key, bool* distant)
+// A delegate's owner (the weak pointer at +0x18) -> the actor it belongs to (itself or an outer); distant = farther than
+// the minimum distance and not rendered recently (PacingFadeAware: or still invisible in its spawn fade-in). Unknown
+// counts as near (runs as before). guarded: an object that faults at the root-component offset is skipped instead of
+// ending the walk (ClothBuildDefer only).
+bool ResolveOwner(const uint8_t* ownerWeak, uintptr_t* key, bool* distant, bool log, bool guarded)
 {
     *key = 0;
     *distant = false;
     g.lastFadeHeld = false;
     if (!g.testPlayer && (!g.outerOk || !g.weakGet)) return false;
     __try {
-        const uint8_t* obj = static_cast<const uint8_t*>(g.weakGet(inst + kOwnerWeakOffset));
+        const uint8_t* obj = static_cast<const uint8_t*>(g.weakGet(ownerWeak));
         for (int i = 0; obj && i < 4; ++i) {
             double x, y, z;
-            if (ActorLocation(obj, &x, &y, &z)) {
+            if (guarded ? ActorLocationGuarded(obj, &x, &y, &z) : ActorLocation(obj, &x, &y, &z)) {
                 *key = reinterpret_cast<uintptr_t>(obj);
                 const bool far1 = FarFrom(x, y, z);
                 bool seen = far1 && RecentlyRendered(obj);
@@ -885,7 +900,7 @@ bool ResolveDelegate(const uint8_t* inst, uintptr_t* key, bool* distant)
                         g.lastFadeHeld = true;
                     }
                 }
-                if (g.delegateLogs < 16) {
+                if (log && g.delegateLogs < 16) {
                     ++g.delegateLogs;
                     Log("[pacing] delegate unit: actor at (%.0f, %.0f, %.0f), %.0f from the player, %s: %s", x, y, z,
                         std::sqrt((x - g.px) * (x - g.px) + (y - g.py) * (y - g.py)), seen ? "rendered" : "not rendered",
@@ -898,6 +913,11 @@ bool ResolveDelegate(const uint8_t* inst, uintptr_t* key, bool* distant)
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
     return false;
+}
+
+bool ResolveDelegate(const uint8_t* inst, uintptr_t* key, bool* distant)
+{
+    return ResolveOwner(inst + kOwnerWeakOffset, key, distant, true, false);
 }
 
 // ---- guards (game thread) ----
@@ -1012,10 +1032,12 @@ bool StillMayWait(const Entry& e)
 
 // Runs a unit (depth and the distance a nested completion inherits) and returns its time in us.
 template <class F>
-uint64_t TimeUnit(int type, bool distant, F&& body)
+uint64_t TimeUnit(int type, bool distant, const uint8_t* ownerWeak, F&& body)
 {
     const bool outer = g.unitDistant;
+    const uint8_t* const outerWeak = g.unitWeak;
     g.unitDistant = distant;
+    g.unitWeak = ownerWeak;
     ++g.depth;
     const uint64_t t0 = NowUs();
     body();
@@ -1023,6 +1045,7 @@ uint64_t TimeUnit(int type, bool distant, F&& body)
     (void)type;
     --g.depth;
     g.unitDistant = outer;
+    g.unitWeak = outerWeak;
     return us;
 }
 
@@ -1030,7 +1053,7 @@ void RunEntry()
 {
     Entry& e = Front();
     const DelegateType& d = g.del[e.type - kAppearance];
-    const uint64_t us = TimeUnit(e.type, e.distant, [&] {
+    const uint64_t us = TimeUnit(e.type, e.distant, e.inst + kOwnerWeakOffset, [&] {
         d.execIfSafe(e.inst);
         d.dtor(e.inst, 0);
     });
@@ -1139,7 +1162,7 @@ bool DelegateUnit(int type, void* inst, bool* result)
         }
     }
     if (OverBudget(type)) g.frameFlags |= 4;
-    const uint64_t us = TimeUnit(type, distant, [&] { *result = d.execIfSafe(inst); });
+    const uint64_t us = TimeUnit(type, distant, p + kOwnerWeakOffset, [&] { *result = d.execIfSafe(inst); });
     Account(type, us);
     LAB_UNIT(type, us, reinterpret_cast<const uint8_t*>(unitKey), nullptr, 0);
     (void)unitKey;
@@ -1199,7 +1222,7 @@ uint64_t CreateExecHook(void* cmd)
     g.lastCreateFar = distant;
     if (OverBudget(kCreate)) g.frameFlags |= distant ? 2 : 4;
     uint64_t r = 0;
-    const uint64_t us = TimeUnit(kCreate, distant, [&] { r = g.origCreate(cmd); });
+    const uint64_t us = TimeUnit(kCreate, distant, nullptr, [&] { r = g.origCreate(cmd); });
     Account(kCreate, us);
     return r;
 }
@@ -1219,7 +1242,7 @@ uint64_t GenericExecHook(void* cmd)
     if (heavy && g.allowDefer && g.lastCreateFar && !PairForced() && OverBudget(kGeneric, PairLag()))
         return Defer(static_cast<uint8_t*>(g.session), kGeneric);
     uint64_t r = 0;
-    const uint64_t us = TimeUnit(kGeneric, heavy && g.lastCreateFar, [&] { r = g.origGeneric(cmd); });
+    const uint64_t us = TimeUnit(kGeneric, heavy && g.lastCreateFar, nullptr, [&] { r = g.origGeneric(cmd); });
     if (heavy) {
         Account(kGeneric, us);
         LAB_UNIT(kGeneric, us, nullptr, nullptr, PairLag());
@@ -1371,6 +1394,18 @@ uint8_t FrameRun(void* manager)
     }
     g.inMainRun = false;
     if (g.deferredNow || g.E < g.S) s.deferFrames.fetch_add(1, std::memory_order_relaxed);
+    // ClothBuildDefer (cloth_defer.cpp): the cloth simulation builds that wait, in what the frame's budget has left;
+    // they count as units (the ledger's NPC units; the delegate units after the post-tick no longer run as the frame's
+    // first unit whatever the budget)
+    int clothBuilds = 0;
+    const uint64_t clothUs = ClothDeferFrame(g.frame, !g.allowDefer, g.spentUs, g.budgetThisFrame, g.units > 0, &clothBuilds);
+    if (clothBuilds) {
+        g.spentUs += clothUs;
+        g.unitUs += clothUs;
+        g.unitCumUs += clothUs;
+        g.unitCumN += static_cast<uint64_t>(clothBuilds);
+        g.units += clothBuilds;
+    }
     return r;
 }
 
@@ -1624,6 +1659,31 @@ void LogNpcPacingStats()
             Log("[pacing] PacingLeanFlowDrain: %llu level flows at their wait bound drained the main queue only; %llu waiting "
                 "delegates stayed queued", static_cast<unsigned long long>(ld), static_cast<unsigned long long>(lk));
     }
+}
+
+bool NpcPacingDistantUnit(uint64_t* ownerWeak, uint64_t* frame)
+{
+    if (!g.installed || !OnGameThread() || g.depth == 0 || !g.unitWeak) return false;
+    if (!g.enabled.load(std::memory_order_relaxed) || !FrameOpen()) return false;
+    if (!g.unitDistant) {
+        // pacing's walk ran the unit as near; an equipment unit's owner is the character's body pairing component, where
+        // that walk ends: ask again with the guarded walk, which reaches the character (2026-10-27, npcburst: 1 robe
+        // build held without it, 9 with it)
+        uintptr_t key;
+        bool distant;
+        if (!ResolveOwner(g.unitWeak, &key, &distant, false, true) || !distant) return false;
+    }
+    memcpy(ownerWeak, g.unitWeak, sizeof *ownerWeak);
+    *frame = g.frame;
+    return *ownerWeak != 0;
+}
+
+bool NpcPacingStillDistant(uint64_t ownerWeak)
+{
+    if (!g.installed || !OnGameThread() || !g.allowDefer || !g.enabled.load(std::memory_order_relaxed)) return false;
+    uintptr_t key;
+    bool distant;
+    return ResolveOwner(reinterpret_cast<const uint8_t*>(&ownerWeak), &key, &distant, false, true) && distant;
 }
 
 bool NpcPacingPlayerPos(double* x, double* y, double* z)

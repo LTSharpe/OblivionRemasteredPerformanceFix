@@ -134,6 +134,12 @@ npcs/cell_buffer.cpp:kGridRest:d3e173cd05	1	npcs/cell_buffer.cpp:86
 npcs/cell_buffer.cpp:kGridFlags:b9be2fb127	1	npcs/cell_buffer.cpp:90
 npcs/cell_buffer.cpp:kWriteSetting:324fc2d201	1	npcs/cell_buffer.cpp:95
 npcs/cell_buffer.cpp:-:fdc87a1a7c	9+	npcs/cell_buffer.cpp:357
+npcs/cloth_defer.cpp:kRecreate:b07a6c5d9f	1	npcs/cloth_defer.cpp:53
+npcs/cloth_defer.cpp:kRecreateProxyField:0aab03c8b3	1	npcs/cloth_defer.cpp:55
+npcs/cloth_defer.cpp:kUnregister:71dc3e3624	1	npcs/cloth_defer.cpp:57
+npcs/cloth_defer.cpp:kBoolThunk:7ffc61800f	9+	npcs/cloth_defer.cpp:60
+npcs/cloth_defer.cpp:kSuspendedBody:058569917e	1	npcs/cloth_defer.cpp:62
+npcs/cloth_defer.cpp:kEnabledThunk:08e69d030e	1	npcs/cloth_defer.cpp:64
 npcs/cloth_register.cpp:kExecRecreate:9d9a8c52df	9+	npcs/cloth_register.cpp:83
 npcs/cloth_register.cpp:kExecSuspended:dedcb59d9c	9+	npcs/cloth_register.cpp:87
 npcs/cloth_register.cpp:kExecEnabled:bb36e68efa	9+	npcs/cloth_register.cpp:90

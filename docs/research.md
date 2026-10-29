@@ -1061,6 +1061,49 @@ more 149 -> 134 (within the run-to-run noise: one block showed the gain, the oth
   no numbers are quoted here. Self-test: every site, the install, and lite builds and completions against fakes (key
   switched off mid-call, 12 LODs, spoiled constraints, unregistration).
 
+<a id="clothbuilddefer"></a>
+
+### A far-away robe's cloth built a few frames later (`ClothBuildDefer`)
+
+[Explanation](how-it-works.md#clothbuilddefer).
+
+- **Found (2026-10-19/20, stack samples and a build log at Peryite's Shrine, `npcburst`):** most of a robed NPC's creation
+  unit is `UChaosClothComponent::RecreateClothSimulationProxy` (exe+0x53CD090) building a whole `FClothSimulationProxy`,
+  a few ms per robe; per robe an `OnRegister` build, a script rebuild ~5 ms later and another 40-90 ms later after the
+  proxy ran 1-3 ticks, each inside the NPC's creation unit. Every rebuild starts from nothing, so only the last build's
+  proxy survives.
+- **The change:** `RecreateClothSimulationProxy`'s entry is detoured. A request on the game thread inside a
+  `NpcCreationPacing` unit whose actor may wait (far, not rendered recently, a frame that defers; the unit's owner is
+  passed from `TimeUnit`), for a registered component with no proxy yet, is held. A robe is built in an equipment unit,
+  whose owner is the character's `VCharacterBodyPairingComponent`: its word at the actor's root-component offset holds
+  data, not a pointer, so pacing's owner walk faults there and runs the unit as near. This question walks on past such
+  an object to the character (`ActorLocationGuarded`; pacing's own walk is unchanged): without it almost no robe build
+  is held. Later requests from such units merge into it; a request from anywhere else builds at
+  once (dropping the held one). Held builds run at pacing's frame start with the game's function and the component's
+  state then: when quiet for `ClothDeferQuietFrames` frames (6) or 30
+  frames after the first request, inside the frame's pacing budget (which grows with the wait as pacing's does), and
+  counted as a unit; at once when the actor is near or rendered, the frame does not defer, or 60 frames after the first
+  request. `execIsSimulationSuspended`'s call and `execIsSimulationEnabled` (both answer from the proxy) build a held
+  build first, so Blueprint logic sees the stock answer. `OnUnregister`'s vtable slot (exe+0x803EF20; in front of
+  ClothRegisterLite's hook there, found through `ClothRegisterUnregisterSlot`) drops a held build. A held build runs only
+  if the component is still the same registered object (vtable, object index) with no proxy.
+- **Why the result is the same:** the same component state is built by the game's own function, a few frames later and
+  only off-screen. Until then the component has no proxy: `TickComponent` skips the proxy tick (null check), the render
+  data falls back to plain skinning, `OnUnregister` resets nothing. With ClothRegisterLite a held build leaves no proxy,
+  so its completion at the `EquipBodyPart` call's end has nothing to complete, and the later build is a full one.
+- **Bounds (not yet as stock):** the registration's render state creation runs `UpdateBounds` -> `CalcBounds`, which
+  caches the proxy's particle bounds in local space (stock: the first build's). With that build held there is no proxy,
+  so it caches an empty box, and the build made later does not refresh the cache; the renderer takes the primitive's
+  local bounds from it.
+- **Checked before writing:** `RecreateClothSimulationProxy`'s prologue and its proxy field, `OnUnregister`'s single
+  vtable slot (or ClothRegisterLite's hook in it), both Blueprint readers' code; anything else: not installed, one log
+  line (the self-test changes one byte of the entry and checks that nothing is written). Installed at start-up on the
+  version.dll route, after ClothRegisterLite; on the OBSE64 route it stays off with one log line. Then live.
+- **Image check** (`npcburst-visual`: the shrine flight, then two frozen views of the five worshippers, near and from
+  above; `tools\Compare-Benchmark.ps1`, visual pass, off and on in fresh games): every robe present, draped and of
+  normal length; the worshippers stand and pose differently, as between any two runs, and the foreground grass moves in
+  the wind.
+
 <a id="rigvmhashmemo"></a>
 
 ### Animation rig set-up remembered (`RigVmHashMemo`, `RigLogicMapCache`)
