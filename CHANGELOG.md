@@ -9,6 +9,25 @@ Downloads, checksums and build attestations: https://github.com/LTSharpe/Oblivio
 Bug fixes say whose bug it was: **game bug** = also happens without OblivionPerfFix (in the game, its engine or a
 driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 
+## Unreleased
+
+- **New switches, off by default: rows in the Graphics menu.** `HdrMenuRows`: an HDR section on the PC Graphics page
+  (HDR, Peak Brightness, Paper White, Black Floor, Mid-Tone), made from the game's own rows, saved like them, and greyed
+  out the way the game greys its own rows (the sliders while HDR is off, Brightness Intensity while it is on); with HDR
+  on, the saved peak brightness is used from the start (the game used 1000 nits after every launch until it was
+  changed). `HudAspectRow`: a "HUD Aspect Ratio" row (Wide, 4:3, 16:9, 21:9, 32:9) that keeps the HUD in a centred
+  area on wide screens; menus and full-screen effects stay full width. `DlssRayReconstruction` (trade-off): a "DLSS -
+  Ray Reconstruction" row for the denoiser the game's DLSS plugin has but never offers; needs NVIDIA's nvngx_dlssd.dll
+  (not included); about 0.4 ms GPU time at 5120x2160 on an RTX 5090.
+- **New trade-off switch, on by default (HDR only): HDR shadows as on an SDR monitor** (`HdrGamma22`): the game's HDR picture
+  copies its SDR picture as Windows decodes SDR (sRGB), so its darks sit 1.7-2.7x higher than on an SDR monitor (gamma
+  2.2). With 1 the HDR tone curve is refitted in memory so darks and mid-tones match SDR at gamma 2.2; highlights, peak,
+  black floor and the HUD stay; nothing changes in SDR. `HdrGamma22=0` gives the game's HDR curve. Live.
+- **New trade-off switches, off by default: the menu background and save thumbnails in HDR** (`HdrMenuBackground`,
+  `HdrSaveThumbnail`): in HDR10 the menu's background screenshot and a save's thumbnail hold PQ values that the UI shows
+  as colour, so both look grey and washed out. With 1 they are converted to the colours the UI shows at the same
+  brightness. Live.
+
 ## 1.2.3-beta
 For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Thanks to MitochondriaOverlords for issue #5,
 to mkusm for pull request #25, to cgisquet for pull request #19, to Hexaae for issue #27, and to everyone who reported

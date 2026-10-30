@@ -235,7 +235,8 @@ int SaveListeners(Listener* out, uint64_t* handles, void** holders, int* saveCou
                 if (!MatchesAt(fn, ParsePattern(kSaveCallback))) { g_why = "a raw listener that is not the save's callback"; return -1; }
                 if (RipTarget(fn + kCbDelegateLea, 3, 7) != g_delegate) { g_why = "callback for another delegate"; return -1; }
                 uint8_t* const remove = RipTarget(fn + kCbRemoveCall, 1, 5);
-                uint8_t* const copy = RipTarget(fn + kCbCopyCall, 1, 5);
+                // HdrSaveThumbnail may have pointed the copy at its stub: the game's copy behind it
+                uint8_t* const copy = HdrSaveThumbnailResolve(RipTarget(fn + kCbCopyCall, 1, 5));
                 if (!InText(remove) || !InText(copy)) { g_why = "unexpected Remove"; return -1; }
                 g_remove = reinterpret_cast<RemoveFn>(remove);
                 g_arrayCopy = copy;

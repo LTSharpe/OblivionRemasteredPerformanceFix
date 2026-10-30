@@ -293,6 +293,13 @@ void LogObjectReplaceGuardStats()
     g_keptLogged = k;
 }
 
+uint8_t* FindObjectArrayFromDtor()
+{
+    // ~UObjectBase's lea rcx,[GUObjectArray] before its jump to FreeUObjectIndex (exactly one match, as the guard requires)
+    const auto dtors = FindAll(Game().text, ParsePattern(kDtor));
+    return dtors.size() == 1 ? RipTarget(dtors[0] + kDtorArray, 3, 7) : nullptr;
+}
+
 bool ObjectReplaceGuardInfo(ObjectReplaceGuardInfoOut* out)
 {
     if (!g_site) return false;

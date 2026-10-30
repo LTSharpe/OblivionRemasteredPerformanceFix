@@ -380,6 +380,51 @@ loading itself is unchanged (arrival 2.7-3.1 s after the door is used, both).
   Lumen's hardware ray tracing off (profile `cpu-nort`) the game still builds these structures; the switch batches them
   (1,841 builds in the first minute, 13 batches, longest call 5.4 ms) without errors.
 
+<a id="hdrgamma22"></a>
+
+### HDR shadows re-decoded as gamma 2.2 (`HdrGamma22`, trade-off, on)
+
+[Explanation](how-it-works.md#hdrgamma22). On by default, HDR only: it changes the HDR picture on purpose.
+
+- **The cause, measured** (Windows Graphics Capture of the game window in FP16 scRGB; fixed camera
+  in an interior, HUD off; pixels binned by their SDR brightness; RTX 5090, AW3926QW, SDR white 204 nits):
+  - At Mid-Tone 20, the HDR / SDR ratio against SDR as Windows decodes it (sRGB) is flat, x0.93-0.97 from 0.2 % to
+    40 % of SDR white.
+  - Against the same SDR frame re-decoded with gamma 2.2 (an SDR monitor), the ratio is x2.61, x1.68, x1.31 and
+    x1.13 in the darks, then x0.92-1.05 in the mid-tones.
+  - Not changed by: Mid-Tone (it scales every band); Black Floor -2..-4; OutputDevice 3 vs 4; the camera's FilmToe /
+    BlackClip / Slope; r.HDR.Aces.SceneColorMultiplier (exposure only).
+  - A colour-grading LUT changes SDR (identity LUT: p50 2.99 -> 0.24 nits) but not HDR. Positive control: the same
+    camera override with +1 EV doubles the frame.
+  - Saturation is not the cause: 0.66-0.68 HDR vs 0.64 SDR.
+- **Where the curve is.** An ACES-style tone scale:
+  - Built at exe+0x26C03D0 on any HDR setting change, detected per frame at exe+0x37E52F0.
+  - Kept in a 20-float block at exe+0x8DD9340: min point; mid point (4.8 nits, slope 1.55); max point;
+    coefsLow[5] and coefsHigh[5] (quadratic B-spline, 3 segments each, log10); SceneColorMultiplier.
+  - Copied by its one getter, exe+0x26C0790, to the DeviceEncodingOnly pass, a pass with the ACES shader parameters,
+    and a shader next to the UI composite.
+  - Only exe+0x26C03D0 writes the block. Read live, it matches the curve re-implemented here: input 0.18 gives the
+    Mid-Tone, 15.000 nits.
+- **The fit** (prototyped offline, the same in the DLL):
+  - Least squares in log10 output for the target g(stock).
+  - The floor, the peak and the mid join (value and slope) are constraints.
+  - A grid search over the split points; the stock split leaves most of the low spline in invisible black, ±50 %.
+  - Worst error from 0.1 % of W up: 5.8 % at Mid-Tone 15, 5.3 % at 20, 5.7 % at 10 with black floor -2. Under
+    2.5 % from 0.5 % of W.
+  - Monotonic. 68 ms per fit, on the monitor thread.
+- **Live result** (probe game, 2026-10-27 18:00):
+  - On within ~2 s of the ini switch; off puts the game's block back byte for byte.
+  - A Mid-Tone change refits (15 -> 20 logged).
+  - Against SDR re-decoded with 2.2: x0.62-0.72 flat from 0.2 % to 40 % of SDR white (stock x1.83 -> x0.68).
+    The offline preview gives x0.62-0.71; highlights x1.71 vs x1.69 stock. Mid-Tone 20 gives
+    x0.88-0.97.
+  - HUD pixels identical, on / off ratio 1.000 over 1984 pixels.
+  - DLSS frame generation on (Altar.DLSS.FG.Enabled 1, r.Streamline.DLSSG.Enable 1 read back): six captures in a
+    row, all corrected (p50 1.51-1.57 vs 2.06 stock). That generated frames were among them is likely, not proven.
+- **Cost:** an 80-byte compare per frame on the game thread; the fit only after a settings change. Not benchmarked.
+- **Trade-off:** it changes the picture by design. On by default, since the stock HDR shadows sit 1.7-2.7x above SDR on
+  a monitor; `HdrGamma22=0` gives the game's curve. SDR is never touched.
+
 <a id="physanimnoemptylock"></a>
 
 ### No exclusive physics lock for animation parts with nothing to move (`PhysAnimNoEmptyLock`, 1.2.3)
@@ -1227,6 +1272,176 @@ those seconds keep the game's pace.
   - The engine's display data after the page's rebuilds, read from memory with the fix off and on, is identical
     (monitor, native resolution, all 24 resolutions, work area, DPI).
 
+<a id="hdrmenurows"></a>
+
+### HDR rows in the Graphics menu (`HdrMenuRows`, off)
+
+[Explanation](how-it-works.md#hdrmenurows). Off by default: a menu addition.
+
+- **The menu is data** (UE4SS probes, 2026-10-27):
+  - Each page is a `VModernSettingTable` with a `Settings` array of `ModernSettingTableRow` (stride 0x138, array at
+    +0xB0): name and description texts, Type (1 steps, 2 slider), PlatformFlag (int, bit 0 = PC), StepProperties
+    (Index, DefaultIndex, Steps of {Label, Command.ConsoleCommand, ...}) and SliderProperties (Value, DefaultValue,
+    CVAR, Min/Max/Step/Jump).
+  - `DT_Modern_Settings_GraphicsGeneral` has console-only rows: 1 "Performance / Quality" (204), 8 a console Frame
+    Rate Limit (224), and 15 `r.Lumen.Reflections.ScreenTraces` (206; PC has its own row 16).
+- **The HDR switches** (live reads):
+  - `Altar.GraphicsOptions.HDR` 1/0 runs the game's HDR switch: IsHDREnabled, bUseHDRDisplayOutput and
+    `r.HDR.EnableHDROutput` follow.
+  - `Altar.GraphicsOptions.HDRWhitePoint` sets HDRDisplayOutputNits, the output device (3 at 1000 nits, 4 above) and
+    `r.HDR.Display.MaxLuminance`; while HDR is off it is only stored.
+- **Launch bug** (three benchmark launches with HDR on at 1300 in GameUserSettings.ini): `Altar.GraphicsOptions.HDR` 0
+  and `HDRWhitePoint` 1000 after start, so MaxLuminance was 1000 with the 2000-nit device. Setting the WhitePoint to
+  1300 gave MaxLuminance 1300. Not yet checked in a launch outside the benchmark.
+- **Engine helpers**, each pinned by the self-test:
+  - FText::FromString(const FString&), exe+0xE56680, reached from Conv_StringToText's exec function; it copies the
+    string;
+  - FName(const TCHAR*, EFindName), exe+0xF3B8B0 (UE4SS's verified constructor);
+  - FMemory::Malloc, exe+0xE32F40 (GMalloc slot +0x28);
+  - GUObjectArray, from ~UObjectBase;
+  - Altar's command setter, exe+0x48F7F10, as FrameRateLimitAtStart finds it;
+  - UAltarGameUserSetting::AddOrUpdateSettingsToSave, exe+0x4757FA0, found by its name in the native-function table;
+  - the settings save's writer, exe+0x476B290 (serialises the object, then SaveGame to the "Save_Settings" slot).
+  Reflection offsets are those UE4SS measures for this build (FField Next 0x18 / Name 0x20, FProperty Offset 0x44,
+  UStruct ChildProperties 0x50). Every field is looked up by name and type at run time.
+- **What had to be found live:**
+  - a slider row with step commands runs a step, not its CVAR, so the sliders' steps are emptied;
+  - two Altar setter commands for one variable in one frame keep only the last, so the nits nudge and the target are
+    10 frames apart;
+  - the game keeps, and writes back at launch, only the options of rows that exist when it loads Save_Settings.sav,
+    which is before the rows exist;
+  - the file is therefore read on the monitor thread's first tick (about 1 s after load; the game's write came about
+    23 s after load), and its HDR options are put back and saved once.
+- **Live check** (probe games 2026-10-27):
+  - the rows show on the PC Graphics page;
+  - through the menu's own widgets, HDR Off/On switches the output, peak 1000/1400 sets nits, device and
+    MaxLuminance, and UI 200/250 sets `r.HDR.UI.Luminance`;
+  - the menu's save writes all three options;
+  - with a save holding HDR On, 1000 nits and UI 250, the next launch shows and applies 1000 / 250 (device 3,
+    MaxLuminance 1000), and the file still holds the three options after the game's launch write;
+  - with the player's save without HDR options: rows from the ini (On, 1300), MaxLuminance 1300, nothing written.
+- **Not checked:** a menu Apply followed by a real restart outside the benchmark runner (the runner restores the save
+  after every run); the look of 1300 vs 1000 nits by eye.
+- **HDR section** (second version, same day):
+  - **Sections are data.** The page table's Graphics page points to `DT_Modern_Setting_GraphicsTable`, a
+    `VModernSettingCategoryTable` whose `Categories` array (+0xB0, 0x28 per row) holds {Name text +0x8, Settings object
+    +0x20}: General, Quality, Advanced.
+  - **What the fix does:**
+    - creates a `VModernSettingTable` with UGameplayStatics::SpawnObject (exe+0x31C1860, found by name; NewObject),
+      outer the category table;
+    - fills it with five rows deep-copied by reflection from General's PC rows "Screen Space Reflections" (step
+      template) and "Brightness Intensity" (slider template): texts counted once more, strings and arrays copied;
+    - inserts a category "HDR" after General.
+  - **Kept alive:** the category table (object index above GUObjectArray's never-collected pool) references the new
+    table; two forced collections (KismetSystemLibrary::CollectGarbage) left both intact.
+  - **Picture tests** with HDR on: paired shots indoors, against no-change controls of 0.43-0.65:
+    - `r.HDR.Display.MidLuminance` 15 -> 30: 19.9;
+    - `r.HDR.Display.MinLuminanceLog10` -4 -> -1: 1.06;
+    - `Altar.GraphicsOptions.Brightness` 0 -> 5: 0.53, i.e. no effect in HDR (the game's description is left as it is);
+    - `r.HDR.Display.ColorGamut` 2 -> 1: 0.44 (no live effect; HDR10 output is Rec.2020 = 2, as the game sets it).
+  - **Widgets and saving:** every row works through its widget (HDR off/on, 1000 nits, paper white 220, black floor -3.5,
+    mid-tone 20). The menu's save writes all five; the next launch shows and applies them, and the file keeps them.
+  - **Found live:**
+    - the slider label rounds (-3.5 showed as -3), so Black Floor moves in whole steps;
+    - the game's own HDR sub-type (5) greys the row out, shows "Off" and switched HDR output off in a probe game, so
+      it is not used; the game's row locks are wired per sub-type, so no row can be greyed out generically.
+  - **Text and defaults:**
+    - Labels have no units; each description says it once.
+    - Defaults (DefaultIndex / DefaultValue): HDR Off, peak 1000, paper white 200, black floor -4, mid-tone 15.
+      The shown values stay the current state.
+    - Paper white is set to 200 at start-up when none is saved.
+    - Probe game, 2026-10-27 18:13: all five rows as specified; the saved On / 1300 / 250 / -4 / 15 shown and in
+      effect.
+    - Mid-Tone 15: measured, the game's own value, and the value HdrGamma22's preview used. Mid-tone ~20.7 matches
+      SDR brightness instead.
+    - Black Floor's "-2 for LED/LCD": -2, -3 and -4 measured the same in one interior scene; -1 lifts the shadows.
+  - **Locks:**
+    - The settings widgets lock rows by `EModernSettingWidgetSubType` (UE4SS): Resolution 1, Upscaler 2, HDR 5,
+      HDROptions 6, SDROptions 8, VSync 17, and others. `UpdateLockState` / `IsLocked` have no native-table entry.
+    - A locked row is a disabled widget: the game's greyed Display Resolution, Resolution Scale and V-Sync report
+      `GetIsEnabled` false. `UpdateLockState(true)` alone sets `IsLocked` and leaves the widget enabled.
+    - The fix sets the four sliders to HDROptions and General's Brightness Intensity (sub-type 0) to SDROptions.
+      This is applied only when General's Display Resolution and V-Sync rows carry 1 and 17, as in build 19115871.
+    - Probe game: HDR on, Brightness disabled and the sliders
+      enabled; HDR off through the HDR row, the reverse; on again, back. The game switches them itself, and they
+      look like its own locked rows.
+    - A widget made before the sub-type changes keeps its state; the fix sets it before any menu opens.
+    - Not tested: controller navigation over a locked row; Reset / Reset All on it (the game's own locked rows are
+      handled the same way).
+
+<a id="hudaspectrow"></a>
+
+### HUD Aspect Ratio row (`HudAspectRow`, off)
+
+[Explanation](how-it-works.md#hudaspectrow). Off by default: a menu addition.
+
+- **Where the HUD is** (probe game, UE4SS): during play the only real widget on screen is WBP_PrimaryGameLayout_C
+  (CommonUI's primary game layout). Its root overlay holds ten VActivatableWidgetStack layers: GameStack (active:
+  WBP_ModernHud_PrimaryLayout_C, the HUD), GameMenuStack, MenuStack, ModalStack, FadeWidgetStack, LoadingScreenStack
+  and others. Menus live in the other stacks.
+- **The method:** left and right padding on GameStack's OverlaySlot. Live in Lua, 16:9 / 21:9 / 4:3 on 5120x2160
+  (Slate 2560x1080 at scale 2: padding 320 / 20 / 560) moved the bottom-right HUD icons in, with the compass centred and
+  menus untouched.
+- **Prior art:** none found that works at run time; Better HUD (Nexus, Caites) offers 16:9, 16:10 and 21:9 HUD layouts
+  (reviews; unverified how).
+- **In the DLL:** UObject::ProcessEvent found by its prologue (exe+0x10F3EA0; UE4SS reports the same address).
+  UFunctions are found by name on the object's class and checked by parameter count and size: OverlaySlot.SetPadding
+  (1, 16), UWidgetLayoutLibrary.GetViewportSize (2, 24, return at 8: FVector2D of doubles), .GetViewportScale (2,
+  12/16, return at 8), UUserWidget.GetOwningPlayer (1, 8). The world context must be the owning player: with the
+  layout widget or the stack, the library returned its 1x1 / scale 1 fallback (in Lua too, this session's world
+  L_ICMarketDistrict), with the player controller 5120x2160 at 2.0.
+- **The row:** OPF.HudAspect is an int console variable registered with the console manager's slot +0x18 (checked at
+  the game's own registration of r.VT.MaxUploadsPerFrame.Streaming). The row is
+  a copy of Show FPS, with five steps from its first step (ModernSettingSingleCommand: Label text +0, Command at +24).
+  The HDR section's templates are now found by their commands (Screen Space Reflections, Brightness), since the row
+  moves them down by one.
+- **Probe game** (2026-10-29):
+  - The row sits at General row 9 of 17 (after the two Frame Rate Limit rows, before Show FPS). The HDR section and the
+    Ray Reconstruction row are made as before.
+  - OPF.HudAspect 2 / 1 / 3 / 4 / 0 through the console gave padding 320 / 560 / 20 / 0 / 0, screenshots as expected.
+  - Not yet checked: the row's steps in the menu and the saved choice across a restart.
+- **Self-test:** ProcessEvent at exe+0x10F3EA0, the registration site, the padding arithmetic (3 checks).
+
+<a id="dlssrayreconstruction"></a>
+
+### DLSS Ray Reconstruction row (`DlssRayReconstruction`, trade-off, off)
+
+[Explanation](how-it-works.md#dlssrayreconstruction). Off by default: Ray Reconstruction changes the picture.
+
+- **The switch:** the game's DLSS plugin has `r.NGX.DLSS.DenoiserMode`; set live to 1 with NVIDIA's nvngx_dlssd.dll in
+  place, the picture changed by 0.70-0.90 per switch against no-change controls of 0.38-0.45, four of four switches
+  above every control (indoors, fixed camera, 2026-10-27): Ray Reconstruction runs. The value stayed 1 across a DLSS
+  mode change (a mod's claim that it resets was not reproduced at the variable).
+- **The menu data** (probe game 2026-10-29): DT_Modern_Settings_GraphicsUpscaler has 10 rows, every one of sub-type
+  Upscaler (2); DLSS rows have platform flag 209, FSR rows 241; Frame Generation is a step row on Altar.DLSS.FG.Enabled
+  0 / 1 / 2.
+- **The lock:** a first build (row copied, sub-type and flag included) showed the row enabled with FSR selected while the
+  real DLSS rows greyed, and the FSR rows still locked correctly after moving down one place (so not by position). The
+  rule is native: the widget's upscaler lock (exe+0x495BF70) looks the row's console variable up in a function-static
+  table (exe+0x495AFD0: Altar.GraphicsOptions.ScreenPercentage and .AntiAliasingMode -> none, Altar.DLSS.* -> DLSS,
+  Altar.FSR3.* -> FSR, ...) and calls the widget's SetIsEnabled (vtable +0x2C0) with "current upscaler == the entry's";
+  a variable not in the table leaves the widget as it is. The fix answers DLSS for r.NGX.DLSS.DenoiserMode only, after
+  the table said nothing (the call at exe+0x495BF8C; the table's other caller, exe+0x4756410, untouched).
+- **Result** (probe game, rows read through the widgets): DLSS selected: Ray Reconstruction enabled,
+  the FSR rows greyed; FSR selected (the Upscaling row stepped with its own arrows): Ray Reconstruction greyed with the
+  DLSS rows, the FSR rows enabled; back to DLSS: as at first. The row's steps set r.NGX.DLSS.DenoiserMode 1 and 0.
+- **Cost and UE's denoisers** (2026-10-29, probe game: 5120x2160, DLSS Ultra Performance, Lumen
+  hardware RT and HW reflections on; fixed camera, weather held; settings switched live, order A B C D D C B A, 12 s
+  each; PresentMon MsGPUBusy medians; GPU-bound throughout): A stock 8.41 / 8.14 ms; B Ray Reconstruction 8.76 / 8.61
+  (+0.42 ms, +5 %, about 119 -> 114 fps); C Ray Reconstruction with r.Lumen.Reflections.BilateralFilter,
+  .ScreenSpaceReconstruction, .Temporal and r.Shadow.Denoiser at 0 (what RR mods add) 8.66 / 8.52 (+0.32 ms); D those
+  four at 0 without RR 8.32 / 8.23 (no change). Pictures (mean absolute difference per screen cell, 0-255; the lower
+  half had moving NPCs): in the static upper half the same-setting pairs differ by 1.1-4.9, A vs B by 2.4-4.0 (RR
+  changes the picture a little); A vs D and B vs C stay at the control level. So in this view the four extra settings
+  change nothing visible, with or without RR, and the row sets only r.NGX.DLSS.DenoiserMode. One view only, and an odd
+  one (the fixed camera looked at a reflected forest edge rather than the market).
+- **In play** (2026-10-29): a recording with the row switched On and Off shows the change in the same view
+  (deeper, more detailed indirect shadows on a shaded rock; slightly sharper water reflections). Applied On, then a
+  restart: Save_Settings.sav held "r.NGX.DLSS.DenoiserMode" "1", the log showed the saved option put back and the row
+  made On (saved option).
+- **Self-test:** the lock's call at exe+0x495BF8C to the table at exe+0x495AFD0 through the stub; the wrapper with a fake
+  table passes the game's entries through, answers DLSS for r.NGX.DLSS.DenoiserMode and nothing for other unknown names.
+
 <a id="menuscreenshotfilter"></a>
 
 ### The menu's screenshot filtered in one go (`MenuScreenshotFilter`)
@@ -1331,6 +1546,71 @@ ledger, keys switched live in A-B-B-A order.
   cache listener first, then the save callbacks (the save callback's event lets the save continue, which reads the
   cache). Taken over only when every listener is the save's callback or the cache; others (pause-menu save, rest/wait)
   run the game's way.
+
+<a id="hdrmenubackground"></a>
+
+### The menu's background in HDR (`HdrMenuBackground`, trade-off, off)
+
+[Explanation](how-it-works.md#hdrmenubackground). Off by default: it changes the picture on purpose.
+
+- **What draws it** (probe game, UE4SS widget walk with the System page open): `WBP_InventoryBackgroundWidget`, a
+  CanvasPanel with an Image "Background" showing a transient Texture2D, under a BackgroundBlur (strength 5). Altar's
+  OnScreenshotCaptured handler (exe+0x4924EF0) makes that texture from the menu-open screenshot after its one call of
+  `FImageUtils::ImageResize` (TArray version exe+0x32548C0, called at exe+0x4924F69; the function's other two callers,
+  exe+0x48AA433 and exe+0x48CB3EE, are elsewhere).
+- **The cause, measured** (FP16 window captures of the System page and of the world at the same view, HDR10 output
+  device 4, UI luminance 250 / 200; 16 background regions of 300 px, buttons excluded):
+  - Stock HDR menu / SDR menu: x1.74 on average, x2.09 in dark regions and x1.45 in bright ones (log spread 0.30):
+    darks lifted, contrast flattened. UI elements themselves scale with the UI luminance (map page 1.22 = 250 / 204).
+  - The handler's bytes, dumped once and compared with the world capture pixel by pixel: byte 112 / 128 / 184 =
+    1.65 / 3.5 / 80 nits, which is sRGB(PQ(nits)) within 1-2 codes. The UI decodes sRGB and shows the PQ value as the
+    colour. A first table that treated the bytes as PQ directly only brightened every region ~1.6x (contrast unchanged),
+    which is how the encoding was pinned down.
+- **The change:** the call at exe+0x4924F69 goes through a stub to a wrapper. The wrapper calls the game's ImageResize,
+  then, when the switch is on and `r.HDR.EnableHDROutput` is 1 with `r.HDR.Display.OutputDevice` 3 or 4 (ST 2084), it
+  maps the result's B, G, R bytes through a 256-entry table: sRGB-decode, PQ to nits, divided by `r.HDR.UI.Luminance`,
+  a soft shoulder above 0.8, sRGB-encode. Alpha is kept. The console variables are read through the game's console
+  manager: GConsoleManager exe+0x9007F28, found from the game's own lookup of `r.HDR.UI.Luminance`.
+  `FindConsoleVariable` is at vtable+0xB8, `AsVariableInt` at +0x58 and `GetFloat` at +0x98, each as the game's own
+  code calls them.
+- **Result** (2026-10-28, probe game, IC Market, System page, UI white 200, switched live in one game):
+  - HDR menu / SDR menu x0.60 in both dark and bright regions, log spread 0.079 (stock 0.30).
+  - Median background 4.1 nits (stock 14.2, SDR 6.1). Visually the HDR menu now looks like the SDR one.
+  - The conversion takes 5.8 ms per 5120x2160 screenshot on the game thread (4 opens). It now runs in bands of
+    4,096 pixels on ScreenshotParallel's helpers (each pixel on its own, so the same bytes; self-test: a random 5120x2160
+    picture against the table applied pixel by pixel): 1.27 ms in play (HDR10, 5120x2160).
+  - Menu-opening frames (HitchLedger, ABBA x2): with the fix 196.6 (the first open), 171.2, 154.4 and 156.4 ms;
+    without 172.9, 147.3, 153.0 and 159.5 ms. The difference is within noise.
+- **Self-test:** the call site, ImageResize and the console manager at their build-19115871 addresses; the table
+  (monotonic, about 100 nits at a 250-nit white gives sRGB 170); the wrapper with a fake resize converts for output
+  devices 3 and 4 and passes SDR, scRGB and off through unchanged.
+
+<a id="hdrsavethumbnail"></a>
+
+### Save thumbnails in HDR (`HdrSaveThumbnail`, trade-off, off)
+
+[Explanation](how-it-works.md#hdrsavethumbnail). Off by default: it changes the picture on purpose.
+
+- **Report** (HDR, 2026-10-29): the Load menu's thumbnails look washed out, like the menu background did.
+- **Where the picture comes from** (static, build 19115871): the save's screenshot callback (exe+0x48AF8A0) is a
+  listener of the same screenshot broadcast as the menu background's handler (see SaveThumbnailAsync), so its bytes are
+  the same: the PQ value sRGB-encoded in HDR10. It copies them into its holder with the TArray<FColor> copy-assign
+  (exe+0xF9DEB0, called at exe+0x48AF8DA); the JPEG task reads the holder. The callback is reached from the broadcast,
+  from SaveThumbnailAsync's helper (same arguments), and directly from the save function (exe+0x48CBAE0) with the save
+  system's cached screenshot (+0x1B4 / +0x1B8 / +0x1C0, filled by its own listener exe+0x48CF190) for a save made in a
+  menu (Ghidra: the only references to both functions).
+- **The change:** that call goes through a wrapper: the game's copy, then the holder's B, G, R bytes through
+  HdrMenuBackground's table (HDR10, UI white r.HDR.UI.Luminance). Converting only there covers all three routes; the
+  cache stays raw, so a menu save's picture is converted once. SaveThumbnailAsync checks that the callback's copy and the
+  cache's copy are the same function; it now looks through the stub to the game's copy (`HdrSaveThumbnailResolve`, the
+  one line this adds to `saves/save_thumb.cpp`).
+- **Cost:** the same table pass as the menu background (5.8 ms for 5120x2160 on one thread, 1.3 ms in bands on the
+  helpers; 5.6-6.8 ms measured on one thread); on SaveThumbnailAsync's helper for a quicksave or autosave, on the
+  saving thread for a menu save.
+- **Checked by eye in play** (2026-10-30): the new autosaves' thumbnails in the Load menu look right, no longer washed
+  out. Not measured.
+- **Self-test:** the call at exe+0x48AF8DA through the stub, SaveThumbnailAsync's view of the copy; the wrapper with a
+  fake copy converts for output devices 3 and 4 (alpha and source kept) and leaves SDR, scRGB and off unchanged.
 
 <a id="saverefidindex"></a>
 

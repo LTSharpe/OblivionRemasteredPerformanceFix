@@ -568,6 +568,10 @@ static uint64_t HashWords(uint64_t seed, const void* data, size_t bytes)
 #include "selftest_animpar.h"      // AnimTeardownParallel's shapes and the helper queue with fakes
 #include "selftest_cellbuf.h"      // CellBufferPacedEvict's shapes, the clamp stub and the buffer LRU with and without the fix
 #include "selftest_ledger.h"       // diagnostic HitchLedger: sites, record/ring/csv format, cost per frame
+#include "selftest_hdrmenu.h"      // HdrMenuRows: the engine helpers it calls
+#include "selftest_hdrgamma.h"     // HdrGamma22: the HDR tone curve's block and the fit
+#include "selftest_hdrmenubg.h"    // HdrMenuBackground: the menu background in HDR10
+#include "selftest_hdrthumb.h"     // HdrSaveThumbnail: save thumbnails in HDR10
 #include "selftest_objreplace.h"   // ObjectReplaceCrashGuard: the in-place destroy site and the stub with a fake GUObjectArray
 #include "selftest_taskwait.h"     // TaskWaitDeadlockGuard: the task graph's worker wait, the wake-up protocol against fakes
 #include "selftest_scan.h"         // FindAll: the fast pattern search against the reference search
@@ -2380,6 +2384,14 @@ int wmain(int argc, wchar_t** argv)
     // CellBufferPacedEvict (lab prototype): spare cell buffer slots, overflow torn down one cell per OT frame (selftest_cellbuf.h); after
     // the ledger's test, which detours the same grid-change entry.
     cbuf::Run(game);
+    // HdrMenuRows: the engine helpers it calls (selftest_hdrmenu.h).
+    hdrm::Run(game);
+    // HdrGamma22 (selftest_hdrgamma.h).
+    hdrg::Run(game);
+    // HdrMenuBackground (selftest_hdrmenubg.h).
+    hmbg::Run(game);
+    // HdrSaveThumbnail (selftest_hdrthumb.h).
+    hthumb::Run(game);
 
     // RestoreFsrAfterAltTab: FSR back on when a menu that was up at focus gain closes (the game's own focus-gained branch, run again).
     {

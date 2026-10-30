@@ -39,6 +39,13 @@ Config LoadConfig(const wchar_t* iniPath)
     c.screenshotFilterFast = get(L"Fixes", L"MenuScreenshotFilter", c.screenshotFilterFast) != 0;
     c.screenshotReadbackConvert = get(L"Fixes", L"ScreenshotReadbackConvert", c.screenshotReadbackConvert);
     c.screenshotParallel = get(L"Fixes", L"ScreenshotParallel", c.screenshotParallel);
+    c.hdrMenuRows = get(L"Fixes", L"HdrMenuRows", c.hdrMenuRows) != 0;
+    c.dlssRayReconstruction = get(L"Fixes", L"DlssRayReconstruction", c.dlssRayReconstruction) != 0;
+    c.hudAspectRow = get(L"Fixes", L"HudAspectRow", c.hudAspectRow) != 0;
+    c.hdrGamma22 = get(L"Fixes", L"HdrGamma22", c.hdrGamma22) != 0;
+    c.hdrGamma22White = get(L"Fixes", L"HdrGamma22White", c.hdrGamma22White);
+    c.hdrMenuBackground = get(L"Fixes", L"HdrMenuBackground", c.hdrMenuBackground) != 0;
+    c.hdrSaveThumbnail = get(L"Fixes", L"HdrSaveThumbnail", c.hdrSaveThumbnail) != 0;
     c.restoreFsrAfterAltTab = get(L"Fixes", L"RestoreFsrAfterAltTab", c.restoreFsrAfterAltTab) != 0;
     c.lumenKeepArrayCapacity = get(L"Fixes", L"LumenKeepArrayCapacity", c.lumenKeepArrayCapacity) != 0;
     c.uploadMemoryKeep = get(L"Fixes", L"UploadMemoryKeep", c.uploadMemoryKeep) != 0;

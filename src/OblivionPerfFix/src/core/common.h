@@ -232,6 +232,19 @@ struct Config {
     bool hitchLedger = false;          // Diagnostic HitchLedger: slow game-thread frames' stage times to
                                        // OblivionPerfFix-ledger.csv (installed only if on at start-up, then switched live)
     int hitchLedgerMs = 25;            // ... a frame counts as slow from this period (ms, the cap's sleep included)
+    bool hdrMenuRows = false;          // HdrMenuRows (off by default): an HDR section on the PC Graphics page (HDR,
+                                       // peak, paper white, black floor, mid-tone; start-up only; needs NpcCreationPacing)
+    bool hudAspectRow = false;          // HudAspectRow (off by default): a "HUD Aspect Ratio" row (4:3 / 16:9 /
+                                        // 21:9 / 32:9 / Wide) in the Graphics page's General section (start-up only)
+    bool dlssRayReconstruction = false;  // DlssRayReconstruction (off by default, trade-off): a "DLSS - Ray
+                                         // Reconstruction" row in the Graphics page's Advanced section (start-up only)
+    bool hdrGamma22 = true;            // HdrGamma22 (TRADE-OFF, on by default; HDR only): the HDR picture's darks as an SDR
+                                       // monitor shows them (gamma 2.2), the curve refitted in memory (live; needs NpcCreationPacing)
+    bool hdrMenuBackground = false;    // HdrMenuBackground (TRADE-OFF, off by default): the player menu's background
+                                       // in HDR10 shown at the world's nits, not its PQ values as colour (start-up install, live)
+    bool hdrSaveThumbnail = false;     // HdrSaveThumbnail (TRADE-OFF, off by default): a save's thumbnail made in
+                                       // HDR10 converted the same way (start-up install, live)
+    int hdrGamma22White = 95;         // not in the shipped ini: HdrGamma22's reference white = this / 10 x the Mid-Tone (live)
     bool hitchLedgerTickSplit = false; // HitchLedgerTickSplit (diagnostic, public since 1.2.3): diagnostics/tick_split.cpp, the
                                        // game thread's tick time by kind, class and group to OblivionPerfFix-ticksplit.csv
                                        // (needs HitchLedger=1; installed only if on at start-up, then live)
@@ -279,6 +292,7 @@ int NavLinkFastTestSkip(const uint8_t* tile, const uint8_t* target, int side);  
 uint8_t* NavLinkFastTestSite(int which);   // self-test only: -1 the findConnectingPolys call, 0-3 addTile's connectExtLinks calls
 // ---- framegen/frame_cap_start.cpp (FrameRateLimitAtStart, game bug) ----
 bool FindFrameCapStart();
+uint8_t* AltarCommandSetter();  // Altar's command setter, bool (const {FString name, FString value}*, bool force); nullptr if not found
 bool InstallFrameCapStart(bool beforeGameCode, int mode);  // start-up only (version.dll and OBSE64 routes, while T's state is off)
 bool FrameCapStartTestPatched();                           // self-test: T's entry jump and trampoline
 bool FrameCapStartTestRun(void* fakeOrig, void* fakeGetter, void* fakeHash, void* fakeFind, void* fakeSet, const void* name,
@@ -574,6 +588,7 @@ bool ApplyObjectReplaceGuard();            // start-up (one call site in StaticA
 void SetObjectReplaceGuardMode(int mode);  // live: 1 on; lab 2 = log only
 void LogObjectReplaceGuardStats();
 bool ObjectReplaceGuardInfo(ObjectReplaceGuardInfoOut* out);
+uint8_t* FindObjectArrayFromDtor();                    // GUObjectArray from ~UObjectBase (no patching; nullptr if not exactly one match)
 bool ObjectReplaceGuardTestPatched();                  // self-test only
 void ObjectReplaceGuardTestArray(uint8_t* fakeArray);  // self-test only: a fake GUObjectArray
 
@@ -743,6 +758,23 @@ bool ApplyImageResizeFix(bool beforeGameCode);  // redirects one call (two bytes
 void SetImageResizeFixEnabled(bool enabled);    // switchable live; off = the game's own loop
 void LogImageResizeStats();
 bool ImageResizeFixInfo(uint8_t** call, uint8_t** original, uint8_t** stub, void** hook);
+// menu_hdr_background.cpp (HdrMenuBackground, TRADE-OFF, off by default): in HDR10 the menu's background
+// screenshot holds sRGB-encoded PQ values the UI shows as colour; remapped to sRGB at the same nits
+bool ApplyHdrMenuBackground(bool beforeGameCode);  // redirects the handler's one ImageResize call (start-up)
+void SetHdrMenuBackground(bool on);                // live
+void LogHdrMenuBackgroundStats();
+bool HdrMenuBackgroundInfo(uint8_t** call, uint8_t** original, uint8_t** stub, void** hook, void*** manager);
+void HdrMenuBackgroundTable(float uiNits, uint8_t (&table)[256]);  // screenshot byte (sRGB-encoded PQ) -> sRGB at the same nits
+void HdrMenuBackgroundTestSetup(void* original, const int32_t* hdr, const int32_t* device, const float* uiNits);  // self-test
+// (same file) HdrSaveThumbnail (TRADE-OFF, off by default): the save's screenshot callback's pixel copy
+// through a wrapper that converts the holder's bytes with the same table in HDR10
+bool ApplyHdrSaveThumbnail(bool beforeGameCode);   // redirects the callback's one copy call (start-up)
+void SetHdrSaveThumbnail(bool on);                 // live
+void LogHdrSaveThumbnailStats();
+uint8_t* HdrSaveThumbnailResolve(uint8_t* p);      // the game's copy when p is the stub, else p (SaveThumbnailAsync's check)
+bool HdrSaveThumbnailInfo(uint8_t** call, uint8_t** original, uint8_t** stub, void** hook);
+void HdrSaveThumbnailTestSetup(void* original);    // self-test: the copy the wrapper calls
+void** HdrConsoleManager();                        // &GConsoleManager (menu_hdr_background.cpp's lookup), or null; monitor thread
 // UE's ImageResize for equal sizes (2x2 box filter, truncated, alpha 255 if forceOpaque) on 4-byte FColor pixels
 void BoxFilter2x2(int32_t w, int32_t h, const uint32_t* src, uint32_t* dst, bool forceOpaque);
 
@@ -829,6 +861,46 @@ bool FindCellBufferPacedEvict();                          // locate and verify e
 bool InstallCellBufferPacedEvict(bool beforeGameCode);   // start-up only (before the TES constructor; last: chains detours)
 void SetCellBufferPacedEvict(int mode);                  // live: 0 crossing-frame teardown (as the game), 1 paced
 void LogCellBufferPacedEvictStats();
+// settings/hdr_menu.cpp (HdrMenuRows, off by default): an HDR section on the game's PC Graphics page
+// (a new settings table and category row, in memory; game thread): HDR, peak, paper white, black floor, mid-tone
+struct HdrMenuInfoOut {
+    uint8_t* fromString;   // FText::FromString(const FString&)
+    uint8_t* fnameCtor;    // FName(const TCHAR*, EFindName)
+    uint8_t* malloc;       // FMemory::Malloc
+    uint8_t* free;         // FMemory::Free (checked: the same GMalloc)
+    uint8_t* gmalloc;
+    uint8_t* objectArray;  // GUObjectArray
+    uint8_t* setter;       // Altar's command setter (the HDR variables synced to the shown state once)
+    uint8_t* addOrUpdate;  // UAltarGameUserSetting::AddOrUpdateSettingsToSave
+    uint8_t* saveWriter;   // the settings save's writer (Save_Settings slot)
+    const uint8_t* saveSlot;  // its slot name FString
+    uint8_t* spawnObject;  // UGameplayStatics::SpawnObject (NewObject for the HDR section's table)
+};
+bool FindHdrMenu(HdrMenuInfoOut* out);   // locate only; false = unavailable (logged)
+bool InstallHdrMenu(bool hdrRows, bool rayReconstruction, bool hudAspect, bool beforeGameCode);  // start-up, the parts that are on (needs NpcCreationPacing's frame hook)
+uint8_t* FindProcessEvent();                       // HudAspectRow: UObject::ProcessEvent by its prologue, or null
+bool HudAspectIntRegistrationFound();              // HudAspectRow: the console manager's int registration as expected (self-test)
+float HudPadding(float w, float h, float scale, float aspect);  // HudAspectRow: Slate padding per side for a centred box (-1: no viewport)
+bool RrLockInfo(uint8_t** call, uint8_t** original, uint8_t** stub, void** hook);  // self-test: the upscaler lock's lookup call (installs it)
+void RrLockTestSetup(void* original);    // self-test: the lookup the wrapper calls
+void HdrMenuFrameEnd();                  // game thread, once per frame (NpcCreationPacing's frame hook)
+void HdrMenuMonitorTick();               // monitor thread, every second (its first tick reads Save_Settings.sav)
+// render/hdr_gamma.cpp (HdrGamma22, TRADE-OFF, off by default): the HDR tone curve's darks re-decoded as
+// gamma 2.2 (an SDR monitor's) instead of sRGB, by refitting the curve's spline in its parameter block (no code patched)
+struct HdrGammaInfoOut {
+    uint8_t* getter;   // the tone-curve block's getter (every pass copies the block through it)
+    uint8_t* block;    // the block (20 floats, .data)
+    uint8_t* builder;  // the tone-scale parameter build (its 4.8 / 1.55 mid-point stores)
+};
+bool FindHdrGamma(HdrGammaInfoOut* out);  // locate only
+bool InstallHdrGamma();                   // start-up (needs NpcCreationPacing's frame hook); nothing written while off
+void SetHdrGamma22(bool on, int whiteX10);  // monitor thread (live); W = whiteX10 / 10 x the Mid-Tone
+void HdrGammaFrameEnd();                  // game thread, once per frame (NpcCreationPacing's frame hook)
+void HdrGammaMonitorTick();               // monitor thread, every second: fits a pending curve
+void LogHdrGammaStats();
+bool HdrGammaSelfFit(const float* block, double factor, double* worst, float* out);  // self-test: the fit on a recorded block
+double HdrGammaEval(const float* block, double x);  // self-test: the curve's output (nits) at input x
+
 bool BuildCellBufferClampStub(uint8_t* mem, const void* grids, const void* bound, const void* back);  // mem: 2 pages
 struct CellBufferInfoOut {
     uint8_t *clamp, *grids, *bound, *insert, *teardown, *dataHandler, *grid, *site1Ret, *site2Ret, *tesSlot, *flagsSlot,
