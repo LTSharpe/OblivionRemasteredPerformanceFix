@@ -128,6 +128,50 @@ inline void SaveBytesSelfTest(const opf::GameModule& game)
         }
         Check(thumb == 4, "savethumb: the ReadSurfaceCommand lambda calls (exe+0x37F36C7, 0x37E2B7D), ReadPixels' flush (exe+0x37F375E) and the screenshot broadcast (exe+0x3222FFF) redirected");
     }
+    // SaveThumbnailAsync's HDR route: GetViewportScreenShotHDR's call, ReadLinearColorPixels' lambda calls and flush.
+    {
+        uint8_t* hdrCall = nullptr;
+        void* toFColor = nullptr;
+        const bool hdr = SaveThumbHdrInfo(&hdrCall, &toFColor);
+        Check(hdr && hdrCall == game.base + 0x3222F80 && toFColor == game.base + 0xEAB6A0,
+              "savethumb: the HDR route found (read call exe+0x3222F80, ToFColorSRGB exe+0xEAB6A0)");
+        int32_t rel;
+        int redirected = 0;
+        for (auto [rva, target] : {std::pair{0x3222F80u, 0x37E4FB0u}, {0x37F3427u, 0x37D2B50u}, {0x37E2A7Du, 0x37D2B50u}, {0x37F34BEu, 0x26BC840u}}) {
+            memcpy(&rel, game.base + rva + 1, 4);
+            if (game.base[rva] == 0xE8 && game.base + rva + 5 + rel != game.base + target) ++redirected;
+        }
+        Check(redirected == 4, "savethumb: the HDR read call (exe+0x3222F80), ReadLinearColorPixels' lambda calls (exe+0x37F3427, 0x37E2A7D) and its flush (exe+0x37F34BE) redirected");
+        uint32_t scale;
+        memcpy(&scale, game.base + 0x709E164, 4);
+        Check(scale == 0x3A802008u, "savethumb: the D3D12 read's R10G10B10A2 factor at exe+0x709E164 is 1/1023.f, as the tables use");
+        if (hdr) {
+            // The game's own converter (exe+0x251C400, format 18) and quantiser on the same pixels as the tables: every
+            // 10-bit value in every channel, then random pixels.
+            std::vector<uint32_t> in;
+            for (uint32_t v = 0; v < 1024; ++v) in.push_back(v | v << 10 | v << 20 | (v & 3) << 30);
+            for (uint32_t v = 0; v < 1024; ++v) in.push_back(v | (1023 - v) << 10 | ((v * 7) & 1023) << 20 | (3 - (v & 3)) << 30);
+            std::mt19937 r10(11);
+            for (int i = 0; i < 8192; ++i) in.push_back(static_cast<uint32_t>(r10()));
+            const uint32_t n = static_cast<uint32_t>(in.size());
+            std::vector<float> lin(static_cast<size_t>(n) * 4);
+            uint8_t flags[32] = {};
+            using ConvertFn = void (*)(char format, uint32_t w, uint32_t h, const void* in, int32_t pitch, void* out, const void* flags);
+            reinterpret_cast<ConvertFn>(game.base + 0x251C400)(18, n, 1, in.data(), static_cast<int32_t>(n * 4), lin.data(), flags);
+            using QuantFn = uint32_t* (*)(const float* linear, uint32_t* out);
+            std::vector<uint32_t> stock(n), ours(n);
+            for (uint32_t i = 0; i < n; ++i) {
+                uint32_t c = 0;
+                reinterpret_cast<QuantFn>(toFColor)(&lin[static_cast<size_t>(i) * 4], &c);
+                stock[i] = c | 0xFF000000u;
+            }
+            SaveThumbTestHdrConvert(in.data(), n, ours.data());
+            uint32_t diff = 0;
+            for (uint32_t i = 0; i < n; ++i) diff += stock[i] != ours[i];
+            Check(diff == 0, "savethumb: the HDR tables give the game's bytes (its converter exe+0x251C400 and ToFColorSRGB) on all 1024 values per channel and 8192 random pixels");
+            if (diff) Log("[selftest] savethumb HDR: %u of %u pixels differ", diff, n);
+        }
+    }
     // SaveThumbnailAsync's delivery: the save system's cache (not a save callback) before the save callbacks, each group
     // from the end of the invocation list (the broadcast's walk).
     {

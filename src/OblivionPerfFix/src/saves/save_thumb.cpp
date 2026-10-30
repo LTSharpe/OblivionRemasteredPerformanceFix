@@ -33,6 +33,20 @@
 // result. The picture's buffer is allocated before the readback is mapped (retried until Windows gives it); a readback
 // that cannot be mapped (never seen) delivers a black picture of the same size, so the save always completes.
 //
+// The HDR route: when the viewport is HDR (FViewport vtable +0x40), ProcessScreenShots reads the screenshot
+// with GetViewportScreenShotHDR (exe+0x37E4FB0) instead: FRenderTarget::ReadLinearColorPixels (exe+0x37F32F0), the same
+// render command with its own lambda (exe+0x37D2B50, GDynamicRHI->RHIReadSurfaceData for FLinearColor, vtable +0x240),
+// into a TArray<FLinearColor> (16 bytes a pixel, 177 MB at 5120x2160). For the delegate it then converts each pixel on the
+// game thread with FLinearColor::ToFColorSRGB (exe+0xEAB6A0), sets alpha 255 and broadcasts the FColor array: in the
+// user's HDR10 play (trace, 2026-10-30) ~45 ms of loop plus the read-back's wait in every autosave frame (118 ms). The
+// D3D12 read (exe+0x252B510) reads the back buffer's raw rows and converts them (exe+0x251C400; R10G10B10A2: each 10-bit
+// channel times 1/1023.f, the constant at exe+0x709E164). So the same picture comes from the same copy as above with a
+// table per channel: ToFColorSRGB of v x (1/1023.f) for each of the 1024 values, made at start-up with the game's own
+// function (its channels are independent: one sRGB table, per-lane constants), alpha 255. The HDR read's call is
+// redirected like the SDR one, its lambda's two call sites and its flush too; a back buffer in another format (scRGB) is
+// read the game's way on the render thread and the helper runs the game's ToFColorSRGB on each pixel (the game thread
+// does not wait). The self-test runs the game's converter and quantiser on the mapped exe and compares.
+//
 // Installed at start-up (from save_bytes.cpp) only when SaveThumbnailAsync is on; then live (0 = the game's read-back).
 #include "common.h"
 
@@ -53,6 +67,21 @@ constexpr size_t kCvarMov = 16, kDelegateLea = 80, kBroadcastCall = 87;
 // GetViewportScreenShot: ... call FRenderTarget::ReadPixels; test al,al; setnz al; add rsp,78h; ret
 constexpr char kGetShotTail[] = "E8 ?? ?? ?? ?? 84 C0 0F 95 C0 48 83 C4 78 C3";
 constexpr size_t kGetShotTailOff = 0x66;
+// GetViewportScreenShotHDR ends the same way with FRenderTarget::ReadLinearColorPixels
+constexpr size_t kGetShotHdrTailOff = 0x6F;
+// The HDR route's read, 0x45 bytes before the SDR read-back call: test r13b,r13b / je (SDR) / mov [rbp-29h],rax /
+// lea r8,[rbp-29h] / mov eax,[rbp-69h] / lea rdx,[rbp-49h] / mov [rbp-21h],eax / mov eax,[rbp-65h] / mov [rbp-1Dh],eax /
+// call GetViewportScreenShotHDR / movzx esi,al / xor r14b,r14b / jmp
+constexpr char kHdrReadBack[] =
+    "45 84 ED 74 28 48 89 45 D7 4C 8D 45 D7 8B 45 97 48 8D 55 B7 89 45 DF 8B 45 9B 89 45 E3 E8 ?? ?? ?? ?? 0F B6 F0 45 32 F6 E9";
+constexpr size_t kHdrReadBackBefore = 0x45, kHdrReadBackCall = 0x1D;
+// The HDR route's loop after the read: lea rdx,[rbp+7Fh] / mov rcx,rbx / call FLinearColor::ToFColorSRGB /
+// movsxd rsi,[rbp-51h] / mov byte [rbp+82h],0FFh (within 0x200 bytes after the SDR read-back call)
+constexpr char kHdrLoop[] = "48 8D 55 7F 48 8B CB E8 ?? ?? ?? ?? 48 63 75 AF C6 85 82 00 00 00 FF";
+constexpr size_t kHdrLoopCall = 7;
+// FLinearColor::ToFColorSRGB (exe+0xEAB6A0): movups xmm3,[rcx] / lea r8,[sRGB table] / maxps / minps / movdqa / psubd
+constexpr char kToFColorSrgb[] = "0F 10 19 4C 8D 05 ?? ?? ?? ?? 0F 5F 1D ?? ?? ?? ?? 0F 5D 1D ?? ?? ?? ?? 66 0F 6F CB 66 0F FA 0D";
+constexpr float kR10Scale = 1.0f / 1023.0f;  // the D3D12 read's R10G10B10A2 -> FLinearColor factor (exe+0x709E164)
 // FRenderTarget::ReadPixels: the direct lambda call (in the rendering thread), the task creation, FlushRenderingCommands.
 constexpr char kDirectLambda[] = "E8 ?? ?? ?? ?? 48 8B D0 48 8D 4C 24 50 E8 ?? ?? ?? ?? E9";
 constexpr size_t kDirectLambdaCall = 13;
@@ -60,14 +89,16 @@ constexpr char kCreateTask[] = "33 D2 48 8D 4C 24 30 41 B8 FF 00 00 00 E8";
 constexpr size_t kCreateTaskCall = 13;
 constexpr char kFlushCall[] = "E8 ?? ?? ?? ?? 83 7E 08 00 48 8B 9C 24 D0 00 00 00 0F 9F C0";
 // The ReadSurfaceCommand lambda: GetRenderTargetTexture, ImmediateFlush(FlushRHIThread) (ExecuteAndReset(false),
-// InitializeImmediateContexts, WaitForRHIThreadTasks), GDynamicRHI->RHIReadSurfaceData (vtable +0x248).
+// InitializeImmediateContexts, WaitForRHIThreadTasks), GDynamicRHI->RHIReadSurfaceData (vtable +0x248 for FColor; the
+// HDR route's lambda is the same code with +0x240, the FLinearColor overload).
 constexpr char kLambda[] =
     "48 8B C4 48 89 58 10 48 89 68 18 48 89 70 20 57 41 56 41 57 48 83 EC 60 0F 10 41 20 48 8B EA 0F 11 40 C8 F2 0F 10 41 30 "
     "F2 0F 11 40 08 44 8B 71 38 4C 8B 79 08 48 8B 59 10 48 8B 79 18 48 8B 09 48 8B 01 FF 50 10 33 D2 48 8B CD 48 8B 30 "
     "E8 ?? ?? ?? ?? 48 8B CD E8 ?? ?? ?? ?? 48 8B CD E8 ?? ?? ?? ?? 0F 10 44 24 40 48 8B 0D ?? ?? ?? ?? 48 8D 54 24 40 "
     "48 89 54 24 20 4C 8D 44 24 30 0F 29 44 24 40 4D 8B CF F2 0F 10 84 24 80 00 00 00 48 8B D6 48 8B 01 48 89 5C 24 30 "
-    "48 89 7C 24 38 F2 0F 11 44 24 50 44 89 74 24 58 FF 90 48 02 00 00";
-constexpr size_t kLambdaExecute = 0x4E, kLambdaInitCtx = 0x56, kLambdaRhi = 0x68;
+    "48 89 7C 24 38 F2 0F 11 44 24 50 44 89 74 24 58 FF 90 ?? 02 00 00";
+constexpr size_t kLambdaExecute = 0x4E, kLambdaInitCtx = 0x56, kLambdaRhi = 0x68, kLambdaSlot = 0xAC;
+constexpr uint32_t kRhiReadColor = 0x248, kRhiReadLinear = 0x240;
 // The render command's DoTask: GetImmediateCommandList_ForRenderCommand; lea rcx,[rdi+50h]; mov rdx,rax; call lambda;
 // mov byte [rdi+90h],0
 constexpr char kDoTask[] = "E8 ?? ?? ?? ?? 48 8D 4F 50 48 8B D0 E8 ?? ?? ?? ?? C6 87 90 00 00 00 00";
@@ -133,8 +164,14 @@ using MapFn = void (*)(void* rhi, void* texture, void* fence, void** data, int32
 using UnmapFn = void (*)(void* rhi, void* texture, uint32_t gpu);
 using RtTexFn = void** (*)(void* renderTarget);
 using DescFn = const uint8_t* (*)(void* texture);
+using ToFColorFn = uint32_t* (*)(const float* linear, uint32_t* out);
 
 GetShotFn g_getShot = nullptr;
+GetShotFn g_getShotHdr = nullptr;    // GetViewportScreenShotHDR (nullptr: the HDR route stays the game's)
+LambdaFn g_lambdaHdr = nullptr;      // ReadLinearColorPixels' lambda
+ToFColorFn g_toFColorSrgb = nullptr;
+uint8_t* g_hdrCall = nullptr;         // the HDR read's call in ProcessScreenShots, once redirected
+uint8_t g_lutB[1024], g_lutG[1024], g_lutR[1024];  // ToFColorSRGB of v x (1/1023.f), per output channel
 BroadcastFn g_broadcast = nullptr;
 LambdaFn g_lambda = nullptr;
 VoidFn g_flush = nullptr;
@@ -171,8 +208,9 @@ std::vector<uint8_t*> FindAnchored(const Section& text, const char* pattern, siz
 constexpr int kMaxListeners = 6;
 struct Listener { CallbackFn fn; void* obj; bool save; };
 struct Job {
-    ScriptArray marker{nullptr, 0, 0};   // the render command's OutData (only the fallback writes it)
+    ScriptArray marker{nullptr, 0, 0};   // the render command's OutData (only the fallback writes it: FColor, or FLinearColor on the HDR route)
     int32_t w = 0, h = 0;
+    bool hdr = false;                    // the HDR route (GetViewportScreenShotHDR)
     Listener listeners[kMaxListeners];
     int listenerCount = 0;
     std::atomic<int> state{0};           // 0 enqueued, 1 copy recorded (readback), 2 fallback read done, 3 failed
@@ -314,6 +352,32 @@ void FillBlack(uint32_t* pixels, size_t count)
     for (size_t i = 0; i < count; ++i) pixels[i] = 0xFF000000u;
 }
 
+// The HDR route's picture from the back buffer's R10G10B10A2 rows: what ReadLinearColorPixels and ProcessScreenShots'
+// loop make of them (each channel through the tables, alpha 255).
+void ConvertR10ToSrgb(uint32_t w, uint32_t rows, const uint8_t* in, uint32_t pitch, uint32_t* out)
+{
+    for (uint32_t y = 0; y < rows; ++y) {
+        const uint32_t* const src = reinterpret_cast<const uint32_t*>(in + static_cast<size_t>(y) * pitch);
+        uint32_t* const dst = out + static_cast<size_t>(y) * w;
+        for (uint32_t x = 0; x < w; ++x) {
+            const uint32_t p = src[x];
+            dst[x] = g_lutB[(p >> 20) & 0x3FF] | static_cast<uint32_t>(g_lutG[(p >> 10) & 0x3FF]) << 8 |
+                     static_cast<uint32_t>(g_lutR[p & 0x3FF]) << 16 | 0xFF000000u;
+        }
+    }
+}
+
+// The HDR route's loop itself on rows of a TArray<FLinearColor> (the render thread's stock read): the game's
+// ToFColorSRGB on each pixel, alpha 255.
+void ConvertLinearToSrgb(size_t from, size_t to, const float* in, uint32_t* out)
+{
+    for (size_t i = from; i < to; ++i) {
+        uint32_t c;
+        g_toFColorSrgb(in + i * 4, &c);
+        out[i] = c | 0xFF000000u;
+    }
+}
+
 // Helper thread: waits for the copy, converts, delivers to the save's callback.
 DWORD WINAPI Worker(void*)
 {
@@ -348,14 +412,22 @@ DWORD WINAPI Worker(void*)
             if (data && pitchPx >= j->w && rows >= j->h) {
                 // Row bands on ScreenshotParallel's helpers when that fix is on (else all here): the same conversion, then
                 // ProcessScreenShots' alpha loop (A = 255) on the same rows.
+                // The HDR route: the tables instead (alpha 255 included).
                 struct Ctx { uint32_t w; const uint8_t* in; uint32_t pitch; uint32_t* out; } const ctx{
                     static_cast<uint32_t>(j->w), static_cast<const uint8_t*>(data), static_cast<uint32_t>(pitchPx) * 4u, pixels};
-                ScreenshotParallelRows(static_cast<uint32_t>(j->h), count * 4, [](const void* c, uint32_t y0, uint32_t y1) {
-                    const auto* x = static_cast<const Ctx*>(c);
-                    uint32_t* const out = x->out + static_cast<size_t>(y0) * x->w;
-                    ConvertR10G10B10A2ToColor(x->w, y1 - y0, x->in + static_cast<size_t>(y0) * x->pitch, x->pitch, out);
-                    for (size_t i = 0, n = static_cast<size_t>(y1 - y0) * x->w; i < n; ++i) out[i] |= 0xFF000000u;
-                }, &ctx);
+                if (j->hdr)
+                    ScreenshotParallelRows(static_cast<uint32_t>(j->h), count * 4, [](const void* c, uint32_t y0, uint32_t y1) {
+                        const auto* x = static_cast<const Ctx*>(c);
+                        ConvertR10ToSrgb(x->w, y1 - y0, x->in + static_cast<size_t>(y0) * x->pitch, x->pitch,
+                                         x->out + static_cast<size_t>(y0) * x->w);
+                    }, &ctx);
+                else
+                    ScreenshotParallelRows(static_cast<uint32_t>(j->h), count * 4, [](const void* c, uint32_t y0, uint32_t y1) {
+                        const auto* x = static_cast<const Ctx*>(c);
+                        uint32_t* const out = x->out + static_cast<size_t>(y0) * x->w;
+                        ConvertR10G10B10A2ToColor(x->w, y1 - y0, x->in + static_cast<size_t>(y0) * x->pitch, x->pitch, out);
+                        for (size_t i = 0, n = static_cast<size_t>(y1 - y0) * x->w; i < n; ++i) out[i] |= 0xFF000000u;
+                    }, &ctx);
             } else {
                 Log("[savethumb] the readback could not be mapped (data %p, pitch %d, rows %d): the save gets a black picture this time",
                     data, pitchPx, rows);
@@ -366,7 +438,16 @@ DWORD WINAPI Worker(void*)
             _aligned_free(rb);
             j->readback = nullptr;
             convertMs = Ms(Ticks() - t1);
-        } else if (st == 2 && j->marker.data && static_cast<size_t>(j->marker.num) == count) {
+        } else if (st == 2 && j->hdr && j->marker.data && static_cast<size_t>(j->marker.num) == count) {
+            pixels = own = AllocPixels(count * 4);
+            struct Ctx { const float* in; uint32_t* out; uint32_t w; } const ctx{static_cast<const float*>(j->marker.data), pixels,
+                                                                               static_cast<uint32_t>(j->w)};
+            ScreenshotParallelRows(static_cast<uint32_t>(j->h), count * 16, [](const void* c, uint32_t y0, uint32_t y1) {
+                const auto* x = static_cast<const Ctx*>(c);
+                ConvertLinearToSrgb(static_cast<size_t>(y0) * x->w, static_cast<size_t>(y1) * x->w, x->in, x->out);
+            }, &ctx);
+            convertMs = Ms(Ticks() - t0);
+        } else if (st == 2 && !j->hdr && j->marker.data && static_cast<size_t>(j->marker.num) == count) {
             pixels = static_cast<uint32_t*>(j->marker.data);
             for (size_t i = 0; i < count; ++i) pixels[i] |= 0xFF000000u;
         }
@@ -382,7 +463,9 @@ DWORD WINAPI Worker(void*)
         Deliver(j->listeners, j->listenerCount, j->w, j->h, &arr);
         const double deliverMs = Ms(Ticks() - t2);
         if (own) VirtualFree(own, 0, MEM_RELEASE);
-        (void)waitMs, (void)convertMs, (void)deliverMs;
+        Log("[savethumb] the save's %dx%d picture (%s route, %s) delivered off the game thread: GPU copy wait %.1f ms, "
+            "conversion %.1f ms, the save's callbacks %.1f ms", j->w, j->h, j->hdr ? "HDR" : "SDR",
+            st == 1 ? "async copy" : "read on the render thread", waitMs, convertMs, deliverMs);
         FinishJob(j);
     }
 }
@@ -422,12 +505,13 @@ bool RecordCopy(Job* j, void** ctx, void* cmdList)
     return true;
 }
 
-void LambdaHook(void* ctx, void* cmdList)
+// Both lambdas (ReadPixels' and, on the HDR route, ReadLinearColorPixels': the same context layout) for the job's route.
+void LambdaFor(void* ctx, void* cmdList, LambdaFn orig, bool hdr)
 {
     Job* const j = g_job.load(std::memory_order_acquire);
     void** const c = static_cast<void**>(ctx);
-    if (!j || c[1] != &j->marker || j->state.load(std::memory_order_relaxed) != 0) {
-        g_lambda(ctx, cmdList);
+    if (!j || j->hdr != hdr || c[1] != &j->marker || j->state.load(std::memory_order_relaxed) != 0) {
+        orig(ctx, cmdList);
         return;
     }
     j->tRender = Ticks();
@@ -435,11 +519,21 @@ void LambdaHook(void* ctx, void* cmdList)
         s_async.fetch_add(1, std::memory_order_relaxed);
         j->state.store(1, std::memory_order_release);
     } else {
-        g_lambda(ctx, cmdList);  // the stock read, into the marker (the render thread waits as before; the game thread not)
+        orig(ctx, cmdList);  // the stock read, into the marker (the render thread waits as before; the game thread not)
         s_fallback.fetch_add(1, std::memory_order_relaxed);
         j->state.store(2, std::memory_order_release);
     }
     SetEvent(g_wake);
+}
+
+void LambdaHook(void* ctx, void* cmdList) { LambdaFor(ctx, cmdList, g_lambda, false); }
+void LambdaHookHdr(void* ctx, void* cmdList) { LambdaFor(ctx, cmdList, g_lambdaHdr, true); }
+
+// ProcessScreenShots' HDR read: taken over like the SDR one ("no picture" to the caller), else the game's.
+bool HdrReadBackHook(void* viewport, void* bitmap, const void* rect)
+{
+    if (SaveThumbTakeOver(viewport, rect, true)) return false;
+    return g_getShotHdr(viewport, bitmap, rect);
 }
 
 // ProcessScreenShots' broadcast of any other screenshot: while a taken-over thumbnail is still being delivered by the
@@ -502,6 +596,84 @@ bool Fail(const char* why)
     return false;
 }
 
+// A read function's render command (FRenderTarget::ReadPixels or ReadLinearColorPixels, the same code): its lambda (whose
+// RHI read is the given vtable slot), the lambda's direct call, the task's DoTask call of it, FlushRenderingCommands.
+struct ReadChain { uint8_t* lambda = nullptr; uint8_t* directCall = nullptr; uint8_t* doTaskCall = nullptr; uint8_t* flushCall = nullptr; };
+const char* FindReadChain(uint8_t* readFn, uint32_t rhiSlot, ReadChain* out)
+{
+    const GameModule& game = Game();
+    uint8_t* const direct = FindIn(readFn, 0x260, kDirectLambda);
+    uint8_t* const create = FindIn(readFn, 0x260, kCreateTask);
+    uint8_t* const flush = FindIn(readFn, 0x260, kFlushCall);
+    if (!direct || !create || !flush) return "its render command is not as expected";
+    uint8_t* const lambda = RipTarget(direct + kDirectLambdaCall, 1, 5);
+    if (!game.text.Contains(lambda) || !MatchesAt(lambda, ParsePattern(kLambda)) ||
+        *reinterpret_cast<const uint32_t*>(lambda + kLambdaSlot) != rhiSlot)
+        return "the ReadSurfaceCommand lambda is not as expected";
+    uint8_t* const createTask = RipTarget(create + kCreateTaskCall, 1, 5);
+    // The task's vtable: a lea of an .rdata address in CreateTask whose slot 1 (DoTask) calls the lambda.
+    uint8_t* doTaskCall = nullptr;
+    for (uint8_t* q = createTask; q < createTask + 0x200 && game.text.Contains(q + 7); ++q) {
+        if (q[0] != 0x48 || q[1] != 0x8D || (q[2] & 0xC7) != 0x05) continue;
+        uint8_t* const vt = RipTarget(q, 3, 7);
+        if (vt < game.rdata.begin || vt + 16 > game.rdata.end) continue;
+        uint8_t* const doTask = *reinterpret_cast<uint8_t**>(vt + 8);
+        if (!game.text.Contains(doTask) || !MatchesAt(doTask + kDoTaskOffset, ParsePattern(kDoTask))) continue;
+        uint8_t* const call = doTask + kDoTaskOffset + kDoTaskLambdaCall;
+        if (RipTarget(call, 1, 5) == lambda) { doTaskCall = call; break; }
+    }
+    if (!doTaskCall) return "the render command's DoTask was not found";
+    *out = {lambda, direct + kDirectLambdaCall, doTaskCall, flush};
+    return nullptr;
+}
+
+// The HDR route (start-up, after the SDR one): GetViewportScreenShotHDR's call in ProcessScreenShots, its read's render
+// command, ToFColorSRGB from the conversion loop and the tables. Anything unexpected: the HDR route stays the game's.
+bool InstallHdrRoute(uint8_t* readBackCall, uint8_t* flushThunk)
+{
+    const GameModule& game = Game();
+    const char* why = nullptr;
+    uint8_t* const site = readBackCall - kHdrReadBackBefore;
+    uint8_t* const call = site + kHdrReadBackCall;
+    uint8_t* const getShot = MatchesAt(site, ParsePattern(kHdrReadBack)) ? RipTarget(call, 1, 5) : nullptr;
+    uint8_t* const loop = FindIn(readBackCall, 0x200, kHdrLoop);
+    uint8_t* const toFColor = loop ? RipTarget(loop + kHdrLoopCall, 1, 5) : nullptr;
+    ReadChain chain;
+    if (!getShot || !game.text.Contains(getShot)) why = "its read call is not as expected";
+    else if (!MatchesAt(getShot + kGetShotHdrTailOff, ParsePattern(kGetShotTail))) why = "GetViewportScreenShotHDR is not as expected";
+    else if (!toFColor || !game.text.Contains(toFColor) || !MatchesAt(toFColor, ParsePattern(kToFColorSrgb))) why = "its ToFColorSRGB loop is not as expected";
+    else why = FindReadChain(RipTarget(getShot + kGetShotHdrTailOff, 1, 5), kRhiReadLinear, &chain);
+    uint8_t* const thunk = why ? nullptr : MakeThunk(reinterpret_cast<void*>(&HdrReadBackHook));
+    uint8_t* const hdrLambdaThunk = why ? nullptr : MakeThunk(reinterpret_cast<void*>(&LambdaHookHdr));
+    if (!why && (!thunk || !hdrLambdaThunk)) why = "no free memory near the game's code";
+    if (why) {
+        Log("[savethumb] the HDR screenshot route: %s: HDR saves keep the game's read-back", why);
+        return false;
+    }
+    g_toFColorSrgb = reinterpret_cast<ToFColorFn>(toFColor);
+    for (uint32_t v = 0; v < 1024; ++v) {
+        const float f = static_cast<float>(v) * kR10Scale;
+        const float in[4] = {f, f, f, 1.0f};
+        uint32_t c = 0;
+        g_toFColorSrgb(in, &c);
+        g_lutB[v] = static_cast<uint8_t>(c);
+        g_lutG[v] = static_cast<uint8_t>(c >> 8);
+        g_lutR[v] = static_cast<uint8_t>(c >> 16);
+    }
+    g_getShotHdr = reinterpret_cast<GetShotFn>(getShot);
+    g_lambdaHdr = reinterpret_cast<LambdaFn>(chain.lambda);
+    if (!RedirectCall(chain.directCall, hdrLambdaThunk) || !RedirectCall(chain.doTaskCall, hdrLambdaThunk) ||
+        !RedirectCall(chain.flushCall, flushThunk) || !RedirectCall(call, thunk)) {
+        Log("[savethumb] the HDR screenshot route: a call could not be redirected: HDR saves keep the game's read-back");
+        return false;  // the read call is redirected last: without it the other three only pass through
+    }
+    g_hdrCall = call;
+    Log("[savethumb] HDR screenshot route: GetViewportScreenShotHDR exe+0x%X (call exe+0x%X), lambda exe+0x%X, ToFColorSRGB exe+0x%X: installed",
+        static_cast<unsigned>(getShot - game.base), static_cast<unsigned>(call - game.base),
+        static_cast<unsigned>(chain.lambda - game.base), static_cast<unsigned>(toFColor - game.base));
+    return true;
+}
+
 }  // namespace
 
 // readBackCall: the call of GetViewportScreenShot in ProcessScreenShots (already redirected by save_bytes.cpp).
@@ -518,25 +690,11 @@ bool InstallSaveThumbAsync(uint8_t* readBackCall, void* getViewportScreenShot)
         return Fail("GetViewportScreenShot is not as expected");
     uint8_t* const readPixels = RipTarget(getShot + kGetShotTailOff, 1, 5);
     if (!game.text.Contains(readPixels)) return Fail("FRenderTarget::ReadPixels not found");
-    uint8_t* const direct = FindIn(readPixels, 0x260, kDirectLambda);
-    uint8_t* const create = FindIn(readPixels, 0x260, kCreateTask);
-    uint8_t* const flush = FindIn(readPixels, 0x260, kFlushCall);
-    if (!direct || !create || !flush) return Fail("ReadPixels' render command is not as expected");
-    uint8_t* const lambda = RipTarget(direct + kDirectLambdaCall, 1, 5);
-    if (!game.text.Contains(lambda) || !MatchesAt(lambda, ParsePattern(kLambda))) return Fail("the ReadSurfaceCommand lambda is not as expected");
-    uint8_t* const createTask = RipTarget(create + kCreateTaskCall, 1, 5);
-    // The task's vtable: a lea of an .rdata address in CreateTask whose slot 1 (DoTask) calls the lambda.
-    uint8_t* doTaskCall = nullptr;
-    for (uint8_t* q = createTask; q < createTask + 0x200 && game.text.Contains(q + 7); ++q) {
-        if (q[0] != 0x48 || q[1] != 0x8D || (q[2] & 0xC7) != 0x05) continue;
-        uint8_t* const vt = RipTarget(q, 3, 7);
-        if (vt < game.rdata.begin || vt + 16 > game.rdata.end) continue;
-        uint8_t* const doTask = *reinterpret_cast<uint8_t**>(vt + 8);
-        if (!game.text.Contains(doTask) || !MatchesAt(doTask + kDoTaskOffset, ParsePattern(kDoTask))) continue;
-        uint8_t* const call = doTask + kDoTaskOffset + kDoTaskLambdaCall;
-        if (RipTarget(call, 1, 5) == lambda) { doTaskCall = call; break; }
-    }
-    if (!doTaskCall) return Fail("the render command's DoTask was not found");
+    ReadChain chain;
+    if (const char* why = FindReadChain(readPixels, kRhiReadColor, &chain)) return Fail(why);
+    uint8_t* const lambda = chain.lambda;
+    uint8_t* const doTaskCall = chain.doTaskCall;
+    uint8_t* const flush = chain.flushCall;
     uint8_t* const freeSite = FindIn(readBackCall, 0x100, kFree);
     if (!freeSite) return Fail("FMemory::Free not found");
     const auto hzb = FindAnchored(game.text, kHzbReadback, 1);
@@ -588,10 +746,11 @@ bool InstallSaveThumbAsync(uint8_t* readBackCall, void* getViewportScreenShot)
     g_readbackCtor = reinterpret_cast<CtorFn>(ctor);
     g_readbackVtable = vtable;
     g_rhiGlobal = rhiGlobal;
-    if (!RedirectCall(broadcastCall, broadcastThunk) || !RedirectCall(direct + kDirectLambdaCall, lambdaThunk) ||
+    if (!RedirectCall(broadcastCall, broadcastThunk) || !RedirectCall(chain.directCall, lambdaThunk) ||
         !RedirectCall(doTaskCall, lambdaThunk) || !RedirectCall(flush, flushThunk))
         return Fail("a call could not be redirected");
     g_installed = true;
+    InstallHdrRoute(readBackCall, flushThunk);
     Log("[savethumb] ReadPixels exe+0x%X (lambda exe+0x%X, DoTask call exe+0x%X, flush exe+0x%X), screenshot delegate exe+0x%X, "
         "FRHIGPUTextureReadback ctor exe+0x%X: installed (%.1f ms)",
         static_cast<unsigned>(readPixels - game.base), static_cast<unsigned>(lambda - game.base), static_cast<unsigned>(doTaskCall - game.base),
@@ -613,7 +772,7 @@ void SetSaveThumbAsync(int mode, bool timers)
 
 // Game thread, in place of GetViewportScreenShot in ProcessScreenShots. true = taken over (the caller returns "no
 // picture"); false = the caller does the game's read-back.
-bool SaveThumbTakeOver(void* viewport, const void* rect)
+bool SaveThumbTakeOver(void* viewport, const void* rect, bool hdr)
 {
     const int mode = g_mode.load(std::memory_order_relaxed);
     if (!g_installed || mode == 0) return false;
@@ -634,6 +793,7 @@ bool SaveThumbTakeOver(void* viewport, const void* rect)
     Job* const j = new Job;
     j->w = w;
     j->h = h;
+    j->hdr = hdr;
     for (int i = 0; i < n; ++i) j->listeners[i] = ls[i];
     j->listenerCount = n;
     // What the save callbacks would do in this frame: leave the delegate (their own Remove is then skipped: handle 0).
@@ -647,11 +807,23 @@ bool SaveThumbTakeOver(void* viewport, const void* rect)
     j->tEnqueue = Ticks();
     g_job.store(j, std::memory_order_release);
     t_skipFlush = true;
-    g_getShot(viewport, &j->marker, rect);  // enqueues the ReadSurfaceCommand into the marker; no flush
+    (hdr ? g_getShotHdr : g_getShot)(viewport, &j->marker, rect);  // enqueues the ReadSurfaceCommand into the marker; no flush
     t_skipFlush = false;
     s_deferred.fetch_add(1, std::memory_order_relaxed);
     SetEvent(g_wake);
     return true;
+}
+
+bool SaveThumbHdrInfo(uint8_t** readCall, void** toFColorSrgb)
+{
+    *readCall = g_hdrCall;
+    *toFColorSrgb = reinterpret_cast<void*>(g_toFColorSrgb);
+    return g_hdrCall != nullptr;
+}
+
+void SaveThumbTestHdrConvert(const uint32_t* r10, uint32_t n, uint32_t* out)
+{
+    ConvertR10ToSrgb(n, 1, reinterpret_cast<const uint8_t*>(r10), n * 4, out);
 }
 
 // Self-test: the delivery order of listeners marked save callback / cache (order[k] = the index of the k-th call).

@@ -54,7 +54,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
-#include <tlhelp32.h>
+#include <vector>
 
 namespace opf {
 namespace {
@@ -118,6 +118,8 @@ std::atomic<float> g_budgetMs{4.0f};    // PsoPrecompileFastBudgetMs: render-thr
 std::atomic<int> g_coldQueue{1000};     // PsoPrecompileColdQueue: fetched-not-dispatched pipelines that mean "the driver compiles"
                                         // (0: no cold-cache guard at all: no queue, driver-thread or 60 s limit)
 std::atomic<bool> g_cold{false};        // this precompile goes slowly (cold driver cache): the game's own pace until it ends
+std::atomic<bool> g_screenHold{false};  // ShaderScreenAfterDriverChange took the game's first-launch path: until the
+                                        // main menu (nobody can interact behind that screen) UE's Fast values, cold or not
 std::atomic<bool> g_loadingNow{false};  // the game thread's last look: a loading screen (the freeze subsystem's loading mode)
 std::atomic<bool> g_appliedBounded{false};  // the faster pace was applied with the bounded budget (not UE's Fast values)
 std::atomic<float> g_appliedBudget{0.0f};   // the bounded budget last applied (0: none; a change re-applies at the next check)
@@ -222,11 +224,13 @@ int InPlayNow(ULONGLONG now)
 // with a cold driver cache (after a driver update) the precompile runs for minutes, so Fast made every inventory or
 // map opening lag (a player report after NVIDIA 621.01, 2026-10-22).
 // The faster pace with the bounded render-thread budget (menus, start-up), or UE's Fast values (loading screens, or the key at 16).
-bool Bounded() { return g_budgetMs.load() < 16.0f && !g_loadingNow.load(); }
+bool ScreenHold() { return g_screenHold.load() && !g_menuSeen; }
+bool Bounded() { return g_budgetMs.load() < 16.0f && !g_loadingNow.load() && !ScreenHold(); }
 
 int Wanted(int requested, int inPlay, bool precompiling)
 {
     const bool notPlaying = inPlay == 0 || (inPlay == 2 && g_inGameMenus.load(std::memory_order_relaxed));
+    if (g_enabled.load(std::memory_order_relaxed) && !g_faulted && precompiling && requested == kBackground && ScreenHold()) return kFast;
     if (g_enabled.load(std::memory_order_relaxed) && !g_faulted && !g_cold.load() && precompiling && requested == kBackground && notPlaying)
         return kFast;
     return requested;
@@ -325,6 +329,7 @@ void Look(ULONGLONG now)
         g_doneMs = now;
         Event("[pso] +%.1f s: shader precompile finished (seen from +%.1f s; %.1f s at the Fast pace, %.1f s at the game's)",
               now / 1000.0, g_firstSeenMs.load() / 1000.0, g_fastMs.load() / 1000.0, g_gameModeMs.load() / 1000.0);
+        ShaderScreenPrecompileFinished();  // ShaderScreenAfterDriverChange: no-op unless it took the first-launch path
     }
     g_running = running;
     g_lastCheck = now;
@@ -346,7 +351,7 @@ bool LookGuarded()
 
 const char* Why(bool running, int inPlay)
 {
-    return !running ? "precompile not running" : g_cold.load() ? "a slow precompile (cold driver cache)" : inPlay == 1 ? "in play" : inPlay == 0 ? "menu, loading screen or start-up"
+    return !running ? "precompile not running" : ScreenHold() ? "the game's shader screen after a driver change" : g_cold.load() ? "a slow precompile (cold driver cache)" : inPlay == 1 ? "in play" : inPlay == 0 ? "menu, loading screen or start-up"
          : inPlay == 2 ? "a menu opened in play" : "not known";
 }
 
@@ -406,8 +411,72 @@ void ForgetDriverThreads()
     g_drvLastAt = 0;
 }
 
-// D3D12's background-processing threads in this process ("D3D Background Thread N"). The snapshot is system-wide (~50 ms
-// on a desktop with ~7,000 threads), so the caller paces it.
+// This process's threads (ID, creation time) from one NtQuerySystemInformation(SystemProcessInformation) call; -1 when
+// the call fails or the layout does not hold (the calling thread must be among them). Not a Toolhelp snapshot:
+// Thread32First/Next map the snapshot with NtMapViewOfSection on every call, one per thread on the PC (thousands per
+// search), outside the loader lock. The game's embedded browser (CEF 90's chrome_elf.dll) hooks NtMapViewOfSection while
+// it loads, and a call landing before the hook has stored the original jumps to address 0: the monitor thread crashed
+// there at start-up (2026-10-27 14:13 and 2026-10-29 00:59; the dump's stack: Thread32Next -> kernel32 ->
+// chrome_elf+0x1902 -> chrome_elf+0x14D5 call rax = 0). This call copies the list into our buffer, nothing is mapped.
+struct OwnThread {
+    DWORD id;
+    ULONGLONG created;  // FILETIME units
+};
+
+int OwnThreads(OwnThread* out, int max)
+{
+    using QuerySystemInformationFn = LONG(WINAPI*)(ULONG cls, void* info, ULONG size, ULONG* returned);
+    static const auto query = reinterpret_cast<QuerySystemInformationFn>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQuerySystemInformation"));
+    if (!query) return -1;
+    // x64 SYSTEM_PROCESS_INFORMATION: NextEntryOffset +0, NumberOfThreads +4, UniqueProcessId +0x50, then 0x100 bytes in
+    // its SYSTEM_THREAD_INFORMATION array (0x50 each: CreateTime +0x10, ClientId.UniqueThread +0x30)
+    constexpr ULONG kSystemProcessInformation = 5;
+    constexpr LONG kInfoLengthMismatch = static_cast<LONG>(0xC0000004);
+    constexpr size_t kProcThreads = 0x100, kProcId = 0x50, kThreadSize = 0x50, kThreadCreate = 0x10, kThreadId = 0x30;
+    std::vector<uint8_t> buf(1u << 20);
+    ULONG got = 0;
+    LONG status = kInfoLengthMismatch;
+    for (int tries = 0; tries < 4; ++tries) {
+        status = query(kSystemProcessInformation, buf.data(), static_cast<ULONG>(buf.size()), &got);
+        if (status != kInfoLengthMismatch) break;
+        buf.resize((got > buf.size() ? got : buf.size() * 2) + (64u << 10));   // threads come and go between calls
+    }
+    if (status < 0 || got > buf.size()) return -1;
+    const uintptr_t self = GetCurrentProcessId();
+    const DWORD caller = GetCurrentThreadId();
+    for (size_t at = 0; at + kProcThreads <= got;) {
+        const uint8_t* const p = buf.data() + at;
+        ULONG next, count;
+        uintptr_t pid;
+        memcpy(&next, p, 4);
+        memcpy(&count, p + 4, 4);
+        memcpy(&pid, p + kProcId, sizeof pid);
+        if (pid == self) {
+            if (at + kProcThreads + static_cast<size_t>(count) * kThreadSize > got) return -1;
+            int n = 0;
+            bool callerSeen = false;
+            for (ULONG i = 0; i < count; ++i) {
+                const uint8_t* const t = p + kProcThreads + i * kThreadSize;
+                uintptr_t tid;
+                ULONGLONG created;
+                memcpy(&tid, t + kThreadId, sizeof tid);
+                memcpy(&created, t + kThreadCreate, sizeof created);
+                callerSeen = callerSeen || tid == caller;
+                if (n < max) out[n++] = {static_cast<DWORD>(tid), created};
+            }
+            return callerSeen ? n : -1;
+        }
+        if (!next) break;
+        at += next;
+    }
+    return -1;
+}
+
+constexpr int kMaxOwnThreads = 1024;
+
+// D3D12's background-processing threads in this process ("D3D Background Thread N"). The query is system-wide (every
+// thread on the PC is copied), so the caller paces it.
 void FindDriverThreads(ULONGLONG now)
 {
     static const auto getDesc = reinterpret_cast<GetThreadDescriptionFn>(
@@ -416,14 +485,10 @@ void FindDriverThreads(ULONGLONG now)
     g_drvSearchAt = now ? now : 1;
     ++g_drvSearches;
     if (!getDesc) return;
-    const HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (snap == INVALID_HANDLE_VALUE) return;
-    THREADENTRY32 te{};
-    te.dwSize = sizeof te;
-    const DWORD self = GetCurrentProcessId();
-    for (BOOL ok = Thread32First(snap, &te); ok && g_drvCount < kMaxDriverThreads; ok = Thread32Next(snap, &te)) {
-        if (te.th32OwnerProcessID != self) continue;
-        const HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID);
+    static OwnThread threads[kMaxOwnThreads];   // the monitor thread's only
+    const int n = OwnThreads(threads, kMaxOwnThreads);
+    for (int i = 0; i < n && g_drvCount < kMaxDriverThreads; ++i) {
+        const HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, threads[i].id);
         if (!h) continue;
         PWSTR name = nullptr;
         bool keep = false;
@@ -434,7 +499,6 @@ void FindDriverThreads(ULONGLONG now)
         if (keep) g_drvThreads[g_drvCount++] = h;
         else CloseHandle(h);
     }
-    CloseHandle(snap);
 }
 
 bool AnyDriverThreadExited()
@@ -497,27 +561,15 @@ bool PatchEntry(uint8_t* fn, uint8_t* stub, bool beforeGameCode)
     return beforeGameCode && WriteCode(fn, insn);
 }
 
-// The process's first thread (the game thread): the one created first.
+// The process's first thread (the game thread): the one created first (from OwnThreads, not a Toolhelp snapshot).
 DWORD MainThreadId()
 {
+    static OwnThread threads[kMaxOwnThreads];   // start-up only
+    const int n = OwnThreads(threads, kMaxOwnThreads);
     DWORD best = 0;
     ULONGLONG bestTime = ~0ull;
-    const HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (snap == INVALID_HANDLE_VALUE) return 0;
-    THREADENTRY32 te{};
-    te.dwSize = sizeof te;
-    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
-        if (te.th32OwnerProcessID != GetCurrentProcessId()) continue;
-        if (HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID)) {
-            FILETIME c, e, k, u;
-            if (GetThreadTimes(h, &c, &e, &k, &u)) {
-                const ULONGLONG t = (static_cast<ULONGLONG>(c.dwHighDateTime) << 32) | c.dwLowDateTime;
-                if (t < bestTime) bestTime = t, best = te.th32ThreadID;
-            }
-            CloseHandle(h);
-        }
-    }
-    CloseHandle(snap);
+    for (int i = 0; i < n; ++i)
+        if (threads[i].created < bestTime) bestTime = threads[i].created, best = threads[i].id;
     return best;
 }
 
@@ -666,6 +718,14 @@ void SetPsoPrecompileFast(bool enabled)
     g_enabled = enabled;   // the timer (if running) applies the change at its next check
 }
 
+void SetPsoPrecompileScreenHold(bool on)
+{
+    if (g_screenHold.exchange(on) != on && on)
+        Log("[pso] the game's shader screen is up: UE's Fast pace, the cold-cache guard aside, until the main menu");
+}
+
+bool PsoPrecompileScreenHold() { return g_screenHold.load(); }
+
 void SetPsoPrecompileFastInGameMenus(bool enabled)
 {
     g_inGameMenus = enabled;   // as above: the timer's next check
@@ -720,6 +780,13 @@ void PsoPrecompileWatchDriver()
 }
 
 void PsoPrecompileTestDriverBusy(double cores) { DriverBusy(cores); }
+
+int PsoPrecompileTestOwnThreads(uint32_t* mainThread)
+{
+    static OwnThread threads[kMaxOwnThreads];
+    *mainThread = MainThreadId();
+    return OwnThreads(threads, kMaxOwnThreads);
+}
 
 void SetPsoPrecompileFastBudget(float ms, int coldQueue)
 {

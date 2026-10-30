@@ -567,6 +567,8 @@ static uint64_t HashWords(uint64_t seed, const void* data, size_t bytes)
 #include "selftest_clothreg.h"    // ClothRegisterLite: sites, lite builds and their completion with fakes
 #include "selftest_animpar.h"      // AnimTeardownParallel's shapes and the helper queue with fakes
 #include "selftest_cellbuf.h"      // CellBufferPacedEvict's shapes, the clamp stub and the buffer LRU with and without the fix
+#include "selftest_vramcounter.h"  // VramCounterFix: the Show VRAM counter
+#include "selftest_shaderscreen.h"  // ShaderScreenAfterDriverChange
 #include "selftest_ledger.h"       // diagnostic HitchLedger: sites, record/ring/csv format, cost per frame
 #include "selftest_objreplace.h"   // ObjectReplaceCrashGuard: the in-place destroy site and the stub with a fake GUObjectArray
 #include "selftest_taskwait.h"     // TaskWaitDeadlockGuard: the task graph's worker wait, the wake-up protocol against fakes
@@ -2380,6 +2382,11 @@ int wmain(int argc, wchar_t** argv)
     // CellBufferPacedEvict (lab prototype): spare cell buffer slots, overflow torn down one cell per OT frame (selftest_cellbuf.h); after
     // the ledger's test, which detours the same grid-change entry.
     cbuf::Run(game);
+
+    // VramCounterFix (selftest_vramcounter.h).
+    vramc::Run(game);
+    // ShaderScreenAfterDriverChange (selftest_shaderscreen.h).
+    shs::Run(game);
 
     // RestoreFsrAfterAltTab: FSR back on when a menu that was up at focus gain closes (the game's own focus-gained branch, run again).
     {
