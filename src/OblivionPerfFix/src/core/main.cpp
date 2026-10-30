@@ -176,6 +176,11 @@ DWORD WINAPI MonitorThread(LPVOID)
         if (g_pacingHooked) SetNpcPacingLeanFlowDrain(cfg.pacingLeanFlowDrain);  // PacingLeanFlowDrain: live
         SetHitchLedger(cfg.hitchLedger, cfg.hitchLedgerMs);  // diagnostic: no-op unless installed at start-up
         SetTickSplit(cfg.hitchLedger && cfg.hitchLedgerTickSplit);  // diagnostic: no-op unless installed at start-up
+        SetDoorDiagEarlyStream(cfg.doorDiagEarlyStream);     // diagnostic DoorDiag's experiment (no-op unless installed)
+        SetFadeVtFlushSkip(cfg.fadeVtFlushSkip);             // FadeVtFlushSkip (no-op unless installed)
+        SetStreamBehindLoading(cfg.streamBehindLoading);     // StreamBehindLoadingScreen: no-op unless installed at start-up
+        SetUnfreezeBehindLoading(cfg.unfreezeBehindLoading); // prototype UnfreezeBehindLoadingScreen (trade-off; 0 = off)
+        SetUnfreezeBehindLoadingFastTravel(cfg.unfreezeBehindLoadingFastTravel);  // ... its own hold after a fast travel (0 = the same)
         HitchLedgerDrain();                                  // ... its slow-frame records into OblivionPerfFix-ledger.csv
         if (g_clothRegHooked) SetClothRegisterLite(cfg.clothRegisterLite);  // ClothRegisterLite: live once installed
         if (g_bodiesHooked) SetParallelStaticBodies(ParallelHelpersAllowed(cfg) && cfg.parallelStaticBodies, cfg.parallelStaticBodiesMin);
@@ -183,6 +188,7 @@ DWORD WINAPI MonitorThread(LPVOID)
         if (g_sceneAddHooked) SetPipelinedSceneAdd(ParallelHelpersAllowed(cfg) && cfg.pipelinedSceneAdd, cfg.pipelinedSceneAddMin);
         SetPipelinedBodyCreation(ParallelHelpersAllowed(cfg) && cfg.pipelinedBodyCreation);  // PipelinedBodyCreation: no-op unless found with ParallelStaticBodies installed
         SetGpuSceneParallelUpload(cfg.gpuSceneParallelUpload);  // GpuSceneParallelUpload: a console variable, set once registered
+        SetVtStreamingUploads(cfg.vtStreamingUploads);          // VtStreamingUploads: a console variable (0 = the game's)
         SetDirtyTreeQuickInsert(cfg.dirtyTreeQuickInsert);  // no-op unless installed at start-up
         SetBulkIndexInsert(cfg.bulkIndexInsert, cfg.bulkIndexInsertMin, cfg.physicsInternalFlushParallel);  // BulkIndexInsert: no-op unless installed
         SetPhysicsQueueShrinkOnce(cfg.physicsQueueShrinkOnce);  // PhysicsQueueShrinkOnce: no-op unless installed with BulkIndexInsert
@@ -250,6 +256,7 @@ DWORD WINAPI MonitorThread(LPVOID)
             LogPsoPrecompileStats();
             LogAnimTeardownParallelStats();
             LogCellBufferPacedEvictStats();
+            LogVtStreamingUploadsStats();
             LogFocusRestoreStats();
             LogMenuOpenFlashStats();
             if (g_physAnimHooked) LogPhysAnimNoEmptyLockStats();
@@ -270,6 +277,9 @@ DWORD WINAPI MonitorThread(LPVOID)
             LogInstanceClearStats();
             LogMemoryStats();
             LogViewRenameGuardStats();
+            LogDoorDiagStats();
+            LogFadeVtFlushStats();
+            LogStreamBehindLoadingStats();
         }
     }
 }
@@ -551,6 +561,23 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
         const bool tickHooks = cfg.hitchLedgerTickSplit;
         if (tickHooks && InstallTickSplit(beforeGameCode, dir.c_str())) SetTickSplit(cfg.hitchLedgerTickSplit);
     }
+    // Diagnostic DoorDiag: installed only if on at startup (two entry detours, one vtable slot); its timeline needs
+    // NpcCreationPacing's frame hook.
+    if (cfg.doorDiag) {
+        if (!g_pacingHooked) Log("[doordiag] NpcCreationPacing's frame hook is not installed: no loading-screen timeline");
+        if (InstallDoorDiag(beforeGameCode)) SetDoorDiagEarlyStream(cfg.doorDiagEarlyStream);
+    }
+    // FadeVtFlushSkip (off by default): installed only if on at startup (two .rdata slots of the fade-in's flush timer
+    // delegate); afterwards the ini switches it live.
+    if (cfg.fadeVtFlushSkip) {
+        if (InstallFadeVtFlushSkip()) SetFadeVtFlushSkip(true);
+    }
+    // StreamBehindLoadingScreen: the gate-arming detour, only if on at startup (it also needs the fade-to-game hook's search and
+    // NpcCreationPacing's frame hook); afterwards the ini switches it live.
+    if (cfg.streamBehindLoading) {
+        if (!g_pacingHooked) Log("[streamload] NpcCreationPacing's frame hook is not installed: not installed");
+        else if (InstallStreamBehindLoading(beforeGameCode)) SetStreamBehindLoading(true);
+    } else Log("[streamload] StreamBehindLoadingScreen off in OblivionPerfFix.ini (takes a restart to switch on)");
     // AnimTeardownParallel: three calls redirected, only if not 0 at startup; afterwards the ini switches it live.
     if (cfg.animTeardownParallel && ParallelHelpersAllowed(cfg)) {
         if (InstallAnimTeardownParallel(beforeGameCode)) SetAnimTeardownParallel(ParallelHelpersAllowed(cfg) ? cfg.animTeardownParallel : 0);

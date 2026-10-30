@@ -65,7 +65,8 @@ tools\GamePaths.ps1                        # where the game, its exe and its con
 
 ## Fix index
 The ini key is a fix's stable name (docs and source comments use it). Evidence per fix in `docs/research.md`, plain
-words in `docs/how-it-works.md`, both in this order. All on by default except the diagnostics.
+words in `docs/how-it-works.md`, both in this order. All on by default except the diagnostics
+and the trade-offs marked (off, trade-off).
 
 | Area | ini key | log tag | source | what it changes |
 |---|---|---|---|---|
@@ -82,6 +83,7 @@ words in `docs/how-it-works.md`, both in this order. All on by default except th
 | streaming | `RtSceneBufferKeep` | `[rtscene]` | `streaming/rt_scene_keep.cpp` | `FRayTracingScene::Create` keeps a TLAS buffer that is big enough instead of re-creating it smaller when the scene needs less than half (grows as before; at most the session's largest size); its three buffer creations timed for the stats line |
 | streaming | `NaniteInitialRootPages` | `[nanite]` | `streaming/nanite_stream_buffers.cpp` | `r.Nanite.Streaming.NumInitialRootPages` 2048 -> 3072 at start-up (both routes; only while it holds 2048; an Engine.ini line wins): Nanite's ClusterPageData starts at its first growth step (+32 MiB) instead of being re-created mid-flight |
 | streaming | `InstanceClearReserve` | `[instances]` | `streaming/instance_clear.cpp` | clearing a big instanced mesh reserves its hide-command list once |
+| streaming | `VtStreamingUploads` (off, trade-off) | `[vtup]` | `streaming/vt_streaming_uploads.cpp` | `r.VT.MaxUploadsPerFrame.Streaming` set to N (the game's 4, set by its scalability after every ini layer), written again if the game puts its value back; detail after a door arrives sooner |
 | streaming | `NavmeshBuildNoBusyWait`, `BusyWaitFlagCheck` | `[navmesh]` `[busywait]` | `streaming/navmesh_wait.cpp`, `busywait_check.cpp` | navmesh tile builds never run inside another task's busy wait (the engine's flag, and the gap where a put-back task was taken unchecked) |
 | streaming | `NavLinkFast` | `[navlink]` | `streaming/nav_link_fast.cpp` | a streamed nav chunk's `dtNavMesh::addTile`: `connectExtLinks` calls that cannot make a link left out, `findConnectingPolys` run once per polygon with an edge on the facing side (per-tile cache per chunk attach); the game's code makes every link, same order. Start-up only (version.dll route), then live |
 | physics | `PhysicsTreeTimeSlicing` | `[chaos]` | `streaming/stream_churn.cpp`, `physics/physics_flush.cpp` | big physics acceleration-structure updates time-sliced like small ones, with bigger slices while a rebuild has a backlog |
@@ -101,6 +103,9 @@ words in `docs/how-it-works.md`, both in this order. All on by default except th
 | npcs | `AnimTeardownParallel` | `[animpar]` | `npcs/anim_teardown.cpp` | at a cell-row crossing, dying NPCs' recognised animation interpolators destroyed on helper threads, joined before the NPC's clean-up goes on |
 | npcs | `CellBufferPacedEvict` | `[cellbuf]` | `npcs/cell_buffer.cpp` | the exterior cell buffer gets 2 x uGridsToLoad - 1 spare slots; overflow cells unloaded one per old-engine frame with the game's unload; the ini writer keeps the player's value. **Timing changes** (a few frames) |
 | loading | `PrepareCollisionBehindLoadingScreen` | `[collision]` `[fade]` | `loading/collision_prepare.cpp`, `fade_hook.cpp` | a new area's collision handed to physics with a zero-time step while the loading screen is still up |
+| loading | `StreamBehindLoadingScreen` | `[streamload]` | `loading/stream_behind_loading.cpp` | once a transition's fade gate is armed and loading is idle, the stored texture pool size set back and the streamer's non-blocking update run per frame, so the fade-in's texture wait finds the textures in |
+| loading | `UnfreezeBehindLoadingScreen` (off, trade-off) | `[streamload]` | `loading/stream_behind_loading.cpp` | after an exit, gate or fast travel the world is drawn behind the loading screen and unfrozen with the game's own SetLoadingFreeze(off), as the game does for interiors; the fade gate waits until it has run N ms (cap 3 s). `UnfreezeBehindLoadingScreenFastTravel`: its own N after a map fast travel (recognised by VMapMenuViewModel::DelayFastTravelRequestUntilFadeEnd's exec thunk, its call redirected) or a save load (the engine save system's LoadGame of a non-settings slot) |
+| loading | `FadeVtFlushSkip` (off, trade-off) | `[vtflush]` | `loading/fade_vt_flush.cpp` | the `r.VT.Flush` the game's fade-in timer runs 1.5 s into every transition's fade-in is skipped (the timer's delegate slots redirected), so the textures loaded behind the loading screen stay |
 | loading | `PsoPrecompileFast` | `[pso]` | `loading/pso_precompile.cpp` | the start-up PSO precompile faster outside play (menus: a bounded render-thread budget; loading screens: UE's fast pace), the game's pace in play and once UE's queue or the driver's compile threads show a cold driver cache |
 | loading | `PsoCompileThreadPool` (on, -1) | `[psopool]` | `loading/pso_pool.cpp` | `r.pso.PrecompileThreadPoolSize` at start-up only: precompile and precache PSOs on UE's own pool, not the task workers (game bug: cold-cache loading starved; applied only with `TaskWaitDeadlockGuard=1` installed; the game's or an Engine.ini value wins) |
 | menus | `DisplayModeCache` | `[display]` | `menus/display_modes.cpp` | the Graphics page's display-mode lists from a cache re-checked against Windows each time |
@@ -125,6 +130,7 @@ words in `docs/how-it-works.md`, both in this order. All on by default except th
 | memory | `CommandAllocatorTrim` | `[alloc]` | `memory/allocator_trim.cpp` | the D3D12 copy queue's command-allocator pool shrinks to recent need when within 2 GB of the VRAM budget |
 | diagnostics | `HitchLedger` (off) | `[ledger]` | `diagnostics/hitch_ledger.cpp` | per slow game-thread frame, where its time went, to `OblivionPerfFix-ledger.csv` (`tools/stutter_ledger.py` ranks it) |
 | diagnostics | `HitchLedgerTickSplit` (off; needs `HitchLedger=1`) | `[ticksplit]` | `diagnostics/tick_split.cpp` | the tick task's `ExecuteTick` call, the tickables' `Tick` call, the timer manager's three delegate calls and UWorld::Tick's direct calls redirected to timing stubs: game-thread time per (tick kind, ticked class, group) in 2 s windows plus each slow frame's top 3, to `OblivionPerfFix-ticksplit.csv` (`tools/tick_split.py` ranks it). Start-up only (version.dll route), then live |
+| diagnostics | `DoorDiag` (off, not in the shipped ini) | `[doordiag]` | `diagnostics/door_diag.cpp` | per door / gate / fast travel: loading-screen timeline, each stream-all's wait, render-target pool misses |
 
 `[General] StatsIntervalSeconds` writes per-fix counters to the log (default every 60 s). The log keeps the last two
 sessions as `OblivionPerfFix.1.log` / `.2.log` and stops at 8 MB per session (crash report excepted). `[General] LogFile=0`

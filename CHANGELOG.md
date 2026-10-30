@@ -9,6 +9,31 @@ Downloads, checksums and build attestations: https://github.com/LTSharpe/Oblivio
 Bug fixes say whose bug it was: **game bug** = also happens without OblivionPerfFix (in the game, its engine or a
 driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 
+## Unreleased
+
+- **The world appears sooner after a door, a city gate or a fast travel** (`StreamBehindLoadingScreen`, on): during a
+  transition the game empties its texture memory, and once the new area has loaded it held the last loading-screen
+  image until that area's textures were streamed back in. They now stream in while the loading screen is still idling,
+  so that wait is over in about 10 ms instead of 0.1-0.3 s. Cheydinhal inn at 5120x2160: last image held before the
+  world appears 539 -> 230 ms stepping out, 225 -> 75 ms stepping in; the loading screen is not longer, video memory
+  peak and the first picture are the same. City gate and fast travel: 420-437 -> 166-213 ms and 327-421 -> 113-160 ms.
+  New key `StreamBehindLoadingScreen` (1).
+- **New trade-off switch, off by default:** `UnfreezeBehindLoadingScreen` makes exits, city gates and fast travel work
+  like entering an interior: the world is unfrozen and drawn behind the loading screen for N ms (e.g. 1000) before the
+  fade-in, so your character already stands normally and the scene has settled when the picture comes in. The loading
+  screen is about 1 s longer with 1000, and the world runs that long unseen (as it already does after entries).
+  `UnfreezeBehindLoadingScreenFastTravel` (0 = the same) gives fast travel and save loads their own hold.
+- **New trade-off switch, off by default:** `FadeVtFlushSkip` stops the blur flash right as you arrive through a door, a
+  city gate or a fast travel: 1.5 s into the fade-in the game empties its whole streamed-texture cache (`r.VT.Flush`),
+  so walls and roofs that had already loaded go blurry and reload in view. With the switch on that flush is skipped; in
+  tests the picture a few seconds later was the same either way.
+- **New trade-off switch, off by default:** `VtStreamingUploads` lets walls, roofs and stairs reach full detail sooner
+  after stepping outdoors: the streamed ("virtual") textures upload N pages per frame instead of the game's 4. At the
+  Imperial City Waterfront lighthouse exit (5120x2160) the stair walls are fully detailed as the fade-in completes with
+  64, instead of about 8 s later. No Engine.ini line can set this value; the fix does.
+- **New diagnostic** `DoorDiag` (off, not in the shipped ini): per transition, the loading-screen timeline, each texture
+  stream-all's wait and render-target pool misses, in the log.
+
 ## 1.2.3-beta
 For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Thanks to MitochondriaOverlords for issue #5,
 to mkusm for pull request #25, to cgisquet for pull request #19, to Hexaae for issue #27, and to everyone who reported
