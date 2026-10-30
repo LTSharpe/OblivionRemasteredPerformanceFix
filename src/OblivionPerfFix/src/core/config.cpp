@@ -118,6 +118,13 @@ Config LoadConfig(const wchar_t* iniPath)
     c.hitchLedger = get(L"Fixes", L"HitchLedger", c.hitchLedger) != 0;
     c.hitchLedgerMs = get(L"Fixes", L"HitchLedgerMs", c.hitchLedgerMs);
     c.hitchLedgerTickSplit = get(L"Fixes", L"HitchLedgerTickSplit", c.hitchLedgerTickSplit) != 0;
+    c.vtStreamingUploads = get(L"Fixes", L"VtStreamingUploads", c.vtStreamingUploads);
+    c.doorDiag = get(L"Fixes", L"DoorDiag", c.doorDiag) != 0;
+    c.doorDiagEarlyStream = get(L"Fixes", L"DoorDiagEarlyStream", c.doorDiagEarlyStream) != 0;
+    c.fadeVtFlushSkip = get(L"Fixes", L"FadeVtFlushSkip", c.fadeVtFlushSkip) != 0;
+    c.streamBehindLoading = get(L"Fixes", L"StreamBehindLoadingScreen", c.streamBehindLoading) != 0;
+    c.unfreezeBehindLoading = get(L"Fixes", L"UnfreezeBehindLoadingScreen", c.unfreezeBehindLoading);
+    c.unfreezeBehindLoadingFastTravel = get(L"Fixes", L"UnfreezeBehindLoadingScreenFastTravel", c.unfreezeBehindLoadingFastTravel);
     c.npcCreationPacing = get(L"Fixes", L"NpcCreationPacing", c.npcCreationPacing) != 0;
     c.pacingBudgetMs = get(L"Fixes", L"PacingBudgetMs", c.pacingBudgetMs);
     c.pacingMinDistance = get(L"Fixes", L"PacingMinDistance", c.pacingMinDistance);

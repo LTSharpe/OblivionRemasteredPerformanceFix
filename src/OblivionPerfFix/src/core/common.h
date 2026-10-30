@@ -229,9 +229,24 @@ struct Config {
                                         // (needs ParallelStaticBodies at start-up; live; identical)
     bool gpuSceneParallelUpload = true;  // GpuSceneParallelUpload: r.GPUScene.ParallelUpdate 1 (the GPU scene's instance upload of a
                                          // streamed area on all workers; identical; live)
+    int vtStreamingUploads = 0;        // VtStreamingUploads (off by default): r.VT.MaxUploadsPerFrame.Streaming set to
+                                       // this (streamed virtual texture pages uploaded per frame; the game's 4; 0 = the game's
+                                       // value; live)
     bool hitchLedger = false;          // Diagnostic HitchLedger: slow game-thread frames' stage times to
                                        // OblivionPerfFix-ledger.csv (installed only if on at start-up, then switched live)
     int hitchLedgerMs = 25;            // ... a frame counts as slow from this period (ms, the cap's sleep included)
+    bool doorDiag = false;             // diagnostic DoorDiag (not in the shipped ini): door/loading-screen timeline,
+                                       // stream-all timing, render-target pool misses/flushes (installed only if on at start-up)
+    bool doorDiagEarlyStream = false;  // ... experiment: stream-all once when the loading screen idles (live)
+    bool fadeVtFlushSkip = false;      // FadeVtFlushSkip (off by default): the r.VT.Flush the game runs 1.5 s into a
+                                       // transition's fade-in skipped (installed only if on at start-up, then live)
+    bool streamBehindLoading = true;   // StreamBehindLoadingScreen: a new area's textures stream while its loading screen is still
+                                       // up, so the fade-in is not held for them (installed only if on at start-up, then live)
+    int unfreezeBehindLoading = 0;     // prototype UnfreezeBehindLoadingScreen (trade-off, off by default): after an
+                                       // exit, ms the world runs behind the loading screen before the fade-in, as after an
+                                       // interior entry (0 = off; live; needs StreamBehindLoadingScreen)
+    int unfreezeBehindLoadingFastTravel = 0;  // the same after a fast travel, in ms (0 = UnfreezeBehindLoadingScreen's
+                                              // value; on only while UnfreezeBehindLoadingScreen is on; live)
     bool hitchLedgerTickSplit = false; // HitchLedgerTickSplit (diagnostic, public since 1.2.3): diagnostics/tick_split.cpp, the
                                        // game thread's tick time by kind, class and group to OblivionPerfFix-ticksplit.csv
                                        // (needs HitchLedger=1; installed only if on at start-up, then live)
@@ -1165,6 +1180,67 @@ bool HitchLedgerInfo(HitchLedgerInfoOut* out);
 void HitchLedgerTestSetup(uint64_t (*clock)(), void* fakeTg, void* fakeSync, const wchar_t* path);  // self-test only
 void HitchLedgerTestGridAdd(uint64_t us);          // self-test only: an OT grid change of this length
 void HitchLedgerTestClose();                       // self-test only: closes the csv
+// fade_vt_flush.cpp (FadeVtFlushSkip, off by default): the r.VT.Flush the game runs 1.5 s into a door's fade-in.
+struct FadeVtFlushInfo {
+    uint8_t* flush = nullptr;
+    uint8_t* exec = nullptr;
+    uint8_t* execIfSafe = nullptr;
+    void** execSlot = nullptr;
+    void** execIfSafeSlot = nullptr;
+};
+bool FindFadeVtFlush(FadeVtFlushInfo* out);        // locate only (no patching); false = unavailable (logged)
+bool InstallFadeVtFlushSkip();                     // start-up only (two .rdata slots)
+void SetFadeVtFlushSkip(bool on);                  // monitor thread, live
+void LogFadeVtFlushStats();
+void FadeVtFlushTestSetup(void** execSlot, void** execIfSafeSlot, void* origExec, void* origExecIfSafe, bool installed);  // self-test
+void FadeVtFlushTestCall(void* delegateInstance, bool ifSafe);                                                         // self-test
+uint32_t FadeVtFlushSkippedForTest();                                                                                  // self-test
+// door_diag.cpp (diagnostic DoorDiag): door / loading-screen timeline, stream-all timing, render-target pool
+// misses and flushes, and the DoorDiagEarlyStream experiment.
+struct DoorDiagInfoOut {
+    uint8_t* pool = nullptr;
+    int32_t* flushFlag = nullptr;      // r.bFlushRenderTargetsOnWorldCleanup's int
+    uint8_t* freeAll = nullptr;
+    uint8_t* findFree = nullptr;
+    uint8_t* elemSize = nullptr;
+    uint8_t* streamAll = nullptr;
+    void** streamAllSlot = nullptr;
+};
+bool FindDoorDiag(DoorDiagInfoOut* out);           // locate only (no patching); false = unavailable (logged)
+bool InstallDoorDiag(bool beforeGameCode);         // start-up only
+void SetDoorDiagEarlyStream(bool on);              // monitor thread, live
+void DoorDiagFrameEnd();                           // game thread, once per frame (NpcCreationPacing's frame hook)
+void LogDoorDiagStats();
+// stream_behind_loading.cpp (StreamBehindLoadingScreen): a new area's textures stream while its loading screen is still up
+// (the stored pool size set back + the streaming manager's non-blocking update, once the gate is armed and loading is idle).
+struct StreamBehindLoadingInfo {
+    uint8_t* gateBody = nullptr;
+    uint8_t* arm = nullptr;
+    void* platformGet = nullptr;  // IPlatformFeaturesModule::Get, from the settings save's writer (save loads: their save read)
+    void** cvarStatic = nullptr;
+    void** singleton = nullptr;
+    void** asyncLoading = nullptr;
+    uint8_t* travelPending = nullptr;
+    uint8_t* update = nullptr;
+    uint32_t poolOffset = 0, getWorldSlot = 0;
+    void* armHook = nullptr;
+    // the world drawing for UnfreezeBehindLoadingScreen (optional: nullptr / 0 when not found)
+    void** execSlot = nullptr;
+    void** execIfSafeSlot = nullptr;
+    uint8_t* gameViewport = nullptr;
+    uint32_t drawFlagOffset = 0;
+    uint8_t* setLoadingFreeze = nullptr;  // prototype UnfreezeBehindLoadingScreen
+};
+bool FindStreamBehindLoading(StreamBehindLoadingInfo* out);  // locate only; false = unavailable (logged)
+bool InstallStreamBehindLoading(bool beforeGameCode);       // one entry detour (the gate-arming function); needs the fade hook found
+void SetStreamBehindLoading(bool on);                       // monitor thread, live
+void SetUnfreezeBehindLoading(int ms);                      // monitor thread, live (0 = off); prototype, trade-off
+void SetUnfreezeBehindLoadingFastTravel(int ms);            // ... its hold for fast travels (0 = UnfreezeBehindLoadingScreen's); live
+void StreamBehindLoadingFrameEnd();                         // game thread, once per frame (NpcCreationPacing's frame hook)
+void LogStreamBehindLoadingStats();
+// an exec function (UFunction thunk) by its registered name, checked against a byte pattern (stream_behind_loading.cpp);
+// nullptr unless the name, its native-table pair and the match are each exactly one
+uint8_t* FindExecByName(const char* name, const char* shape);
 // translate_frame_fence.cpp (RdgParallelTranslate guard): an RHI thread fence after every FRHICommandListImmediate::BeginFrame, as
 // UE 5.5 orders its BeginFrame, so the buffer defragmentation can run while parallel translate is on.
 bool FindFrameFence();                         // locate BeginFrame, RHIThreadFence, the event release (no patching)
@@ -1291,6 +1367,12 @@ bool FindGpuSceneParallelUpload();                 // the console variable's reg
 void SetGpuSceneParallelUpload(bool enabled);      // once per second from the monitor; switchable live
 void GpuSceneParallelUploadTestSetup(int32_t* volatile* slot);  // self-test only: a fake value pointer slot
 int32_t* volatile* GpuSceneParallelUploadSlotForTest();         // self-test only
+// VtStreamingUploads : r.VT.MaxUploadsPerFrame.Streaming set to N (vt_streaming_uploads.cpp).
+bool FindVtStreamingUploads();                     // the console variable's registration and value pointer (no patching)
+void SetVtStreamingUploads(int uploads);           // once per second from the monitor; 0 = the game's value; live
+void LogVtStreamingUploadsStats();
+void VtStreamingUploadsTestSetup(int32_t* volatile* slot);  // self-test only: a fake value pointer slot
+int32_t* volatile* VtStreamingUploadsSlotForTest();         // self-test only
 // DirtyTreeQuickInsert: greedy sibling choice for dirty-element-tree inserts ("equivalent" class).
 bool InstallDirtyTreeQuickInsert(bool beforeGameCode);  // start-up only (three calls redirected)
 void SetDirtyTreeQuickInsert(bool enabled);             // switchable live

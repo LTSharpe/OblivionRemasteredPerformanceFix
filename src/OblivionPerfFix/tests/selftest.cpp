@@ -567,6 +567,8 @@ static uint64_t HashWords(uint64_t seed, const void* data, size_t bytes)
 #include "selftest_clothreg.h"    // ClothRegisterLite: sites, lite builds and their completion with fakes
 #include "selftest_animpar.h"      // AnimTeardownParallel's shapes and the helper queue with fakes
 #include "selftest_cellbuf.h"      // CellBufferPacedEvict's shapes, the clamp stub and the buffer LRU with and without the fix
+#include "selftest_doordiag.h"     // diagnostic DoorDiag: sites (locate only)
+#include "selftest_streamload.h"   // StreamBehindLoadingScreen: sites (locate only)
 #include "selftest_ledger.h"       // diagnostic HitchLedger: sites, record/ring/csv format, cost per frame
 #include "selftest_objreplace.h"   // ObjectReplaceCrashGuard: the in-place destroy site and the stub with a fake GUObjectArray
 #include "selftest_taskwait.h"     // TaskWaitDeadlockGuard: the task graph's worker wait, the wake-up protocol against fakes
@@ -2373,6 +2375,10 @@ int wmain(int argc, wchar_t** argv)
     pso::Run(game);
     // Diagnostic HitchLedger (selftest_ledger.h): before BulkIndexInsert's test (its lab probe times the same tick-group entry).
     hl::Run(game);
+    // Diagnostic DoorDiag (selftest_doordiag.h): its sites, located only.
+    dd::Run(game);
+    // StreamBehindLoadingScreen (selftest_streamload.h): its sites, located only (after the fade hook test).
+    sbl::Run(game);
     // Diagnostic TickSplit (selftest_ticksplit.h): rides on the ledger's tick-group hook.
     tsp::Run(game);
     // AnimTeardownParallel (lab prototype): dying NPC animation data's interpolators on helper threads (selftest_animpar.h).
@@ -4204,6 +4210,78 @@ int wmain(int argc, wchar_t** argv)
         SetGpuSceneParallelUpload(true);
         Check(pair[0] == 0 && pair[1] == 0, "GPU scene parallel upload: ... and stays kept");
         GpuSceneParallelUploadTestSetup(nullptr);
+    }
+
+    // FadeVtFlushSkip : the fade-in's r.VT.Flush (exe+0x48774E0, build 19115871), its timer delegate's
+    // Execute / ExecuteIfSafe thunks (exe+0x4881630 / exe+0x48817D0) and their .rdata slots (exe+0x7D7BD00 / +0x7D7BD08);
+    // then the stubs on fake functions: off passes through to the game's thunk, on skips it (and ExecuteIfSafe returns true).
+    {
+        FadeVtFlushInfo fi{};
+        if (Installed(FindFadeVtFlush(&fi), "fade VT flush: r.VT.Flush function, timer delegate thunks and slots found")) {
+            auto rva = [&](const void* p) { return static_cast<unsigned>(static_cast<const uint8_t*>(p) - game.base); };
+            Check(rva(fi.flush) == 0x48774E0 && rva(fi.exec) == 0x4881630 && rva(fi.execIfSafe) == 0x48817D0,
+                  "fade VT flush: flush at exe+0x48774E0, thunks at exe+0x4881630 / exe+0x48817D0");
+            Check(rva(fi.execSlot) == 0x7D7BD00 && rva(fi.execIfSafeSlot) == 0x7D7BD08,
+                  "fade VT flush: delegate slots at exe+0x7D7BD00 / +0x7D7BD08");
+        }
+        static int calls = 0;
+        struct Fake {
+            static void Exec(void*) { ++calls; }
+            static bool ExecIfSafe(void*) { ++calls; return true; }
+        };
+        void* slots[2] = {nullptr, nullptr};
+        FadeVtFlushTestSetup(&slots[0], &slots[1], reinterpret_cast<void*>(&Fake::Exec), reinterpret_cast<void*>(&Fake::ExecIfSafe), true);
+        FadeVtFlushTestCall(nullptr, false);
+        FadeVtFlushTestCall(nullptr, true);
+        Check(calls == 2 && FadeVtFlushSkippedForTest() == 0, "fade VT flush: off passes both calls through to the game");
+        SetFadeVtFlushSkip(true);
+        FadeVtFlushTestCall(nullptr, false);
+        FadeVtFlushTestCall(nullptr, true);
+        Check(calls == 2 && FadeVtFlushSkippedForTest() == 2, "fade VT flush: on skips both calls");
+        SetFadeVtFlushSkip(false);
+        FadeVtFlushTestCall(nullptr, false);
+        Check(calls == 3, "fade VT flush: off again passes through");
+        FadeVtFlushTestSetup(nullptr, nullptr, nullptr, nullptr, false);
+    }
+
+    // VtStreamingUploads : the registration of r.VT.MaxUploadsPerFrame.Streaming (exe+0xA69B5B, build 19115871).
+    // Empty value pointer in the mapped exe; then the key on a fake value pair: N written over the game's 4 (both copies),
+    // written again when the game's settings put a value back, 0 puts back the game's value only if the value is still N.
+    if (Installed(FindVtStreamingUploads(), "VT streaming uploads: r.VT.MaxUploadsPerFrame.Streaming registration found")) {
+        int32_t* volatile* const slot = VtStreamingUploadsSlotForTest();
+        Check(*slot == nullptr, "VT streaming uploads: value pointer empty before registration");
+        SetVtStreamingUploads(64);  // nothing registered: nothing written, no crash
+        Check(*slot == nullptr, "VT streaming uploads: unregistered value left alone");
+    }
+    {
+        int32_t pair[2] = {4, 4};
+        int32_t* volatile fakeSlot = nullptr;
+        VtStreamingUploadsTestSetup(&fakeSlot);
+        SetVtStreamingUploads(64);
+        Check(pair[0] == 4, "VT streaming uploads: nothing written before registration");
+        fakeSlot = pair;
+        SetVtStreamingUploads(0);
+        Check(pair[0] == 4 && pair[1] == 4, "VT streaming uploads: 0 leaves the game's 4");
+        SetVtStreamingUploads(64);
+        Check(pair[0] == 64 && pair[1] == 64, "VT streaming uploads: 64 sets both copies");
+        SetVtStreamingUploads(64);
+        Check(pair[0] == 64 && pair[1] == 64, "VT streaming uploads: 64 twice stays 64");
+        pair[0] = pair[1] = 4;  // the game's graphics settings applied again
+        SetVtStreamingUploads(64);
+        Check(pair[0] == 64 && pair[1] == 64, "VT streaming uploads: set again after the game's settings put 4 back");
+        SetVtStreamingUploads(32);
+        Check(pair[0] == 32 && pair[1] == 32, "VT streaming uploads: a changed key value applied live");
+        SetVtStreamingUploads(0);
+        Check(pair[0] == 4 && pair[1] == 4, "VT streaming uploads: 0 puts back the game's 4");
+        SetVtStreamingUploads(0);
+        Check(pair[0] == 4 && pair[1] == 4, "VT streaming uploads: 0 twice leaves it");
+        SetVtStreamingUploads(64);
+        pair[0] = pair[1] = 16;  // changed after the fix by something else, then the key goes off
+        SetVtStreamingUploads(0);
+        Check(pair[0] == 16 && pair[1] == 16, "VT streaming uploads: 0 leaves a value that is no longer the fix's");
+        SetVtStreamingUploads(100000);
+        Check(pair[0] == 1024 && pair[1] == 1024, "VT streaming uploads: key capped at 1024");
+        VtStreamingUploadsTestSetup(nullptr);
     }
 
     // FrameGenCrashGuard: AMD FidelityFX's command list pool, the game's own amd_fidelityfx_dx12.dll loaded here, on a WARP device. The
