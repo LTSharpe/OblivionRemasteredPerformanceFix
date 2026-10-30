@@ -229,6 +229,35 @@ switch on a stand-in value (on, off, a player's own value).
 
 **Measured (2026-10-25, the Imperial City flight, 4K, DLSS Performance, ray tracing on, RTX 4090; a fresh game per run, off and on in turn, three rounds):** the two frames that waited for the builds, graphics card busy: at 97.6 s 37.1 / 45.1 / 31.9 -> 18.8 / 20.0 / 21.0 ms, at 41.2 s 52.1 / 67.3 / 62.6 -> 22.1 / 20.4 / 23.9 ms. Frames of 33 ms or more on the flight 158 -> 133.
 
+---
+
+<a id="hdrgamma22"></a>
+
+### HDR shadows as on an SDR monitor (`HdrGamma22`, trade-off, on)
+
+[Evidence](research.md#hdrgamma22).
+
+**The problem.** In HDR the game looks washed out next to its own SDR picture. Measured: the HDR picture copies the SDR
+picture as Windows decodes SDR content, with the sRGB curve. A normal SDR monitor decodes with gamma 2.2, which makes
+the darks deeper. So next to SDR on a monitor, the HDR darks sit about 1.7 to 2.7 times higher compared with the
+mid-tones. No game setting changes that shape: not Mid-Tone, Black Floor, the output device, the film-curve settings
+or a colour-grading LUT (the game's HDR path does not use the last two).
+
+**What we did.** The HDR tone curve is a small table of 20 numbers that the game computes when an HDR setting changes:
+the curve's black floor, mid point and peak, and two smooth pieces of 5 numbers each. Every pass that draws with the
+curve reads it from that one table. With the switch on, the fix computes new numbers for the two pieces, on a
+background thread. The result is the same curve, with every value below a reference white re-decoded as gamma 2.2
+instead of sRGB. The reference white is 9.5 times the Mid-Tone, where the curve matches SDR white. The fix then
+writes the new numbers into the table. Highlights above the reference white, the peak and the black floor stay the
+game's. When the game recomputes the table (any HDR setting change), the fix computes again. Switched off, it puts the
+game's numbers back.
+
+**What changes.** On purpose, the picture: in HDR, darks and mid-tones below the reference white get SDR-on-a-monitor's
+shadow depth (measured: the shape now matches SDR at gamma 2.2 across the dark and middle range). The HUD and menus
+are unchanged (measured: identical HUD pixels). Frame generation sees the corrected picture. Nothing changes in SDR.
+A **trade-off**, on by default because without it the HDR picture's shadows do not match the game's own SDR picture on
+a monitor; `HdrGamma22=0` gives the game's curve. Switches live.
+
 ## Horses and collision checks: work the game repeated every frame
 
 These three are new in 1.2.3. They came from one spot: the horse corral at Brindle Home, west of the Imperial City, where the game's main thread ran slower than anywhere else on the route with only a farmer and four horses in view.
@@ -1176,6 +1205,94 @@ those seconds keep the game's pace.
 
 ---
 
+<a id="hdrmenurows"></a>
+
+### HDR section in the game's Graphics menu (`HdrMenuRows`, off)
+
+[Evidence](research.md#hdrmenurows).
+
+**The problem.** The PC version has HDR, but no menu option for it. It can only be switched in the settings file, along
+with its peak brightness in nits. There was also a launch bug: with HDR on at, say, 1300 nits, the game's tone mapping
+still used a 1000-nit maximum after every start, until the nits value was changed.
+
+**What we did.** The game's menu is data: each page lists sections ("General", "Quality", ...), and each section is a
+table of rows. Once those tables have loaded, the fix adds a section **HDR** between General and Quality. It builds the
+section's table with the engine's own object creation, and fills it with copies of the game's own rows:
+- **HDR** (On/Off; default Off, so the player switches it on);
+- **Peak Brightness**, 400 to 4000 nits (default 1000): the brightest highlight; match it to your display's peak;
+- **Paper White**, 80 to 400 nits (default 200): how bright menus, subtitles and the HUD are;
+- **Black Floor**, -4 to -1 (log10 nits; default -4, the deepest black): -4 recommended for OLED, -2 for LED/LCD;
+- **Mid-Tone**, 5 to 50 nits (default 15, the game's): the scene's mid-tones, so the overall brightness of the picture.
+
+Each row has a short description, shows its current value (your saved one where there is one), and works, applies and
+saves like the game's own rows. At start-up the fix also sets the game's HDR switches to the values the rows show, so
+the saved nits are what the tone mapping uses, and paper white to 200 when none is saved (the engine's is 300).
+
+The rows also lock the way the game's own rows do. The game greys a row out by its kind: Display Resolution in
+borderless mode, for example. It has two kinds for HDR, "HDR options" (usable only with HDR on) and "SDR options"
+(usable only with it off), that no PC row used. The four sliders are made HDR options, and General's Brightness
+Intensity an SDR option, since it does nothing with HDR on (measured). The game then greys the sliders out while HDR is
+off and Brightness while it is on, and switches them as soon as HDR changes.
+
+The game keeps only the saved options of rows that exist when it loads its settings save, and these rows are made a
+moment later. So the fix reads the save when the game starts. When it holds HDR options, the fix puts them back and
+lets the game write its settings save once with its own writer.
+
+**What changes.** A fourth section on the Graphics page, and Brightness Intensity greyed out while HDR is on. With HDR
+on, the tone mapping uses your saved peak brightness from the start, instead of 1000 nits until you change it, and
+paper white is 200 unless you saved another value.
+Nothing else changes until you use the rows. Off by default (`HdrMenuRows=1`); takes a restart.
+---
+
+<a id="hudaspectrow"></a>
+
+### HUD Aspect Ratio in the Graphics menu (`HudAspectRow`, off)
+
+[Evidence](research.md#hudaspectrow).
+
+**The problem.** On an ultrawide or super-ultrawide screen the HUD spreads to the far edges: the compass in the middle,
+the health and magicka icons in the bottom corner, far from where you look. The game has no option to keep it closer.
+
+**What we did.** With `HudAspectRow=1`, a "HUD Aspect Ratio" row appears in the Graphics page's General section, after
+Frame Rate Limit and before Show FPS: Wide, 4:3, 16:9, 21:9 or 32:9. Wide (the default) is the game's own HUD. The other
+choices keep the HUD inside a centred area of that shape: on a 5120x2160 screen, 16:9 places the HUD as on a 16:9
+monitor in the middle of the screen. Only the HUD moves; full-screen effects such as the low-health vignette, menus, the
+map, loading screens and fades stay full width. A
+shape wider than your screen is the same as Wide (32:9 on a 21:9 screen, for example). Your choice is saved with the
+other settings.
+
+**What changes.** Nothing until you pick something other than Wide; then the HUD's position. Off by default
+(`HudAspectRow=1`); installed when the game starts.
+
+---
+
+<a id="dlssrayreconstruction"></a>
+
+### DLSS Ray Reconstruction in the Graphics menu (`DlssRayReconstruction`, trade-off, off)
+
+[Evidence](research.md#dlssrayreconstruction).
+
+**The problem.** The game's DLSS plugin includes NVIDIA's Ray Reconstruction, an AI denoiser for ray-traced lighting and
+reflections, but the game never offers it in its menu. The only way to turn it on was a console variable.
+
+**What we did.** With `DlssRayReconstruction=1`, a "DLSS - Ray Reconstruction" row (Off / On) appears in the Graphics
+page's Advanced section, right below DLSS - Frame Generation. It is a copy of the Frame Generation row with its own name,
+description and switch, and it behaves like the other DLSS rows: greyed out when DLSS is not the upscaler (the game's own
+lock, which looks each row up in a fixed list of its settings; for this one row the DLL answers "DLSS"). Your choice is
+saved with the game's other settings and applied at every launch. The row only appears when NVIDIA's Ray Reconstruction
+file is present: `nvngx_dlssd.dll` in the game's DLSS folder. The game does not include it, and neither does this DLL
+(it is NVIDIA's file); a model the NVIDIA driver downloads does not count, as Ray Reconstruction was only tested with the
+file.
+
+**What changes.** Nothing until you pick On. Then the picture changes (ray-traced lighting and reflections are denoised
+by DLSS instead of the engine) and it costs GPU time. It only acts on hardware ray tracing: with Lumen Hardware RT off it
+has nothing to work on. Measured on an RTX 5090 at 5120x2160 with DLSS Ultra Performance: 0.4 ms more GPU time per
+frame (about 5 %). The engine's own reflection and shadow denoisers stay as they are: switching them off as well, as
+some Ray Reconstruction mods do, made no visible or measurable difference. A **trade-off**: off by default
+(`DlssRayReconstruction=1`); installed when the game starts.
+
+---
+
 <a id="menuscreenshotfilter"></a>
 
 ### The menu's screenshot filtered in one go (`MenuScreenshotFilter`)
@@ -1326,6 +1443,51 @@ same with and without. Closing the menu is not affected (that hitch is the world
 **What we did.** When the only ones waiting for that screenshot are the save and the save system's own picture store (a save from the pause menu, or while resting or waiting, has other listeners: the game's way runs there), the DLL asks for the same copy of the same frame, at the same point of the frame's work, but without waiting for it. A helper thread waits for the graphics card's signal, converts the picture with the same conversion as the game (byte for byte) and hands it to the save system's picture store first and then to the save, which writes its file after it as before. The picture arrives one to four frames later. If the copy could not be read (never seen), the save gets a black picture instead of waiting forever; if memory for the picture is short, the helper waits until there is.
 
 **Why the game can't change.** The same frame is copied and converted the same way: the maintainers' test build read every picture the game's way as well and compared every pixel (identical in all saves checked: quicksaves, autosaves, door autosaves; 480p and 4K with frame generation). Saves load back to the saved spot. The save system's store gets the picture before the save is allowed to go on, as in the game, where both happen before anything else runs. Installed while the game starts, only when the key is on (not on the OBSE64 route).
+
+---
+
+<a id="hdrmenubackground"></a>
+
+### The menu's background in HDR as in SDR (`HdrMenuBackground`, trade-off, off)
+
+[Evidence](research.md#hdrmenubackground).
+
+**The problem.** In HDR the menu (inventory, map, System, ...) looks grey and washed out behind its buttons. The world
+behind the menu is that same screenshot (the menu shows it blurred). In SDR the screenshot holds ordinary colours. In
+HDR it holds the HDR signal's values (PQ, the curve HDR10 sends to the monitor), and the menu shows those values as if
+they were ordinary colours. Something 3.5 nits bright in the world is shown at about a fifth of the menu's white, and
+the bright parts are pulled down: everything ends up a flat grey.
+
+**What we did.** The fix wraps the one step where the game resizes that screenshot for the menu. When the switch is on
+and the output is HDR10, it turns each colour value back into the brightness the world had (in nits), then into the
+ordinary colour the menu shows at that brightness. The menu's white is the Paper White setting (`r.HDR.UI.Luminance`),
+and anything above 80 % of it is rolled off softly instead of clipped. It does nothing in SDR or with any other HDR
+output, and the game's two other uses of the resize step are left alone.
+
+**What changes.** On purpose, the picture: the menu's background in HDR. Measured: the HDR menu now follows the SDR menu
+region by region (within ±8 %, stock ±30 %; its shadows were 2.1 times SDR's, now the same as the rest). It sits a little
+darker overall than SDR relative to the world. Converting a 5120x2160 screenshot takes about 1.3 ms (in bands on helper
+threads), in a menu-opening frame of about 155 ms. A **trade-off**: off by default (`HdrMenuBackground=1`); installed
+when the game starts, then switches live.
+---
+
+<a id="hdrsavethumbnail"></a>
+
+### Save thumbnails in HDR (`HdrSaveThumbnail`, trade-off, off)
+
+[Evidence](research.md#hdrsavethumbnail).
+
+**The problem.** A save's thumbnail is the same kind of screenshot as the menu's background, so a save made in HDR
+stores the HDR values as if they were ordinary colour. The Load and Save menus then show a grey, washed-out picture.
+
+**What we did.** Every save's picture is copied once, inside the game's own screenshot callback, before the save turns
+it into a JPEG. That one copy now goes through the DLL, which converts the copied picture with the same table as
+`HdrMenuBackground` (HDR10 only). A save made from a menu uses the picture the game cached when the menu opened; the
+cache itself is left as it is and is converted on its way into the save, so no picture is converted twice.
+
+**What changes.** On purpose, the picture: thumbnails of saves made in HDR from now on. Saves already made keep the
+thumbnail they have. In SDR nothing changes. A **trade-off**: off by default (`HdrSaveThumbnail=1`); installed when the game
+starts, then switches live.
 
 ---
 
