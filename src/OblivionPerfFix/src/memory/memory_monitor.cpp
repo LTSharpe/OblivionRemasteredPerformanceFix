@@ -211,9 +211,19 @@ uint64_t g_largestGpuMB = 0;
 char g_largestGpuName[128] = "";
 bool g_largestGpuAsked = false;
 
+// The latest sample's video memory (bytes; 0 = not known yet), for VramCounterFix's game-thread reads.
+std::atomic<uint64_t> g_lastVram{0}, g_lastVramBudget{0};
+
 }  // namespace
 
 IDXGIAdapter3* GameAdapter() { return g_adapter; }
+
+bool LatestGameVram(uint64_t* used, uint64_t* budget)
+{
+    *used = g_lastVram.load(std::memory_order_relaxed);
+    *budget = g_lastVramBudget.load(std::memory_order_relaxed);
+    return *budget != 0;
+}
 
 uint64_t LargestGpuMemoryMB(const char** name)
 {
@@ -782,6 +792,8 @@ void UpdateMemory(const Config& cfg, MemoryRelief* relief)
 {
     OpenAdapter();
     Sample s = TakeSample();
+    g_lastVram.store(s.vram, std::memory_order_relaxed);
+    g_lastVramBudget.store(s.vramBudget, std::memory_order_relaxed);
     g_ring[g_ringNext.load() % kRing] = s;
     g_ringNext.fetch_add(1);
     Interval& in = g_interval;
