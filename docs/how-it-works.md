@@ -229,6 +229,29 @@ switch on a stand-in value (on, off, a player's own value).
 
 **Measured (2026-10-25, the Imperial City flight, 4K, DLSS Performance, ray tracing on, RTX 4090; a fresh game per run, off and on in turn, three rounds):** the two frames that waited for the builds, graphics card busy: at 97.6 s 37.1 / 45.1 / 31.9 -> 18.8 / 20.0 / 21.0 ms, at 41.2 s 52.1 / 67.3 / 62.6 -> 22.1 / 20.4 / 23.9 ms. Frames of 33 ms or more on the flight 158 -> 133.
 
+---
+
+<a id="separableskinabove4k"></a>
+
+### Magenta specks on skin on wide renders (`SeparableSkinAbove4K`, trade-off, off)
+
+[Evidence](research.md#separableskinabove4k).
+
+**The problem.** With Effects Quality at Ultra and the game rendering at 100 % (DLSS DLAA or FSR Native AA), sunlit
+characters show small glowing magenta specks on the edges of skin and cloth: a skirt's metal studs, a hand. It is a bug
+in the game itself (it happens without this DLL, with FSR as well as DLSS), and players reported it in 2025. It comes from
+the engine's "Burley" skin scattering, the way it spreads light under skin, when it runs at full resolution.
+
+**What we did.** With `SeparableSkinAbove4K=1`, while the game renders more than 3840 pixels across (wider than a 4K
+screen: an ultrawide like 5120x2160 at DLSS DLAA or FSR Native AA) the DLL switches skin scattering to the engine's other
+method, "separable" (`r.SSS.Burley.Quality 0`). At 3840 or less (a 4K screen, or DLSS Quality on the ultrawide) the game's
+own method comes back within a second. Every case with specks so far rendered 5120 wide; none showed at 3413 wide,
+nor on a 4K 16:9 screen at DLAA (3840 wide).
+
+**What changes.** Skin is shaded by the separable method on wide renders. On the test character at play distance the
+skin looked the same and the frame cost about 0.2 ms less on an RTX 5090; close-ups in dialogue were not compared. The specks are
+gone. A **trade-off**: off by default (`SeparableSkinAbove4K=1` turns it on); switches live.
+
 ## Horses and collision checks: work the game repeated every frame
 
 These three are new in 1.2.3. They came from one spot: the horse corral at Brindle Home, west of the Imperial City, where the game's main thread ran slower than anywhere else on the route with only a farmer and four horses in view.
@@ -1176,6 +1199,28 @@ those seconds keep the game's pace.
 
 ---
 
+<a id="monitornativefromwindows"></a>
+
+### Display resolutions for wide monitors (`MonitorNativeFromWindows`, `FullscreenAllResolutions`, game bug)
+
+[Evidence](research.md#monitornativefromwindows).
+
+**The problem.** The game takes a monitor's native resolution from the first timing in its EDID (the description the
+monitor sends). That field cannot hold a width above 4095, so wide monitors put a smaller resolution there: on an
+Alienware AW3926QW (5120x2160) it says 3440x1440. The game then shows 3440x1440 as the borderless resolution and, in
+fullscreen, lists only resolutions with exactly that aspect ratio and no wider: 3440x1440 alone.
+
+**What we did.** `MonitorNativeFromWindows`: right after the engine reads the monitors, each monitor's native resolution
+is replaced by the one Windows calls the monitor's preferred mode, when that is one of the monitor's own modes.
+`FullscreenAllResolutions`: the fullscreen list keeps every mode Windows offers for the monitor (720 lines and up),
+instead of only the native aspect ratio.
+
+**What changes.** The resolutions the Graphics page offers. In borderless the game draws at the desktop's size either
+way (measured: a 5120x2160 window with 3440x1440 shown). Other aspect ratios in fullscreen are stretched or
+letterboxed by the display or the graphics driver. On by default; takes a restart.
+
+---
+
 <a id="menuscreenshotfilter"></a>
 
 ### The menu's screenshot filtered in one go (`MenuScreenshotFilter`)
@@ -1345,6 +1390,22 @@ same with and without. Closing the menu is not affected (that hitch is the world
 
 **Effect (all three together).** Quicksaves in a held, save-free scene at 4K with frame generation and a 60 fps cap: the save's frame went from 90-113 ms (median 110) plus a second frame of 30-43 ms to 25-32 ms (median 28), with no second slow frame; at 480p from 70-77 ms (median 75) to 27-30 ms.
 
+---
+
+<a id="autosavefollowsmenu"></a>
+
+### No autosaves with every autosave option off (`AutosaveFollowsMenu`, game bug)
+
+[Evidence](research.md#autosavefollowsmenu).
+
+**The problem.** A bug in the game. The Gameplay menu has four autosave options: on rest, on wait, on travel, and on entering or leaving an interior. Players who switch all four off still get autosaves, because the old engine has two more that the menu has no option for: one after every level-up, and one whenever a quest's script asks for a save. Both stay on whatever you pick.
+
+*Analogy:* a light panel with four switches all set to off, and two more lights wired straight to the mains.
+
+**What we did.** The game's code calls its autosave from six places. The DLL sends the two without a menu option (after a level-up and the quests' save command) through a small wrapper, found by their code and checked. While all four of the menu's autosave options are off, the wrapper does not make the save; with any one of them on, it saves as before. The other four places (rest, wait, travel, doors) are unchanged.
+
+**What changes.** Only whether those two autosaves are written. The level-up and the quest go on as before, and your own saves and quicksaves are untouched. Checked in play. `AutosaveFollowsMenu=0` brings back the stock game's autosaves (start-up, then live). Each autosave it holds back is one `[autosave]` line in the log.
+
 ## Frame generation
 
 <a id="framegenasynccompute"></a>
@@ -1495,6 +1556,22 @@ with exactly the recorded crash; with the guard it carried on, and the log count
 **What we did.** Just before each trap update, the DLL checks every character on each trap's list: is its memory still there, and is it still a character (the game's own type information says so)? One that isn't is taken off the list with the game's own function for "this character stepped away from the trap", and the update runs as before. Characters that are there are never touched.
 
 **Why the image can't change.** Nothing you see: traps hit, hurt and push every character that is there exactly as before. The guard only acts at the moment the game would otherwise crash, and then writes a line to the log naming the trap.
+
+---
+
+<a id="bow-sneak-1x"></a>
+
+### Bow sneak attacks hit once, with the bow's multiplier (`BowSneakAttackFix`, game bug, off)
+
+[Evidence](research.md#bow-sneak-1x).
+
+**The problem.** A bug in the game's own code that changes damage. When your arrow lands, both of the game's engines check the hit. The new engine looks up your bow's sneak multiplier (2x, or 3x at higher Sneak) and sends the hit to the old engine, which deals the damage and shows "Sneak attack for 2X damage". But the old engine also runs its own arrow-impact code, and that code always uses 1x. Whichever engine notices the hit first wins: often it is the old one, so the shot says "Sneak attack for 1X damage" and does 1x. When both notice the same arrow, the target is hit twice (1x, then 2x a few milliseconds later). In one measured session of 23 sneak shots, 10 did 2x, 9 did 1x and 4 hit twice.
+
+*Analogy:* two cashiers ring up the same customer. One knows about today's discount, the other never does, and whoever gets there first sets the price; sometimes both charge.
+
+**What we did.** Both hits pass through two calls in the old engine's code, which the DLL sends through small wrappers (found by their code and checked). Each of your arrows now hits once: the second hit of the same arrow on the same target within half a second is not made. When the old engine's own impact is the first, it uses the multiplier the new engine worked out for your last arrow hit instead of 1x (with a bow that only changes with your Sneak skill). Until your first arrow hit in a session there is no such value yet, and that hit keeps the old engine's 1x, as in the stock game. Hits by other characters are unchanged.
+
+**What changes.** Damage, back to what the game intends: a sneak shot with a bow does your sneak multiplier, once. Checked in play: 20 sneak shots in a row each hit once and said "Sneak attack for 2X damage"; half of them would have done 1x in the stock game, and a quarter would have hit twice. Because it changes damage, it is off by default: `BowSneakAttackFix=1` turns it on (start-up, then live). Nothing you see changes apart from the damage and the "Sneak attack for ..." message.
 
 ---
 

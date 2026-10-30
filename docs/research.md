@@ -380,6 +380,43 @@ loading itself is unchanged (arrival 2.7-3.1 s after the door is used, both).
   Lumen's hardware ray tracing off (profile `cpu-nort`) the game still builds these structures; the switch batches them
   (1,841 builds in the first minute, 13 batches, longest call 5.4 ms) without errors.
 
+<a id="separableskinabove4k"></a>
+
+### Magenta skin specks on wide renders (`SeparableSkinAbove4K`, trade-off, off)
+
+[Explanation](how-it-works.md#separableskinabove4k). Off by default: it changes how skin is shaded.
+
+- **The bug:** clips of play (DLSS DLAA, 3840x1620 recording of 5120x2160): glowing magenta points with a bloom halo
+  on a skirt's studs and a hand, in short bursts while the character moves in sneak, in sunlight; none in 20 DLSS
+  Quality frames. Steam reports from April 2025 (the game's own DLSS 3.7) describe the same with DLAA, gone in Quality,
+  "with a lower resolution" or "Effects below Ultra" (unmeasured claims).
+- **Bisect** (in play at the spot, one change per restart, Engine.ini [SystemSettings]; checked in probe games
+  that these lines beat the Effects group): Effects High, clean. Effects Ultra vs High differ
+  in 16 variables. r.MaterialQualityLevel 1, purple. r.SSS.Quality -1 + r.SSS.HalfRes 1 + r.SSS.SampleSet 1, clean
+  (flicker); without HalfRes, purple. r.SSS.Checkerboard.NeighborSSSValidation 1, purple; r.SSS.Checkerboard 1,
+  purple. FSR Native AA instead of DLAA, purple (not DLSS). The stock game (no DLL), purple.
+  r.SSS.Burley.Quality 0, **clean**. r.SSS.Burley.MinGenerateMipsTileCount 1000000, purple. NumSamplesOverride 64 +
+  BilateralFilterKernelFunctionType 0 + EnableProfileIdCache 0 + r.SSS.Filter 0, purple. So Burley's own full-resolution
+  sampling makes the specks; only half resolution or the separable method avoid them.
+- **A GPU capture** (PIX) was tried to find the pass; the three frames caught
+  had no specks (the weather had turned overcast), and a shader-level fix is out of reach anyway.
+- **Cost and picture** (a save in play, third person, side view, sunlit, world frozen, DLAA 5120x2160, switched live, B S S
+  B B S S B, 10 s each, PresentMon MsGPUBusy medians): Burley 24.95 ms, separable 24.73 ms. On a thigh, hand and skirt
+  crop the separable shots differ from Burley's no more than the same setting shot twice (grass and anti-aliasing
+  jitter move even when frozen); by eye the skin looks the same. Dialogue close-ups not compared.
+- **100 % or width?** Every render with specks was 5120 wide (5120x2160 here, 5120x1440 in the Steam report); the
+  clean ones 3413 (DLSS Quality) and 2560 (half-resolution skin scattering). That fits "100 %" and a width limit alike;
+  not measured. A first build switched at r.ScreenPercentage 100; the width rule (wider than 3840) replaced it.
+  Then a play session at 4K 16:9 with DLAA (3840x2160, a 100 % render): no specks (one session, by eye). So it is not
+  "100 %"; something in the render's size. 3840x2160 has more pixels (8.3 MP) than the 5120x1440 of the Steam report
+  (7.4 MP, specks), so the width rather than the pixel count fits, if that report is right; the cause inside Burley was
+  not found (the PIX frames missed the specks). A 5120x1440 window on this PC would separate width from pixel count.
+- **The option:** r.SSS.Burley.Quality set to 0 while the render width (the game window's client width x
+  r.ScreenPercentage / 100) is over 3840, the replaced value back at or below it; read and written through the game's
+  console manager (both copies of the int), once per second; the window found as the process's visible UnrealWindow.
+  The 100 % build followed DLSS DLAA / Quality / Balanced / DLAA (0 / 1 / 1 / 0) in a probe game. Self-test: the switch
+  logic against a fake variable, percentage and window width (8 checks).
+
 <a id="physanimnoemptylock"></a>
 
 ### No exclusive physics lock for animation parts with nothing to move (`PhysAnimNoEmptyLock`, 1.2.3)
@@ -1227,6 +1264,35 @@ those seconds keep the game's pace.
   - The engine's display data after the page's rebuilds, read from memory with the fix off and on, is identical
     (monitor, native resolution, all 24 resolutions, work area, DPI).
 
+<a id="monitornativefromwindows"></a>
+
+### Display resolutions for wide monitors (`MonitorNativeFromWindows`, `FullscreenAllResolutions`, game bug)
+
+[Explanation](how-it-works.md#monitornativefromwindows).
+
+- **Symptom** (AW3926QW 5120x2160 at 165 Hz): fullscreen lists only 3440x1440. Windows offers 30 resolutions,
+  and the engine's own `GetSupportedFullscreenResolutions` returns 25, including 5120x2160 and the DLDSR 6826x2880 /
+  7680x3240 (live call).
+- **Cause:**
+  - the page's list (exe+0x48EFAC0) comes from exe+0x31AB020, which:
+    - for borderless returns the monitor's native resolution only;
+    - for fullscreen keeps the monitor's modes whose aspect ratio equals native within 1e-8 and that are no wider
+      than native;
+  - native is FMonitorInfo +0x20/+0x24, set by GetMonitorsInfo (exe+0x1172DB0) from the EDID's first detailed timing;
+  - the monitor's registry EDID (three instances) has 3440x1440 there (pixel clock 231 MHz), with CTA and DisplayID
+    extension blocks after it.
+- **Borderless draws at the desktop's size anyway:** the probe game's window client was 5120x2160 while the page said
+  3440x1440.
+- **The fixes:**
+  - GetMonitorsInfo's one call (exe+0x11840B5) goes to a stub that then sets each monitor's native size to Windows'
+    preferred mode (QueryDisplayConfig + DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_PREFERRED_MODE, matched by desktop
+    position), when that mode is in the monitor's own list;
+  - the fullscreen filter's jnz (exe+0x31AB49E) becomes a jmp to the same end.
+- **Live:** "monitor 0 at 0,0: native 3440x1440 from its EDID, 5120x2160 from Windows' preferred mode", and the borderless
+  entry reads 5120x2160.
+- **Not checked:** the fullscreen list on screen, and HDR in exclusive fullscreen (switching a probe game to exclusive
+  fullscreen would take over the display).
+
 <a id="menuscreenshotfilter"></a>
 
 ### The menu's screenshot filtered in one go (`MenuScreenshotFilter`)
@@ -1348,6 +1414,36 @@ ledger, keys switched live in A-B-B-A order.
   lookups with repeats, clears, outside appends and reallocations; the test build compared every lookup in game:
   0 differences in ~300,000.
 
+<a id="autosavefollowsmenu"></a>
+
+### Autosaves with every autosave option off (`AutosaveFollowsMenu`, game bug)
+
+[Explanation](how-it-works.md#autosavefollowsmenu).
+
+- **Reported by players:** autosaves keep happening with every autosave option in the menu off.
+- **Found (2026-10-28, static analysis of build 19115871, Ghidra and dumpbin):** the old engine's autosave is
+  `exe+0x6703BC0` (it skips when a flag of the save manager is set or the player check `exe+0x65FB200` says
+  no, else saves as "autosave"). It has six callers: `exe+0x65D460D`, `exe+0x65F6165` (travel),
+  `exe+0x65FF287`, `exe+0x6731CBB` (an activated door), `exe+0x6793A44` (rest/wait) and `exe+0x6A07684`. The
+  Gameplay menu's handler `VGameplayMenuHandlersATO::SetGameplaySettings` (`exe+0x6571340`) stores its four switches
+  in `bSaveOnInteriorExteriorSwitch` (`exe+0x941DAD8`), `bSaveOnTravel` (`0x941DB28`), `bSaveOnRest` (`0x941DA80`) and
+  `bSaveOnWait` (`0x941DA68`), all `:GamePlay` (names from their static initialisers), and saves each through the
+  settings collection. Two callers check settings the menu never sets: the end of a level-up (`exe+0x65FEF80`)
+  checks `bSaveOnLevelUp:Gameplay` (`exe+0x941DAC8`, default 1) before `exe+0x65FF287`, and the scripts' `Autosave`
+  command (`exe+0x6A07670`) checks `bAllowScriptedAutosave:General` (`exe+0x8FAF520`, initialised to 1) before
+  `exe+0x6A07684`.
+- **Fix (`saves/autosave_menu.cpp`):** those two calls go to a stub and a wrapper that does not call the autosave
+  while all four menu settings are 0 (read at the call), and calls it as before otherwise. Found by three patterns
+  (the menu handler's four stores, each followed by a `lea rdx` of the same setting; the level-up's check and call;
+  the script command), each matching once; checks: the settings in `.data` and distinct, both calls reach the same
+  function in `.text` with the same save manager, `bSaveOnLevelUp` within 0x100 bytes of the menu's settings.
+  Rejected: setting `bSaveOnLevelUp` and `bAllowScriptedAutosave` from the menu's values (writes the player's
+  settings; a quest's save point would also stay off after the player switches an option back on, until a restart);
+  only documenting the two ini keys (players would need to know them, and a key set wrong keeps those
+  autosaves off with the menu's options on). Not changed: the door caller (`exe+0x6731CBB`, inside `exe+0x6731990`: an activated `TESObjectDOOR` with
+  flag 1, in its "Unequip" handler branch) and `exe+0x65D460D` (a flags-word bit check); what they are in play is
+  not known yet. Self-test: sites, patches and the wrapper's decisions with fakes.
+
 ## Frame generation
 
 <a id="framegenasynccompute"></a>
@@ -1459,6 +1555,77 @@ Game bugs (they also happen without OblivionPerfFix). Bugs in our own fixes are 
   only behaviour change is no crash. Not covered: freed memory reused by another actor before the next step.
 
 - **Results:** self-test with the real vtables and the crash's freed header; installed live (Kvatch plane runs).
+
+<a id="bow-sneak-1x"></a>
+
+### Bow sneak attacks at 1x (`BowSneakAttackFix`, game bug, off)
+
+[Explanation](how-it-works.md#bow-sneak-1x).
+
+- **Reported by players:** sneak attacks with a bow often say "Sneak attack for 1X damage" and do 1x, at random,
+  where Marksman sneak attacks should do 2x-3x (UESP lists it under the remaster's regressions). Reloading a save
+  shows the damage really is 1x.
+- **Found (2026-10-27, static analysis of build 19115871, Ghidra):** the old engine's perk settings
+  (`fPerkSneakAttackMarksman*Mult`, `fDamageSneakAttackMult`) are only registered at start-up, no code reads them. The
+  multiplier comes from the Unreal side, taken when the arrow lands:
+  1. `AVAmmunition:OnBounce` (exec thunk `exe+0x461B290`, body `exe+0x4834230`) and the hit box's handler
+     `exe+0x48092F0` (`UVHitBoxComponent:OnOverlapTriggered`, and called natively from `exe+0x48141B0`) call the
+     arrow-hit function `exe+0x48652E0` with (shooter, target, arrow).
+  2. That calls `AVPairedPawn::GetBaseSneakDamageMultiplierForCurrentWeapon` (`exe+0x4855D60`) on the shooter at that
+     moment: `WeaponsPairingComponent` (+0x7D8) -> `WeaponActor` (+0x168) -> virtual +0x768 (`exe+0x4858EA0`,
+     `AVWeapon.WeaponTypeTag` at +0x358), matched (tag or parent) against the rows of `UVOblivionRuntimeSettings`'
+     `WeaponSneakDamageMultiplierDataTable` (soft path at +0x2D0); the column follows Sneak (actor value 0x1F: <25, <50,
+     <75, <100, else Master). No matching row or the table not resolved: **1.0**. No `WeaponActor` (null or flagged
+     for destruction) does not give 1.0 by itself: `exe+0x48BB6C0` then uses a default tag (global at `exe+0x9306860`),
+     and the probe read 2.0 with `WeaponActor` null.
+  3. The value goes to the old engine in an `Arrow_hit_Reverse_Pairing` command; its handler (`exe+0x65572E0`) passes it
+     to the hit function `exe+0x65A5220` (`Actor.cpp`), which multiplies the arrow's damage by it and shows
+     `LOC_ME_SneakDamageMultiplier` with `round(value)`: the "1X" on screen is the multiplier used.
+- **When `WeaponActor` is empty:** `exe+0x48B7140` (the paired weapon form changes) destroys `WeaponActor` and sets it
+  to null, and `exe+0x48D09B0` makes the new one, at once or after an asynchronous asset load (spawned in
+  `exe+0x48A95A0`); unequipping clears it too. An arrow that lands in that window, or after the shooter switched or
+  put away the weapon while it flew, would get the default tag's value (not 1x, see above).
+- **Measured (2026-10-28, a UE4SS probe (not included), one session, iron bow, Sneak at the 2x column):** 26 arrows, each with an
+  `OnBounce` impact; the getter called by the probe every frame (and at each impact, in the same game-thread call just
+  before the game's own read) returned 2.00 the whole session, `WeaponActor` never changed. The recording of the same
+  session shows many "Sneak attack for 1x damage" messages between 2x ones. So the 1x is **not** a timing race on
+  `WeaponActor` or the table: the value the getter gives for the player pawn is 2.0 at every impact.
+- **Found (2026-10-28, a native probe (not included), one session):** the 1.0 comes from the **old
+  engine's own projectile impact**, not from the Unreal side. `exe+0x6665690` (the old engine's projectile impact,
+  reached from `exe+0x6952900`; it checks "Disable_Impact_System" but goes on) calls the shooter's hit-with-projectile
+  slot (+0x868 -> `exe+0x65A5160` -> slot +0x860 `exe+0x65A5220`) with the multiplier hard-coded to 1.0
+  (`movss xmm0,[exe+0x870FDAC]` at `exe+0x6665A20`) when the shooter is the player. All 15 Unreal-side hits queued
+  2.0 and reached `exe+0x65A5220` with 2.0 (shooter = the player pawn, same `WeaponActor` throughout). 9 calls came
+  with 1.0 from `exe+0x6665A4A`: 5 for the same old-engine arrow about 9 ms before the Unreal hit's 2.0 arrived, 4 for
+  arrows the Unreal side never reported a hit for. Which side sees the impact first is a race between the two
+  engines' projectile collision; when the old engine's is first (or the only one), the hit is "Sneak attack for 1X".
+- **Damage measured (2026-10-28, the native probe reading the target's health, actor value 8, around each call; one
+  session, 23 arrows at one soldier, iron bow):** both paths deal damage. Unreal's hit only (10 arrows): 2x (5.0).
+  The old engine's hit only (9 arrows): 1x (2.4-2.7), the sneak bonus lost. Both for the same arrow (4 arrows, the
+  old engine's about 8 ms first): 1x then 2x, 2.5 + 5.0 = 3x in all (the last one found the target already dead and
+  dealt 0). So the bug is a double impact path: the old engine's projectile impact should not apply its own hit to
+  the player's paired arrows (or should use the Unreal side's multiplier), and when both see the arrow, the target
+  takes the hit twice.
+- **Fix (`guards/bow_sneak.cpp`, 2026-10-28):** the handler's call to the hit thunk (`exe+0x65574B0`) and the old
+  engine's impact call through the attacker's vtable (`call [r10+868h]` at `exe+0x6665A43`, rewritten as a call to a
+  stub plus a 2-byte nop) go through wrappers, only for the player as attacker: the first hit of an arrow on a target
+  is made, a second one within 500 ms (either path) is not; the old engine's hit gets the Unreal side's last multiplier
+  for the player's arrow hits instead of 1.0, only for projectiles of the class those hits carried, and only once one
+  exists. Rejected: switching the old engine's impact off for the player (its 9 of 23 hits that the Unreal side never
+  reported would deal nothing); only correcting the multiplier (double hits would become 2x + 2x); only one hit per
+  arrow (the old engine is usually first, so double hits would become 1x); delaying the old engine's hit until the
+  Unreal one could arrive (same result as the fix, more code on the OblivionThread). Self-test: sites, patches and
+  the wrappers' decisions with fakes.
+- **Checked in play (2026-10-28, one session, iron bow, Sneak at the 2x column, 20 sneak shots at one target; the
+  fix's `[bowsneak] hit:` log lines):** every arrow hit once at 2.00 and the game said "Sneak attack for 2X damage"
+  each time. The old engine was first for 10 arrows (raised from 1.00 to 2.00; 1x in the stock game), the Unreal side
+  for the other 10; 5 of the old engine's hits were followed 8-9 ms later by the Unreal side's hit of the same arrow,
+  which was not made (a double hit in the stock game). No arrow was at 1.0: the session's first two arrows came by
+  the Unreal side. Off by default here because it changes damage.
+- **Ruled out:** the table being unloaded (`UVPairedAssetsLoadingSubsystem`'s start-up, `exe+0x48BF870` ->
+  `exe+0x48C4E40`, loads it and adds it to the root set); hit location and headshots (no input to the getter or to
+  the arrow damage); the old engine's detection check at the queued hit (`exe+0x65A5220`), which gives no sneak attack
+  and no message, not 1x.
 
 <a id="objectreplacecrashguard"></a>
 
