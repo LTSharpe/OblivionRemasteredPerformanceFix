@@ -138,6 +138,8 @@ DWORD WINAPI MonitorThread(LPVOID)
         if (g_collisionHooked) SetCollisionPrepareEnabled(cfg.prepareCollisionBehindLoadingScreen);
         SetEditorIdLookupGuardEnabled(cfg.editorIdLookupGuard);
         SetTrapTargetGuardEnabled(cfg.trapCrashGuard);
+        SetBowSneakAttackFixEnabled(cfg.bowSneakAttackFix);  // BowSneakAttackFix: no-op unless installed at start-up
+        SetAutosaveFollowsMenuEnabled(cfg.autosaveFollowsMenu);  // AutosaveFollowsMenu: no-op unless installed at start-up
         SetHavokPickWarningGuardEnabled(cfg.havokPickWarningGuard);
         SetFrameGenCrashGuardEnabled(cfg.frameGenCrashGuard);
         SetObjectReplaceGuardMode(cfg.objectReplaceGuard);
@@ -183,6 +185,7 @@ DWORD WINAPI MonitorThread(LPVOID)
         if (g_sceneAddHooked) SetPipelinedSceneAdd(ParallelHelpersAllowed(cfg) && cfg.pipelinedSceneAdd, cfg.pipelinedSceneAddMin);
         SetPipelinedBodyCreation(ParallelHelpersAllowed(cfg) && cfg.pipelinedBodyCreation);  // PipelinedBodyCreation: no-op unless found with ParallelStaticBodies installed
         SetGpuSceneParallelUpload(cfg.gpuSceneParallelUpload);  // GpuSceneParallelUpload: a console variable, set once registered
+        SetSeparableSkinAbove4K(cfg.separableSkinAbove4K);    // SeparableSkinAbove4K: r.SSS.Burley.Quality when wider than 4K (trade-off)
         SetDirtyTreeQuickInsert(cfg.dirtyTreeQuickInsert);  // no-op unless installed at start-up
         SetBulkIndexInsert(cfg.bulkIndexInsert, cfg.bulkIndexInsertMin, cfg.physicsInternalFlushParallel);  // BulkIndexInsert: no-op unless installed
         SetPhysicsQueueShrinkOnce(cfg.physicsQueueShrinkOnce);  // PhysicsQueueShrinkOnce: no-op unless installed with BulkIndexInsert
@@ -235,6 +238,8 @@ DWORD WINAPI MonitorThread(LPVOID)
             if (g_navLinkHooked) LogNavLinkFastStats();
             LogEditorIdLookupGuardStats();
             LogTrapTargetGuardStats();
+            LogBowSneakAttackFixStats();
+            LogAutosaveFollowsMenuStats();
             LogHavokPickWarningGuardStats();
             LogFrameGenCrashGuardStats();
             LogObjectReplaceGuardStats();
@@ -243,6 +248,7 @@ DWORD WINAPI MonitorThread(LPVOID)
             LogFrameGenCameraInfoStats();
             LogFrameGenPacingStats();
             LogDisplayModeCacheStats();
+            LogDisplayNativeStats();  // MonitorNativeFromWindows (no-op unless installed)
             LogImageResizeStats();
             LogReadbackConvertStats();
             LogScreenshotParallelStats();
@@ -250,6 +256,7 @@ DWORD WINAPI MonitorThread(LPVOID)
             LogPsoPrecompileStats();
             LogAnimTeardownParallelStats();
             LogCellBufferPacedEvictStats();
+            LogSeparableSkinAbove4KStats();
             LogFocusRestoreStats();
             LogMenuOpenFlashStats();
             if (g_physAnimHooked) LogPhysAnimNoEmptyLockStats();
@@ -388,6 +395,24 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
     // TrapCrashGuard (a crash guard, not a speed-up): installed only if enabled at startup; afterwards the ini switches it live.
     if (cfg.trapCrashGuard) ApplyTrapTargetGuard();
     else Log("[trap] disabled in OblivionPerfFix.ini (takes a restart to switch on)");
+    // BowSneakAttackFix (a game bug fix that changes damage back to the intended value): two calls in the OblivionThread's
+    // code, written only before game code runs and only if on at start-up; afterwards the ini switches it live.
+    if (cfg.bowSneakAttackFix) {
+        if (!beforeGameCode) Log("[bowsneak] can only be installed at start-up (version.dll), not installed");
+        else if (ApplyBowSneakAttackFix()) SetBowSneakAttackFixEnabled(true);
+    } else Log("[bowsneak] BowSneakAttackFix off in OblivionPerfFix.ini (takes a restart to switch on)");
+    // AutosaveFollowsMenu (a game bug fix: no autosave the menu's options say not to make): two calls in the
+    // OblivionThread's code, written only before game code runs and only if on at start-up; afterwards the ini switches it live.
+    if (cfg.autosaveFollowsMenu) {
+        if (!beforeGameCode) Log("[autosave] can only be installed at start-up (version.dll), not installed");
+        else if (ApplyAutosaveFollowsMenu()) SetAutosaveFollowsMenuEnabled(true);
+    } else Log("[autosave] AutosaveFollowsMenu off in OblivionPerfFix.ini (takes a restart to switch on)");
+    // MonitorNativeFromWindows / FullscreenAllResolutions: one call redirected / one jump changed, only if on at
+    // startup (before the game first reads its display metrics on the version.dll route).
+    if (cfg.monitorNativeFromWindows) InstallMonitorNativeFromWindows();
+    else Log("[display] MonitorNativeFromWindows off in OblivionPerfFix.ini (takes a restart to switch on)");
+    if (cfg.fullscreenAllResolutions) InstallFullscreenAllResolutions();
+    else Log("[display] FullscreenAllResolutions off in OblivionPerfFix.ini (takes a restart to switch on)");
     // HavokPickWarningGuard (a freeze guard, not a speed-up): installed only if enabled at startup; afterwards the ini switches it live.
     if (cfg.havokPickWarningGuard) ApplyHavokPickWarningGuard();
     else Log("[picks] disabled in OblivionPerfFix.ini (takes a restart to switch on)");

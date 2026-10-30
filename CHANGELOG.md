@@ -9,6 +9,29 @@ Downloads, checksums and build attestations: https://github.com/LTSharpe/Oblivio
 Bug fixes say whose bug it was: **game bug** = also happens without OblivionPerfFix (in the game, its engine or a
 driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 
+## Unreleased
+
+- **Game bug fixed: autosaves with every autosave option off** (`AutosaveFollowsMenu`, on): with all four autosave
+  options of the Gameplay menu off (rest, wait, travel, entering or leaving an interior) the game still autosaved after
+  every level-up and whenever a quest's script asked for a save, two autosaves the menu has no option for. They now
+  follow the menu too: while all four options are off, they are not made; with any option on, the game saves as
+  before. Checked in play. New key `AutosaveFollowsMenu` (1).
+- **Game bug fixed: the real resolution of wide monitors** (`MonitorNativeFromWindows`, `FullscreenAllResolutions`, on):
+  monitors wider than 4095 pixels often name a smaller resolution first in their EDID (an Alienware AW3926QW says
+  3440x1440 for its 5120x2160), and the game took that as native: borderless showed it, and fullscreen listed only
+  resolutions of exactly its shape (3440x1440 alone). The native resolution now comes from Windows' preferred mode, and
+  the fullscreen list shows every mode Windows offers. New keys `MonitorNativeFromWindows` (1) and
+  `FullscreenAllResolutions` (1). Start-up only.
+- **New switch, off by default: bow sneak attacks at 1x** (`BowSneakAttackFix`, game bug): both engines check where a
+  player's arrow lands; the new one uses the bow's sneak multiplier, the old one always 1x, and whichever sees the hit
+  first wins (in one session of 23 sneak shots: 10 at 2x, 9 at 1x, 4 hit twice). With 1 each arrow hits once, with the
+  sneak multiplier (checked in play: 20 of 20 at 2x). Off by default because it changes damage.
+- **New trade-off switch, off by default: magenta specks on skin** (`SeparableSkinAbove4K`): with Effects Quality Ultra
+  and a render wider than 3840 pixels (an ultrawide at DLAA or FSR Native AA), sunlit skin and cloth edges show glowing
+  magenta specks (a game bug, also without this DLL). With 1 skin scattering uses the engine's separable method
+  (`r.SSS.Burley.Quality 0`) while the render is that wide; skin looked the same at play distance, about 0.2 ms less GPU
+  time at 5120x2160. Live.
+
 ## 1.2.3-beta
 For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Thanks to MitochondriaOverlords for issue #5,
 to mkusm for pull request #25, to cgisquet for pull request #19, to Hexaae for issue #27, and to everyone who reported
