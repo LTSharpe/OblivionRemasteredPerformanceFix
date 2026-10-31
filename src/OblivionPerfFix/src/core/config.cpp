@@ -97,6 +97,8 @@ Config LoadConfig(const wchar_t* iniPath)
     if (c.taskWaitDeadlockGuard) c.taskWaitDeadlockGuard = 1;          // lab 2 (measure only) reads as on
     if (c.psoCompileThreadPool < -1) c.psoCompileThreadPool = -1;      // 0 the game's, N threads, -1 automatic
     c.menuOpenFlashFix = get(L"Fixes", L"MenuOpenFlashFix", c.menuOpenFlashFix) != 0;
+    c.vramCounterFix = get(L"Fixes", L"VramCounterFix", c.vramCounterFix) != 0;
+    c.shaderScreenAfterDriverChange = get(L"Fixes", L"ShaderScreenAfterDriverChange", c.shaderScreenAfterDriverChange) != 0;
     c.physAnimNoEmptyLock = get(L"Fixes", L"PhysAnimNoEmptyLock", c.physAnimNoEmptyLock) != 0;
     c.rigTraceReuse = get(L"Fixes", L"RigTraceReuse", c.rigTraceReuse);
     if (c.rigTraceReuse < 0 || c.rigTraceReuse > 2) c.rigTraceReuse = 1;  // 0 off, 1 on, 2 verify; anything else = on

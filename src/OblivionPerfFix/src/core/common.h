@@ -235,6 +235,10 @@ struct Config {
     bool hitchLedgerTickSplit = false; // HitchLedgerTickSplit (diagnostic, public since 1.2.3): diagnostics/tick_split.cpp, the
                                        // game thread's tick time by kind, class and group to OblivionPerfFix-ticksplit.csv
                                        // (needs HitchLedger=1; installed only if on at start-up, then live)
+    bool vramCounterFix = true;        // VramCounterFix: the Graphics page's "Show VRAM" counter shows the game's video
+                                       // memory use and budget instead of 0/0 (game bug; start-up install, live)
+    bool shaderScreenAfterDriverChange = true;   // ShaderScreenAfterDriverChange (game bug): the game's first-launch
+                                                 // shader screen at start-up after a driver/card change (start-up only)
     bool npcCreationPacing = true;    // NpcCreationPacing: far-away NPC creation spread over frames 
     int pacingBudgetMs = 4;           // not in the shipped ini: NPC unit time per frame before far units wait
     int pacingMinDistance = 4096;      // not in the shipped ini: only actors farther than this (game units) wait
@@ -747,6 +751,27 @@ bool ApplyImageResizeFix(bool beforeGameCode);  // redirects one call (two bytes
 void SetImageResizeFixEnabled(bool enabled);    // switchable live; off = the game's own loop
 void LogImageResizeStats();
 bool ImageResizeFixInfo(uint8_t** call, uint8_t** original, uint8_t** stub, void** hook);
+// vram_counter.cpp (VramCounterFix): the "Show VRAM" counter's query reads two adapter fields the shipping build
+// never updates (0/0); with both 0, filled from the monitor thread's DXGI sample (memory_monitor.cpp)
+bool ApplyVramCounterFix(bool beforeGameCode);  // redirects the query's two calls (start-up)
+void SetVramCounterFix(bool on);                // live
+void LogVramCounterFixStats();
+struct VramCounterInfo {
+    uint8_t* query;    // the game's query (budget MB, used MB)
+    uint8_t* calls[2]; // the overlay's call and GetUsedVRAMMB's exec thunk's call
+    uint8_t* stub;
+    void* hook;
+    uint64_t filled, gameValues, unknown;
+};
+bool VramCounterFixInfo(VramCounterInfo* out);
+void VramCounterFixTestSetup(void* original, bool (*latest)(uint64_t*, uint64_t*));  // self-test
+bool LatestGameVram(uint64_t* used, uint64_t* budget);  // memory_monitor.cpp: last DXGI sample (bytes); false = none yet
+// shader_screen.cpp (ShaderScreenAfterDriverChange, game bug): the start-up's Save_Settings check (which decides the
+// game's first-launch shader screen) answers "no save" once after the graphics card or driver changed
+bool ApplyShaderScreenAfterDriverChange(bool beforeGameCode, const wchar_t* dir);  // start-up only; dir: the DLL's folder
+bool ShaderScreenInfo(uint8_t** call, uint8_t** original, uint8_t** stub, void** hook);
+void ShaderScreenTestSetup(void* original, bool (*gpu)(char*, size_t), const wchar_t* recordPath);  // self-test
+void ShaderScreenPrecompileFinished();  // pso_precompile.cpp: the start-up precompile ended (records a pending card/driver)
 // UE's ImageResize for equal sizes (2x2 box filter, truncated, alpha 255 if forceOpaque) on 4-byte FColor pixels
 void BoxFilter2x2(int32_t w, int32_t h, const uint32_t* src, uint32_t* dst, bool forceOpaque);
 
@@ -781,6 +806,8 @@ bool OsPageCacheInfo(OsPageCacheInfoOut* out);
 bool InstallPsoPrecompileFast(bool beforeGameCode);  // SetBatchMode's entry detour (start-up)
 void SetPsoPrecompileFast(bool enabled);             // live (the game thread's timer applies it at its next check)
 void SetPsoPrecompileFastInGameMenus(bool enabled);  // live: Fast also in menus after play started (default: the game's pace)
+void SetPsoPrecompileScreenHold(bool on);  // ShaderScreenAfterDriverChange: UE's Fast, no cold guard, until the main menu
+bool PsoPrecompileScreenHold();
 void LogPsoPrecompileStats();
 struct PsoPrecompileInfoOut {
     uint8_t* setBatchMode;
@@ -812,6 +839,7 @@ void SetPsoPrecompileFastBudget(float ms, int coldQueue);  // live: render-threa
 void PsoPrecompileTestStatics(uint32_t* batchSize, float* batchTime, int64_t* active);  // self-test: fakes for the statics
 void PsoPrecompileWatchDriver();               // monitor thread, once a second: the driver's compile threads (cold-cache guard)
 void PsoPrecompileTestDriverBusy(double cores);  // self-test: one second's reading of the driver's compile threads
+int PsoPrecompileTestOwnThreads(uint32_t* mainThread);  // self-test: this process's threads (NtQuerySystemInformation) and the first one
 // anim_teardown.cpp (AnimTeardownParallel, lab prototype: dying NPC animation data's interpolators on helper threads; off by default)
 bool FindAnimTeardownParallel();                         // locate and verify everything (no patching)
 bool InstallAnimTeardownParallel(bool beforeGameCode);   // start-up only (three calls redirected)
@@ -1234,7 +1262,9 @@ bool SaveCallSiteValid(const GameModule& game, const uint8_t* call);  // an E8 h
 // saves/save_thumb.cpp (SaveThumbnailAsync): the save's thumbnail read back without the game / render thread waiting
 bool InstallSaveThumbAsync(uint8_t* readBackCall, void* getViewportScreenShot);  // start-up, from InstallSaveBytes
 void SetSaveThumbAsync(int mode, bool timers);
-bool SaveThumbTakeOver(void* viewport, const void* rect);  // game thread, in place of the read-back; true = taken over
+bool SaveThumbTakeOver(void* viewport, const void* rect, bool hdr = false);  // game thread, in place of the read-back (hdr: the HDR route's); true = taken over
+bool SaveThumbHdrInfo(uint8_t** readCall, void** toFColorSrgb);           // self-test: the HDR route's redirected read call and the quantiser (false: not installed)
+void SaveThumbTestHdrConvert(const uint32_t* r10, uint32_t n, uint32_t* out);  // self-test: the HDR route's tables on R10G10B10A2 pixels
 void LogSaveThumbStats();
 int SaveThumbTestDeliverOrder(const bool* save, int n, int* order);  // self-test only: the helper's delivery order
 // saves/save_refid.cpp (SaveRefIdIndex; lab: the SaveGame timer): the old engine save's formID -> refID lookups through a hash index

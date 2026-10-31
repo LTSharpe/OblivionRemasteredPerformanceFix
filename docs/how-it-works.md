@@ -1343,6 +1343,15 @@ same with and without. Closing the menu is not affected (that hitch is the world
 
 **Why the game can't change.** The same frame is copied and converted the same way: the maintainers' test build read every picture the game's way as well and compared every pixel (identical in all saves checked: quicksaves, autosaves, door autosaves; 480p and 4K with frame generation). Saves load back to the saved spot. The save system's store gets the picture before the save is allowed to go on, as in the game, where both happen before anything else runs. Installed while the game starts, only when the key is on (not on the OBSE64 route).
 
+**On an HDR screen.** With HDR on, the game reads the screenshot another way: as high-precision colour, 16
+bytes a pixel (177 MB at 5120x2160), which the main thread then turns into the save's ordinary picture one pixel at a
+time. The fix above only knew the first way, so in HDR every autosave still stopped the game: one frame of 115-175 ms
+about 2.5 s after each door or fast travel. The DLL now handles this way too. It takes the same copy without waiting, and
+a helper thread turns it into the same picture with tables made at start-up from the game's own conversion code (1,024
+entries per colour). The self-test runs the game's own conversion on all 1,024 values of every colour and on 8,192
+random pixels: same bytes. Measured in play (5120x2160, HDR10, eight door autosaves): no frame of 25 ms or more near any
+of the eight saves, against six frames of 115-174 ms before.
+
 ---
 
 <a id="saverefidindex"></a>
@@ -1694,6 +1703,59 @@ much lower frame rate with the key on. There it is left to the game, as without 
 **Why the image can't change.** Only the broken case changes: in tests the same robe stays within its normal drape (under 3 cm) instead of 5 metres off. Cloth that is simulating is not touched. Cloth that was already stretched before the fix straightens out when the game next rebuilds it.
 
 ---
+
+<a id="shaderscreenafterdriverchange"></a>
+
+### The shader screen comes back after a driver update (`ShaderScreenAfterDriverChange`, game bug)
+
+[Evidence](research.md#shaderscreenafterdriverchange).
+
+**The problem.** The very first time the game starts, it waits on a "Shaders preloading" screen while it builds its
+shaders. It decides that only once, by asking whether your settings file exists yet. A new graphics driver throws away
+the shaders the driver had already built, but your settings file is still there, so the screen never comes back. The
+game then builds everything in the background while you play, which stutters for the first few minutes. Players get
+the screen back by renaming `Save_Settings.sav`, which also resets every setting.
+
+**What we did.** The DLL notes your graphics card and driver version in `OblivionPerfFix-gpu.txt` next to itself. When
+they change, it answers "no settings file yet" to that one question only, so the game shows its own first-launch
+shader screen. Your settings load as usual. Behind the screen the shaders are built at the engine's fast pace (the game
+itself only asks for its slow background pace there); from the main menu on, `PsoPrecompileFast` works as usual. The
+new driver is noted once the shaders are done, so closing the game during the screen brings it back next time. The
+first start with the switch on only notes the card.
+
+**What changes.** After a driver or card change, start-up waits until the shaders are built, as the game does on its
+first launch, instead of building them while you play. That wait is the one thing you notice, so the switch is there
+to turn it off (0). Measured with a warm cache (the change faked): the world came up 65 s later, with no
+shader building left in play (without the screen: about 59 s of it in play). After a driver update (measured by
+emptying NVIDIA's shader cache before every start, 3 starts without the screen and 2 with it, straight into a flight
+along the Silver Road): you wait about 3 minutes on the screen, and then the flight is smooth: 1 hitch instead of about
+40, a worst frame of about 50 ms instead of up to 2 s, a 1 % low of about 70 fps instead of 60. The freeze when the
+world first appears is about 9 s instead of about 20 s. Start-up only.
+
+An earlier test with NVIDIA's shader cache switched off showed more small hitches with the screen than without. That
+was the test, not the game: Unreal drops a built shader from memory when it has not been used for about a minute and
+counts on the driver's cache to bring it back cheaply. With that cache switched off, everything the screen built had to
+be built again during play. After a real driver update the cache is empty but works, which is what this switch is for.
+
+<a id="vramcounterfix"></a>
+
+### The "Show VRAM" counter shows real numbers (`VramCounterFix`)
+
+[Evidence](research.md#vramcounterfix).
+
+**The problem.** A bug in the game. Turn on "Show VRAM" in the Graphics page and the corner of the screen says
+"VRAM: 0/0", on every PC (players report it on AMD and NVIDIA cards alike). The counter asks the engine for two numbers:
+how much video memory the game uses, and how much Windows lets it use (its budget). The engine keeps both in a small
+record on the graphics card's object, but in the game's release build nothing ever writes them, so both stay 0.
+
+**What we did.** The counter's question goes through two calls in the game's code, which the DLL sends through a small
+wrapper (found by their code and checked). The wrapper asks the game first. Only when both answers are 0 does it put in
+the same two numbers the engine was meant to supply, from Windows (DXGI), which the DLL already reads once a second for
+its memory line in the log. If a game update fixes the record, the game's own numbers are shown unchanged.
+
+**What changes.** The counter's two numbers, and only while you have it switched on. Checked in game on an RTX 5090: with
+the fix "VRAM: 7,635/31,419", switched off live "VRAM: 0/0". On by default; installed when the game starts, then
+switches live.
 
 ## Memory safety and diagnostics
 

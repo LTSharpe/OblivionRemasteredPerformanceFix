@@ -1239,6 +1239,22 @@ the game's pace came back in play, and the precompile ended after ~6 minutes, ab
 without the fix. Start-up videos before the main menu count as play for the fix (no menu freeze yet), so
 those seconds keep the game's pace.
 
+**Start-up crash in the driver-thread check** (2026-10-29). Two start-up crashes
+(2026-10-27 14:13 and 2026-10-29 00:59, 2 in roughly 40 launches since the guard's driver-thread reading existed) on
+the monitor thread: access violation calling address 0. The 2026-10-29 dump: the crashing frame returns into
+chrome_elf.dll+0x14D7 (CEF 90.6, the game's own Engine\Binaries\ThirdParty\CEF3), which had called a function pointer
+it keeps at +0x11E000; below it chrome_elf+0x1902 (a 10-argument hook, NtMapViewOfSection's shape), kernel32, and our
+call to Thread32Next. Toolhelp's Thread32First/Next map the snapshot with NtMapViewOfSection on every call, one call per
+thread on the PC (about 7,000 per search here), and they do it outside the loader lock. Chromium's chrome_elf hooks
+NtMapViewOfSection while it loads, under the loader lock, which normal DLL loads respect; a call between the hook going
+in and the original's address being stored jumps to 0. Reading: our search is the one caller that can land in that
+window, thousands of times per second while it runs. (The window itself is from how chrome_elf installs its hook; the
+pointer's value could not be read, the dump does not hold that page.) The fix lists this process's threads with one
+NtQuerySystemInformation(SystemProcessInformation) call, which copies into our buffer and maps nothing; the game
+thread at install (the first-created thread) comes from the same list. Self-test: the list against a snapshot in the
+test process (same count, same first thread). Not reproducible on demand, so the check is the absence of the crash over
+time.
+
 ## Menus
 
 <a id="displaymodecache"></a>
@@ -1374,6 +1390,37 @@ ledger, keys switched live in A-B-B-A order.
   cache listener first, then the save callbacks (the save callback's event lets the save continue, which reads the
   cache). Taken over only when every listener is the save's callback or the cache; others (pause-menu save, rest/wait)
   run the game's way.
+- **HDR route (2026-10-30).**
+  - Found (WPR CPU trace of a play session, 5120x2160 HDR10, RTX 5090): every autosave frame was 115-174 ms (six in
+    one session, about 2.5 s after each fade-in). In the ledger it is game-thread work late in the frame (post 110-165 ms,
+    sync 0). On the game thread, 45 of 72 samples were in ProcessScreenShots' FLinearColor -> FColor loop
+    (exe+0x3223140), the rest in the save's callback and allocations.
+  - Why the SDR takeover missed it: a DIAG at the takeover logged no call. ProcessScreenShots picks its read by the
+    viewport's HDR flag (FViewport vtable +0x40). The SDR read is GetViewportScreenShot (exe+0x37E4F30, the call the fix
+    redirects). The HDR read is GetViewportScreenShotHDR (exe+0x37E4FB0): ReadLinearColorPixels (exe+0x37F32F0), the same
+    render command shape, lambda exe+0x37D2B50 calling RHIReadSurfaceData's FLinearColor overload (vtable +0x240). With
+    delegate listeners and the delegate cvar on, it then converts per pixel with FLinearColor::ToFColorSRGB
+    (exe+0xEAB6A0), sets alpha 0xFF and broadcasts through the same call.
+  - Identity: the D3D12 read (exe+0x252B510) converts the back buffer's raw rows with exe+0x251C400. Its format-18
+    (A2B10G10R10) case multiplies each 10-bit channel by 1/1023.f (exe+0x709E164 = 0x3A802008). ToFColorSRGB's channels
+    are independent (one sRGB table, per-lane constants). So per channel, table[v] = ToFColorSRGB(v x 1/1023.f), built
+    with the game's function. The self-test calls the mapped exe's converter and quantiser on every 10-bit value per
+    channel plus 8,192 random pixels and compares: 0 differences. Other back-buffer formats: the render thread does the
+    stock linear read into the marker, and the helper applies the game's ToFColorSRGB per pixel.
+  - Result (a play session, eight door autosaves in HDR10): every picture went through the async copy (GPU wait
+    10.8-21.4 ms, conversion 2.7-6.4 ms, the save's callbacks 10.2-19.1 ms, all on the helper). No game-thread frame of
+    25 ms or more within 1.5 s before to 0.5 s after any delivery; before, six frames of 115-174 ms (median about 118).
+    The new autosaves' thumbnails in the Load menu were checked: they look as before.
+  - Benchmark (2026-10-30, `cheydinhal` scene `inn-door`, profile `native-nofg` with HDR10 on, `Altar.SaveOnLoading 1`
+    for the run so both doors autosave; fresh launches, on/off interleaved, 5 runs each; the frame of each save found
+    from the save file's time, 300 ms before to 200 ms after): entering the inn, worst frame off 100.6 ms (98.1-104.0),
+    on 11.8 ms (10.7-12.5); leaving it, off 126.1 ms (96.7-137.2), on 22.0 ms (20.5-22.5; one run's second save fell
+    after the frame capture ended). Ledger: every off save had a game-thread frame of 97-150 ms of its own work
+    (actor or post time, sync about 0). No on save had a frame of 25 ms or more, except the one past the capture: a
+    108 ms frame that is the game thread waiting for the render thread (sync 95 ms), the run's last ledger frame, so
+    the runner's end of run rather than the read (the picture went through the async copy, per the log). On the
+    helper: GPU copy wait 6.5-10.8 ms, conversion 2.5-6.6 ms, the save's callbacks 4.6-11.3 ms.
+
 
 <a id="saverefidindex"></a>
 
@@ -1809,6 +1856,107 @@ Game bugs (they also happen without OblivionPerfFix). Bugs in our own fixes are 
   running cloth and the normal simulation tick are untouched. All layouts are checked by pattern at start-up.
 - **Results:** guard 300.0 cm -> 0.0001 cm; grey robe (Ilav's asset) 500 cm -> median 0.24 / max 2.83 cm (its own drape);
   rotation, LOD 2 and the non-adjacent LOD 2 -> 0 also clean; ordinary simulation after resuming unchanged.
+
+<a id="shaderscreenafterdriverchange"></a>
+
+### The first-launch shader screen after a driver change (`ShaderScreenAfterDriverChange`, game bug)
+
+[Explanation](how-it-works.md#shaderscreenafterdriverchange).
+
+- **What decides it** (static, build 19115871): at start-up exe+0x44E1290 sets the start-up movie player's +0x89 to
+  "no Save_Settings save" (UGameplayStatics::DoesSaveGameExist at exe+0x31A4F30, called at exe+0x44E12C4: the platform
+  save system's vtable +0x10). exe+0x44E8350 adds the ShaderLoadingScreenMovie, its timeout and the precompile callbacks
+  (begin: r.ShaderPipelineCache.MaxPrecompileTime saved and set to 0; complete; clean-up: restored, SetBatchMode
+  Background) only while +0x89 is set; only those read it. The screen's widget (exe+0x44E2330) shows "Shaders
+  preloading:" and "Compiling shaders to optimize performance during gameplay." This also explains the PCGamingWiki tip
+  (rename Save_Settings.sav).
+- **The change:** that one call goes through a wrapper. It compares DXGI's vendor, device, subsystem, revision and
+  user-mode driver version of the hardware adapter with the most dedicated memory with `OblivionPerfFix-gpu.txt`; on a
+  difference it answers "no save" to this caller, and tells PsoPrecompileFast to apply UE's Fast values (16 ms, no
+  cold-cache guard) until the main menu: the game itself asks only for Background behind the screen. The record is
+  written when PsoPrecompileFast sees the precompile end.
+- **First build, without the Fast pace:** with a warm cache the screen held start-up past the benchmark's 180 s
+  main-menu limit on four launches in a row (closed by the runner each time, no crash): 8 pipelines per frame at 1 ms,
+  the precompile unfinished after 162 s.
+- **Result** (2026-10-28, probe games, warm cache, the tester's own settings, the record set to an older driver): the screen
+  shown, 49.3 s at the Fast pace, the precompile finished at +73.9 s after load and the world at +90 s; the record
+  written then. The same launch without the change: world at +24 s, precompile finished at +82.9 s (about 59 s of it in
+  play at the game's pace).
+- **Cold cache** (2026-10-28 20:30-21:25; NVIDIA Shader Cache Size disabled, the game's user pipeline cache
+  moved aside before every run, DXCache unchanged at 135 files throughout; a test build; native-nofg; fresh launch
+  straight into silver-road-north with -SkipPsoWait -NoWarmup; off = the switch at 0, on = 1 with the record set to an
+  older driver; 3 flights each, medians and ranges):
+  - Start-up, DLL load to the world: off 11.8 s (11.7-13.0), on 204 s (197-208). The precompile ended at +254 s
+    (253-265) in play with the switch off, at +172 s (167-176) behind the screen with it on (156-166 s at the Fast pace).
+  - Flight: worst frame off 2108 ms (1965-2253), on 335 ms (275-473); 1 % low off 64 (58-64), on 75 (70-78); hitches
+    off 59 (55-67), on 91 (85-93); hitch time off 7.8 s (7.5-8.1), on 9.6 s (9.0-9.7); fps 107 vs 109. No range
+    overlaps for worst frame, 1 % low, hitches and hitch time.
+  - Why the screen had more hitches here (the same runs, read again): every on-side hitch is the game thread waiting
+    for the render thread (ledger: post_ms ~ sync_ms), at the same route spots in each run, mostly 60-250 ms; UE's PSO
+    pool is idle in play (2-18 % of a core) while NVIDIA's driver threads compile (100-165 % in the first 60 s). Off:
+    about half the hitches are game-thread actor time and about 25 per flight are render-thread waits; off's 2.1 s worst
+    frame is the flight's first frame. The cause, from the code: UE's runtime PSO cache drops PSOs not used since the
+    last check, every r.pso.evictiontime seconds (60; exe+0x26376C0 calls the cache's discard-and-swap at
+    exe+0x2633EA0), and counts on the driver's disk cache to make the next creation cheap. With that cache switched off,
+    the PSOs the screen built were long gone by the flight and were rebuilt from scratch on the render thread. This
+    condition does not occur after a real driver update (an empty but writable cache), so it is a test artefact.
+  - Harness note, the same for both sides: the runner moved the game's user pipeline cache aside before every run.
+- **Cold cache, writable** (2026-10-28 23:03-23:54; NVIDIA Shader Cache Size back at Driver Default, the DXCache files
+  moved aside (same volume, never deleted) before every run so each launch starts with an empty cache the driver can
+  write; 20 files held open by other programs stayed, none of them the game's; the rest as above; order off on on off
+  off on, then on on):
+  - Flight: off (3) fps 98.8 (98.1-100.3), 1 % low 60.7 (60.2-60.9), worst 2041 ms (308-2049), hitches 41 (39-46),
+    hitch time 5.0 s (3.9-6.4); on (2) fps 102.1 / 103.6, 1 % low 68.8 / 72.6, worst 50 / 56 ms, 1 hitch each, hitch
+    time 0.04 s. Ledger: no game-thread frame of 40 ms or more in either on flight; off 43-47, mostly actor time.
+  - Start-up: the precompile ended behind the screen at +165-178 s after load with the switch on, in play at +255-260 s
+    with it off. The first play frame after the teleport to the Silver Road (before the flight, not measured) took
+    19.9-20.6 s off and 8.5-9.2 s on (post_ms, not a render-thread wait).
+  - Three of the five on launches stopped there: the OblvBench command sent during that 8.5-9.2 s frame timed out (the
+    bridge waits 8 s) and the runner gave up on the flight. Lab only; the two that passed sent it after the frame.
+  - Reading: with a writable cache the screen removes the flight's shader hitches almost entirely. Few runs (2 on), but
+    no overlap on any measure. On by default: it restores the game's own first-launch
+    behaviour where the game skips it, and the world does not run behind the screen; the cost is the screen's wait
+    (about 3 minutes with an empty cache), once per driver or card change.
+  - Harness, lab only: the runner's 180 s main-menu limit raised for these runs ($env:OPF_MENU_WAIT_SEC), and the
+    OblvBench bootstrap's frame-loop wait raised from 20 to 600 s (the screen runs no game frames; with 20 s the
+    bootstrap fell back to its async poll and the flight could not start: two screen runs lost, repeated).
+- **Upstream's cold-cache guard on NVIDIA** (found on the way; fresh launches A B B A A B B A A B, warm cache, A =
+  PsoPrecompileColdQueue 1000, B = 0, which also lifts the menu budget to 16 ms): waiting at the main menu, A 48.6 s
+  (46.8-49.0) and B 48.1 s (47.1-48.7) to the precompile's end, no trips. Going straight into the world (the tester's own
+  settings), A 73.0 s (68.3-74.0) with the guard tripped 5 of 5 times at +33 s on "driver threads" (NVIDIA's D3D
+  background threads at 99-123 % of a core while the world loads), B 59.4 s (57.7-61.8), no trips. A false trip with a
+  warm cache: the driver is compiling the new world's pipelines, not a cold cache. Unchanged here.
+- **Self-test:** the call at exe+0x44E12C4 to DoesSaveGameExist at exe+0x31A4F30 and the flag store; the wrapper with a
+  fake save check and a fake card: first record, unchanged, changed (the Fast hold set, the old record kept until the
+  precompile ends), no settings save at all.
+
+<a id="vramcounterfix"></a>
+
+### The "Show VRAM" counter (`VramCounterFix`, game bug)
+
+[Explanation](how-it-works.md#vramcounterfix).
+
+- **Reports:** Steam discussions for the game: the counter reads 0/0 on AMD and NVIDIA cards; one player quotes support
+  calling it a known bug. Reproduced here (RTX 5090, with the fix off): "VRAM: 0/0".
+- **What draws it** (static, build 19115871): the widget class AltarGraphicsSettingsDebugInfo formats VRAMText as
+  "VRAM: {0}/{1}" in its update (exe+0x48C2170), with the two outputs of one query, exe+0x47B6AF0, called at
+  exe+0x48C2511. The Blueprint function GetUsedVRAMMB is a thin exec thunk around the same query (its call at
+  exe+0x46019EB). The query zeroes both outputs, then reads GDynamicRHI (exe+0x9206108, as pinned by RdgSubmitBatch's
+  self-test), calls its vtable+0x30 (the RHI behind any validation layer), takes the first adapter of the array at
+  +0xC8, and scales two 64-bit fields at +0x760 and +0x768 by 2^-20 (MB). The widget passes the +0x768 value as {0}
+  and the +0x760 value as {1}: the order of DXGI's video memory info (budget, then current use), so the counter was
+  meant to read use / budget.
+- **Why 0:** nothing in the shipping build refreshes those two fields; read in a probe game they stay 0 (the counter shows
+  0/0 for the whole session).
+- **The change:** both call sites go through one stub to a wrapper that calls the game's query, then, only if both
+  results are 0, writes the monitor thread's latest local-segment DXGI sample (`QueryVideoMemoryInfo` on the GPU the
+  game uses the most memory on: budget and current use, in MB). The game thread only reads two atomics; the sample is
+  at most a second old. If the game's own numbers are non-zero they are passed through and counted.
+- **Result** (2026-10-28, probe game, IC Market, Show VRAM on, switched live): on "VRAM: 7,635/31,419", off
+  "VRAM: 0/0", on again "VRAM: 7,571/31,419"; the log's first fill was 8038 / 31419 MB (the 5090's budget is 31.4 GB).
+- **Self-test:** the query, both calls and GDynamicRHI at their build-19115871 addresses, both calls going to the stub;
+  the wrapper with a fake query and a fake sample fills 0/0, passes the game's own numbers through, leaves 0/0 before
+  the first sample and while switched off.
 
 ## Memory safety and diagnostics
 

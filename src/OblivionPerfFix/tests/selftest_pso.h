@@ -10,6 +10,8 @@
 #include <cstring>
 #include <thread>
 
+#include <tlhelp32.h>
+
 namespace pso {
 int lastMode = -1, sets = 0;
 void FakeSetBatchMode(int mode)
@@ -244,6 +246,32 @@ static void Run(const GameModule& game)
     hook(0);
     tick();
     Check(lastMode == 1 && !now().cold, "a new precompile in the menu: the faster pace");
+    {
+        // the thread list without a Toolhelp snapshot (no NtMapViewOfSection: chrome_elf's start-up hook race), against one
+        uint32_t first = 0;
+        const int n = PsoPrecompileTestOwnThreads(&first);
+        int snapCount = 0;
+        DWORD snapFirst = 0;
+        ULONGLONG snapFirstTime = ~0ull;
+        const HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        THREADENTRY32 te{};
+        te.dwSize = sizeof te;
+        for (BOOL ok = snap != INVALID_HANDLE_VALUE && Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+            if (te.th32OwnerProcessID != GetCurrentProcessId()) continue;
+            ++snapCount;
+            if (HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID)) {
+                FILETIME c, e, k, u;
+                if (GetThreadTimes(h, &c, &e, &k, &u)) {
+                    const ULONGLONG made = (static_cast<ULONGLONG>(c.dwHighDateTime) << 32) | c.dwLowDateTime;
+                    if (made < snapFirstTime) snapFirstTime = made, snapFirst = te.th32ThreadID;
+                }
+                CloseHandle(h);
+            }
+        }
+        if (snap != INVALID_HANDLE_VALUE) CloseHandle(snap);
+        Check(n > 0 && n == snapCount, "pso thread list: this process's threads from NtQuerySystemInformation, the same count as a snapshot");
+        Check(first != 0 && first == snapFirst, "pso thread list: the first-created thread (the game thread at install) as the snapshot finds it");
+    }
     PsoPrecompileTestDriverBusy(0.6);
     tick();
     Check(lastMode == 1 && !now().cold, "the driver's threads busy for one second: still the faster pace");

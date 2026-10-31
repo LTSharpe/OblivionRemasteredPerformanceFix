@@ -153,6 +153,7 @@ DWORD WINAPI MonitorThread(LPVOID)
         }
         if (g_displayHooked) SetDisplayModeCacheEnabled(cfg.displayModeCache);
         if (g_resizeHooked) SetImageResizeFixEnabled(cfg.screenshotFilterFast);
+        SetVramCounterFix(cfg.vramCounterFix);                  // VramCounterFix: no-op unless installed
         SetReadbackConvertMode(cfg.screenshotReadbackConvert);  // ScreenshotReadbackConvert: no-op unless installed at start-up
         SetScreenshotParallel(cfg.screenshotParallel);          // ScreenshotParallel: no-op unless installed at start-up
         if (g_focusHooked) SetFocusRestoreEnabled(cfg.restoreFsrAfterAltTab);
@@ -245,6 +246,7 @@ DWORD WINAPI MonitorThread(LPVOID)
             LogFrameGenPacingStats();
             LogDisplayModeCacheStats();
             LogImageResizeStats();
+            LogVramCounterFixStats();  // VramCounterFix (no-op unless the counter was read)
             LogReadbackConvertStats();
             LogScreenshotParallelStats();
             LogOsPageCacheStats();
@@ -438,6 +440,9 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
     // MenuScreenshotFilter: installed only if enabled at startup; afterwards the ini switches it live.
     if (cfg.screenshotFilterFast) g_resizeHooked = ApplyImageResizeFix(beforeGameCode);
     else Log("[resize] disabled in OblivionPerfFix.ini (takes a restart to switch on)");
+    // VramCounterFix (game bug): the "Show VRAM" counter's two query calls redirected always (the wrapper passes the
+    // game's numbers through unless both are 0, and does nothing while the key is 0), so it can be switched live.
+    if (ApplyVramCounterFix(beforeGameCode)) SetVramCounterFix(cfg.vramCounterFix);
     // ScreenshotReadbackConvert: installed only if enabled at startup; afterwards the ini switches it live (0 / 1 / 2 = verify).
     if (cfg.screenshotReadbackConvert) {
         if (ApplyReadbackConvertFix(beforeGameCode)) SetReadbackConvertMode(cfg.screenshotReadbackConvert);
@@ -550,6 +555,9 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
     } else if (cfg.physicsPushParallel)
         Log("[push] PhysicsPushParallel kept off: %u usable logical processors (needs %d, ParallelMinProcessors)", UsableLogicalProcessors(), cfg.parallelMinProcessors);
     else Log("[push] off in OblivionPerfFix.ini (takes a restart to switch on)");
+    // ShaderScreenAfterDriverChange (game bug): installed only if on at start-up (the decision is made once, early).
+    if (cfg.shaderScreenAfterDriverChange) ApplyShaderScreenAfterDriverChange(beforeGameCode, dir.c_str());
+    else Log("[shaderscreen] ShaderScreenAfterDriverChange off in OblivionPerfFix.ini (takes a restart to switch on)");
     // Diagnostic HitchLedger: installed only if on at startup (the tick-group entry detour, before BulkIndexInsert, whose lab
     // probe times the same entry; the frame-end sync call; read-only counters); afterwards the ini switches recording live.
     if (cfg.hitchLedger) {
