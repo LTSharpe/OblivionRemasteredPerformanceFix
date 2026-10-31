@@ -729,6 +729,40 @@ Memory: the game's private bytes and working set rose by about the cap (0-60 MB)
 
 **Measured:** Imperial City flight, small profile: tiles built inside a wait 6 in 10 flights without the fix (frame stalls of 82 ms to 2.6 s), 0 in 7 with it (largest tick-group-0 wait 29 ms); 4K FG test completed without a crash.
 
+<a id="vtstreaminguploads"></a>
+
+### Streamed virtual texture pages per frame (`VtStreamingUploads`, trade-off, off)
+
+[Explanation](how-it-works.md#vtstreaminguploads). Off by default: detail arrives sooner, so the picture differs
+during the first seconds after a door.
+
+- **Found:** after the Imperial City Waterfront lighthouse exit (a save at the lighthouse door, 5120x2160) the stair
+  walls ~40 m away come in blotchy without mortar lines; their 1-px detail at full resolution rises 0.052 -> 0.060 from
+  ~5 to ~10 s after the fade-in starts, contrast 0.46 -> 0.39 (patchy tint evening out), 4-px detail flat. Not Lumen
+  (reflections or diffuse indirect off: the same). The console variable `r.VT.MaxUploadsPerFrame.Streaming` set to 64
+  from the console: final look as the fade completes (~2.4 s), 1-px detail 0.060 by ~4.5 s (2 + 2 runs, with and
+  without `r.VT.MaxUploadsPerFrame` 64, vs 2 default runs).
+- **Why no ini works:** the variable is registered in code with default 0 and flags render-thread-safe | scalability
+  (registration exe+0xA69B5B); the game's scalability settings set 4 after the ini layers. Engine.ini [SystemSettings],
+  [ConsoleVariables] and a user DeviceProfiles.ini all left it at 4.
+- **The change:** the registration found by name and shape (as `GpuSceneParallelUpload`); both copies of the value
+  written from the monitor once a second whenever the value is not N; N wins while the key is on; 0 puts back the
+  game's value if it is still N. In play the game writes its 4 once, ~5 s after start-up; the fix writes N again.
+- **Door with the switch (ini, DLL route):** wall final look at 2.4 s, 1-px detail 0.058 at 3.5 s, 0.060 at 4.5 s:
+  the same as the console runs.
+- **Flights (ABBA x5 each, native-nofg 5120x2160 FG off, fresh launches, 0 vs 64; medians of 5):**
+
+  | scene | fps | 1% low | hitches/min | frames >= 50 ms | RenderThread ms | RHIThread ms |
+  |---|---|---|---|---|---|---|
+  | silver-road-north | 99.9 -> 105.4 | 73.9 -> 71.7 | 8.2 -> 5.8 | 1 -> 0 | 3.64 -> 3.56 | 3.41 -> 3.19 |
+  | blackwood-flight | 72.1 -> 76.8 | 48.6 -> 53.1 | 9.3 -> 7.8 | 0 -> 0 | 4.46 -> 4.17 | 3.64 -> 3.46 |
+  | blackwood-return | 79.5 -> 79.5 | 57.3 -> 55.4 | 1.9 -> 3.8 | 0 -> 0 | 3.81 -> 3.80 | 3.51 -> 3.25 |
+
+  Spreads are wide on both sides (blackwood fps 66-97 with either value; silver-road 94-108 vs 81-109, the 81 a run
+  PresentMon recorded CPU-side only): **within noise**, no cost seen on any thread. Video memory peak (the DLL's
+  [mem] lines) 8.25-8.75 GB with 0, 8.32-8.75 GB with 64. In every 64 run the game set its 4 back once ~5 s after
+  start-up and the fix set 64 again (log counter 1).
+
 <a id="navlinkfast"></a>
 
 ### Navigation tiles linked with less searching (`NavLinkFast`)
@@ -1254,6 +1288,170 @@ old engine's ordinary frame work. `CellBufferPacedEvict=1` is on by default.
   | 720p, door exits | 144-199 ms (median 164) | 29-60 ms (median 37-41) |
   | 4K + frame generation, door exits | 123-136 ms | 18-26 ms, no slow frame left in the fade-in |
   | Fast travel, 720p / 4K | 86-147 / 77-129 ms | 36-59 / 19-36 ms |
+
+<a id="streambehindloadingscreen"></a>
+
+### Textures streamed behind the loading screen (`StreamBehindLoadingScreen`)
+
+[Explanation](how-it-works.md#streambehindloadingscreen). Found and measured on a Ryzen 7 9800X3D / RTX 5090.
+
+- **Found:** with `PrepareCollisionBehindLoadingScreen` on, the picture after a door still comes back late. A WPR trace
+  at 5120x2160 showed the fade-to-game frame (150-320 ms, the game thread mostly in ~10 ms timed waits) inside the
+  game's fade handler (`exe+0x488CA80`), which sets `r.Streaming.PoolSize` back and calls the streaming manager's
+  stream-all-resources (`exe+0x30D6CB0`): the block loop (`exe+0x30ACCF0` -> `exe+0x37709C0`) waits until the new
+  view's textures are created (`RHIAsyncCreateTexture2D`, `exe+0x254A8D0`), with under 3 of 16 cores busy.
+
+- **Cause:** the transition's loading-start handler (`exe+0x488C4C0`) stores the pool size in a TOptional
+  (transition+0x234 / +0x238) and sets the pool to 1 MB, dropping every streamed mip for the loading screen. When the
+  heavy loading is over, `exe+0x4882730` arms the fade gate, a 0.5 s looping timer (`exe+0x4878670`): world partition
+  streaming completed (`exe+0x38B7BF0`), no pending travel (`exe+0x3864220`), no async loading (global query at
+  `exe+0x8DAA2E8`), then fade-to-game on the next tick. Everything the fade-in waits for could have streamed while the
+  loading screen idled.
+
+- **The change:** a detour of the gate-arming function remembers the transition; per frame (NpcCreationPacing's frame
+  hook), once the gate is armed and async loading is idle and no travel is pending, the fix sets the stored pool size
+  back through the same console variable call as the fade handler (cached by the game at `exe+0x9306EA8`, set by code)
+  and runs the streaming manager's non-blocking update (vtable +0x10, `exe+0x30D9650`, the update stream-all runs first)
+  once per frame until fade-to-game clears the gate. A diagnostic, `DoorDiag` (off, not in the shipped ini), times
+  every stream-all, the loading-screen timeline and render-target pool misses.
+
+- **Tried first:** starting when the gate's own three checks pass (evaluated per frame) gave no lead time: during the
+  freeze they only turn true at the gate's tick, whose first call advances level streaming. Starting right at arming
+  removed the wait too, but in 2 of 5 native runs the first exit's loading screen took one more gate tick (+0.45 s):
+  its streaming competed with the level's last loads. Waiting for async loading to be idle does not (2 of 10 runs
+  with one more tick, the fix off 2 of 15: the gate's own phase).
+
+- **Result** (Cheydinhal inn exit / entry / second exit, 5 + 5 fresh launches per resolution, order-balanced; DoorDiag
+  on both sides; the arrival gap is the longest PresentMon present interval around the fade-in):
+
+  | | fade-in's texture wait | last image held before the world appears | loading screen (freeze -> fade-in) |
+  |---|---|---|---|
+  | 5120x2160, off | 310 / 150 / 299 ms | 539 / 225 / 459 ms | 5.59 / 2.90 / 3.41 s |
+  | 5120x2160, on | 8 / 11 / 8 ms | 230 / 75 / 174 ms | 5.60 / 2.88 / 3.43 s |
+  | 720p, off | 258 / 97 / 267 ms | 501 / 163 / 432 ms | 5.58 / 2.90 / 3.47 s |
+  | 720p, on | 9 / 11 / 8 ms | 226 / 73 / 167 ms | 5.56 / 2.90 / 3.49 s |
+
+  Video memory peak per run unchanged within spread (11.47 vs 11.67 GB at 5120x2160, 9.30 vs 9.22 GB at 720p). Image:
+  the visual pass (7 Cheydinhal views, two runs per side) "same" against the fix-vs-fix floor; screenshots every
+  100 ms through an inn exit showed the same sequence and equally sharp textures from the first faded-in frame.
+  Game-thread cost: 0.1-1 ms per loading-screen frame for the last 0.3-2.2 s of a transition.
+- **City gate and fast travel** (5120x2160, 3 + 3 fresh launches, order-balanced; the same build and DoorDiag):
+
+  | | fade-in's texture wait | last image held before the world appears | loading screen (freeze -> fade-in) |
+  |---|---|---|---|
+  | Cheydinhal west gate in / out / in / out, off | 255 / 207 / 248 / 208 ms | 437 / 433 / 420 / 434 ms | 3.77 / 4.13 / 3.82 / 4.12 s |
+  | Cheydinhal west gate in / out / in / out, on | 9 / 3 / 9 / 2 ms | 180 / 213 / 166 / 211 ms | 3.73 / 4.15 / 3.80 / 4.12 s |
+  | Fast travel to Cheydinhal / Weye / Leyawiin / Imperial City, off | 254 / 234 / 170 / 264 ms | 421 / 403 / 327 / 373 ms | 5.78 / 6.83 / 5.80 / 5.46 s |
+  | Fast travel to Cheydinhal / Weye / Leyawiin / Imperial City, on | 9 / 5 / 9 / 10 ms | 159 / 160 / 144 / 113 ms | 5.87 / 6.78 / 5.77 / 5.48 s |
+
+  No extra gate tick in any of the 48 transitions (the loading-screen lengths overlap run for run). Whole-GPU memory
+  peak 11.03 (10.85-11.18) GB off vs 11.53 (10.82-12.08) GB on: the two highest fix-on values are single 2-second
+  samples at one-off spikes (FSR targets created at start-up; a virtual-shadow page pool re-created), the next samples
+  10.87 / 10.93 GB, as off. Within spread, not shown to be unchanged; the inn A/B (5 + 5) showed no difference.
+- **Repeated on the pull request's build** (2026-10-30, upstream 1.2.3-beta + this change, `cheydinhal` / `inn-door`,
+  `native-nofg`, DoorDiag both sides, 5 + 5 fresh launches interleaved; exit / entry / exit, medians): the fade-in's
+  texture wait 283 / 139 / 319 ms off, 1 / 11 / 8 ms on; the last image held 533 / 217 / 501 ms off, 241 / 79 / 175 ms
+  on, no range overlapping; the loading screen 6.14 / 2.08 / 4.02 s off, 6.09 / 2.07 / 3.96 s on.
+
+<a id="unfreezebehindloadingscreen"></a>
+
+### Exits settle behind the loading screen (`UnfreezeBehindLoadingScreen`, trade-off, off)
+
+[Explanation](how-it-works.md#unfreezebehindloadingscreen). A trade-off (the world runs ~1 s unseen, the loading
+screen is ~1 s longer), off by default.
+
+- **Found:** on indoor -> outdoor exits the player is seen dropping into place (T-pose at first) and the scene settles
+  during the fade-in, in every state tested (fix on, `StreamBehindLoadingScreen` off, every switch at 0): the game's
+  own behaviour. DoorDiag shows why: on entries the transition's freeze ends 0.7-1.7 s before the fade-in; on exits it
+  lasts until the game's unfreeze timer, armed by fade-to-game (`exe+0x4877E80`) with the delay
+  `VAltarUserInterfaceSettings.FadeInDurationUntilUnfreeze` (default 0.5 s; 0 breaks transitions, the timer is never
+  set). The new level's loaded handler (`exe+0x48354B0`) calls the transition's SetLoadingFreeze(off)
+  (`exe+0x4887110`: the freeze subsystem back to mode 0, flags +0x200 / +0x1F1 cleared; the same two calls as the
+  unfreeze timer body `exe+0x4881640`), which is what unfreezes interiors behind the loading screen.
+- **World hidden behind the loading screen:** the game viewport's `bDisableWorldRendering` (bit 1 of viewport+0x6C;
+  UWorld::GetGameViewport `exe+0x385EE90`, written by UGameplayStatics::SetEnableWorldRendering `exe+0x31D8600`) is set
+  early in the loading screen and cleared ~30-40 ms after fade-to-game.
+- **The change:** once `StreamBehindLoadingScreen` sees the area loaded and the transition still frozen, the bit is
+  cleared (the world drawn under the opaque loading screen) and SetLoadingFreeze(off) is called on the game thread.
+  The fade gate's tick (its delegate's Execute / ExecuteIfSafe .rdata slots, vtable `exe+0x7D7BD78` + 11 / 12 * 8) is
+  skipped until the world has run N ms, counted only over frames on which the freeze subsystem is out of its loading
+  mode, each at most 50 ms; hold cap 3 s.
+- **First version wrong:** counting wall time from the call never held the gate: the old engine stalls the game thread
+  ~1.2 s right after the call and the freeze subsystem leaves its loading mode 1.6-2.1 s after it, so the freeze ended
+  only ~0.27 s before the fade-in.
+- **Result** (5120x2160, DoorDiag, one run each; freeze -> fade-in from the log; baseline: the
+  `StreamBehindLoadingScreen` runs above and the first version, which held nothing):
+
+  | | inn entry / exit | gate (4) | fast travel (4) | freeze ends before the fade-in |
+  |---|---|---|---|---|
+  | off | 2.91 / 3.51 s | 3.77-4.21 s | 5.49-6.83 s | entries 0.7-1.7 s; exits 0.2 s **after** |
+  | 1000 | 2.91 / 4.54 s | 4.88-5.29 s | 6.53-7.85 s | all 11 exit-type transitions 1.2-1.6 s |
+
+  Gate held 2 ticks (1.03-1.06 s) on each exit-type transition; world ran 1.06-1.46 s of frames; entries untouched;
+  every transition completed (the fast-travel "menu still open" warnings appear in every fast-travel run, with the
+  switch off too). Checked in play: on exits the character is standing normally and the scene looks settled at the
+  fade-in, like going indoors. Drawing the frozen world alone (1500 ms before the fade-in, no unfreeze; tried as a
+  separate switch and removed): T-pose gone but the character seen dropping into place; textures still loading in.
+- **Not measured:** an image A/B (the spectator camera hides the player; the change is deliberately visible), save
+  and load round trips during the hold, combat during the hold.
+- **Fast-travel hold (`UnfreezeBehindLoadingScreenFastTravel`).** A longer hold for fast travel only.
+  - Why fast travel: the grass completes ~2.5-3 s after the world starts running, whatever the hold (a 1500 ms hold
+    filled it ~1 s earlier than 500 ms).
+  - How a fast travel is recognised (probe games, UE4SS hooks and per-frame reads):
+    - `VLevelChangeData.bIsFastTravelling` (+0xB8) stays false through a map fast travel.
+    - `bIsSeamlessTravelling` (+0xB9) is set in the first ~3 s of fast travels, teleports and door entries alike.
+    - `OnFadeToBlackOverBeforeFastTravel` is never called (the binder exe+0x4898750 picks it only under conditions
+      a map fast travel does not meet).
+    - `VMapMenuViewModel.DelayFastTravelRequestUntilFadeEnd(true)` is called once per map fast travel, before the
+      gate arms.
+  - The hook: the fix redirects that function's exec thunk's call (exe+0x468ACF0 +0x6E -> exe+0x4918830) through a
+    stub that notes the time when the argument is true. The next transition armed within 60 s holds
+    UnfreezeBehindLoadingScreenFastTravel ms. The thunk is found by its registered name in the native function table.
+  - Runs (3 teleports + 3 map fast travels; an inn door in and out; 500 / 1000):
+    - every fast travel "fast travel, hold 1000 ms", world ran 1132-1501 ms, unfrozen 3.2-3.8 s before the fade-in;
+    - every teleport and door "door or gate, hold 500 ms", world ran 622-837 ms, 2.6-2.7 s.
+  - Not measured: the grass at the fade-in with 1000.
+  - Bench caveat: a bench map click started indoors, where no "travel to" box was shown, crashed the probe game
+    (old-engine null read at exe+0xEA20E0). This is the bench driving the map, not the fix (a build without the hook).
+- **Save loads get the fast-travel hold.** Loads wait like fast travel; doors and gates keep the shorter value.
+  - Not usable (four rounds in play):
+    - Who arms the fade gate (hook return address, stack walk). Main-menu loads came from the timer manager's tick
+      (return exe+0x37FAFB2), from exe+0xDC0EA5, and through Altar's wrapper from the doors' path (return
+      exe+0x4709190). Pause-menu loads came through the doors' path too.
+    - A menu just before the arming (a named freeze within 2 s): it was seen before doors as well, so every door got
+      the long hold.
+  - Used: the engine save system's `LoadGame`. The settings save's writer gets the save system through
+    IPlatformFeaturesModule::Get and +0x40, then calls SaveGame at +0x28. LoadGame is at +0x38 (vtable exe+0x7770828,
+    exe+0x35876B0). A diagnostic hook logged one LoadGame of the save's slot per load and none for doors or the Load
+    list. The main-menu read came 8 s before the arming; the pause-menu read came between that load's two armings. So
+    the rule is "a non-settings slot read since the previous transition ended", checked when the hold is needed.
+  - In play with the fix (500 / 1000): a main-menu load held 1000 ms, a door 500 ms, a pause-menu Load 1000 ms.
+
+<a id="fadevtflushskip"></a>
+
+### The fade-in's virtual texture flush (`FadeVtFlushSkip`, trade-off, off)
+
+[Explanation](how-it-works.md#fadevtflushskip). Off by default: the picture during the fade differs.
+
+- **Found:** fade-to-game (`exe+0x4877E80`) arms, besides the unfreeze timer, a second timer when the transition asks
+  for it (transition +0xBB): delay `VAltarUserInterfaceSettings.FadeInDuration` (+0x188, 2.5 s) x 0.6 (constant
+  `exe+0x6EC6E80`) = 1.5 s. Its delegate (vtable `exe+0x7D7BCA8`; Execute / ExecuteIfSafe thunks `exe+0x4881630` /
+  `exe+0x48817D0`) calls `exe+0x48774E0`, which looks up and executes the console command `r.VT.Flush`. It runs on every
+  transition type (11 in a run of one inn door in and out, a city gate in and out twice and four fast travels).
+- **Effect in the picture:** at the Imperial City Waterfront lighthouse exit (5120x2160, full-resolution captures every
+  300 ms, distant band) the 1-px detail drops 9-17 % between 1.2 and 1.6 s into the fade and refills over ~2 s with
+  `VtStreamingUploads` 64 (~8 s with the game's 4): in every run with holds of 0 / 500 / 1500 / 3000 ms, and in a
+  recording of play. Holding the loading screen longer cannot hide it: the flush is timed from the fade-in.
+- **The change:** the delegate's two .rdata slots (`exe+0x7D7BD00` / `+0x7D7BD08`) point to stubs that skip the call
+  while the key is on and pass through to the game's thunks otherwise. Found by the flush function's prologue and its
+  `r.VT.Flush` name (the only one in .rdata), the thunks by pattern and target, the slots by value (one each, adjacent).
+- **Measured:** the mid-fade drop goes from -14 % to at most -3 % (gradual; 2 + 2 runs). Settled pictures (end of each
+  leg's hold, mean absolute luma difference and 128 px tiles, ABBA x 2, 14 transitions: inn door in/out, the
+  Cheydinhal west gate in/out twice, four fast travels, the lighthouse door in/out) within run-to-run noise; the one
+  outlier, the fast travel to Weye, was rain (streaks visible, wet road) in some runs and not others, unrelated to the
+  setting in a reversed-order repeat. Frame times after the transitions: median after-fps 58.0 / 56.4, 1 % low 36.5 /
+  35.4, 5 / 5 hitches (flush / skip, 28 transitions each): within noise.
+- **Not covered:** a deliberate weather change between departure and arrival, long sessions, why the game flushes.
 
 <a id="psoprecompilefast"></a>
 

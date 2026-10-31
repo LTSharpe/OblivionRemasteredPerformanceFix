@@ -523,6 +523,33 @@ and switches them on and off.
 
 ---
 
+<a id="vtstreaminguploads"></a>
+
+### Walls and roofs sharp sooner after a door (`VtStreamingUploads`, trade-off, off)
+
+[Evidence](research.md#vtstreaminguploads). **A trade-off**: off by default (`VtStreamingUploads=0`), switched on only by
+choice.
+
+**The problem.** Walls, roofs and stairs of the open world use streamed ("virtual") textures: the picture is split into
+small pages, and each frame the graphics card reports which pages it needs at which detail; those pages are read and
+uploaded. The game uploads at most 4 streamed pages per frame. After stepping out of a door into a wide view that was
+not loaded before (the Imperial City Waterfront from its lighthouse), hundreds of pages are wanted at once: walls 40 m
+away come in blotchy, without mortar lines, and reach full detail about 8 s after the picture fades in.
+
+*Analogy:* a delivery van that may carry only four boxes per trip, with a whole street waiting for its furniture.
+
+**What we did.** With `VtStreamingUploads=N` the number of streamed pages uploaded per frame is N (Unreal's own setting
+`r.VT.MaxUploadsPerFrame.Streaming`, normally 4 in this game). No Engine.ini line can change it: the game's own
+graphics settings set it after every ini file is read. So the fix finds where Unreal keeps the value and writes N,
+and writes it again if the game's settings put the 4 back (that happens once, a few seconds after start-up, and when
+you change graphics settings).
+
+**What it changes.** The same pages are uploaded, sooner; once everything has arrived the picture is the same. What
+you see during the first seconds after a door is sharper sooner, so this is not "same image" frame for frame. The cost
+is more upload work in the frames that stream (see the measurements).
+
+---
+
 <a id="navlinkfast"></a>
 
 ### Navigation tiles linked with less searching (`NavLinkFast`)
@@ -1129,6 +1156,123 @@ old engine's ordinary frame work. `CellBufferPacedEvict=1` is on by default.
 | Fast travel (720p / 4K) | 86-147 / 77-129 ms | 36-59 / 19-36 ms |
 
 The extra work behind the loading screen takes 2-14 ms of game-thread time plus 3-12 ms for the refresh, so the picture comes back as early as before.
+
+---
+
+<a id="streambehindloadingscreen"></a>
+
+### Textures streamed behind the loading screen (`StreamBehindLoadingScreen`)
+
+[Evidence](research.md#streambehindloadingscreen).
+
+**The problem.** When a door, a city gate or a fast travel starts, the game empties its texture memory: it sets the
+texture pool to 1 MB, so every sharp texture level is dropped while the new area loads, and keeps the real size aside.
+Once the new area has loaded, a timer on the loading screen checks twice a second whether it is ready and then starts
+the fade-in. The first thing the fade-in does is put the pool size back and wait until the new view's textures are
+streamed in again, so that the world never appears blurry. That wait is the long, frozen last image of every loading
+screen: about 0.15 s after entering an interior and 0.3 s after stepping outside at 5120x2160 (0.1 / 0.26 s at 720p),
+every time. Meanwhile the loading screen had been sitting idle, the area already loaded.
+
+*Analogy:* a shop that clears its shelves while the delivery is unloaded, and only starts restocking when the first
+customer is at the door, although the stockroom had been ready for a while.
+
+**What we did.** As soon as the game has armed that fade-in timer and its loading has gone quiet (the same checks the
+timer itself uses: no files still loading, no travel pending), the fix puts the stored pool size back, with the same
+call and the same value the fade-in would use, and asks the texture streamer for its normal update once per frame
+until the fade-in. Those updates only queue the texture loads and return; nothing waits for them. When the game's
+fade-in then makes its own wait, the textures are already in and it is over in a few milliseconds.
+
+**Why the game can't change.** The game's own steps all still happen, in the same order: its timer, its fade-in, its
+pool-size call and its wait for the textures. The fix only does part of that work earlier, behind the loading screen.
+The freeze, the fade and the moment you get control are not touched, so the world never runs while you can't see it.
+The first picture is the one the game's own wait produces, fully textured, just sooner. Starting even earlier (right
+when the timer is armed) was tried: it competed with the area's last file loads and sometimes cost the timer one more
+check, half a second more loading screen, so the fix waits until the loading has gone quiet. The fix finds its game code
+by byte patterns (the timer and its checks, the function that arms it, the stored pool size, the texture streamer) and
+stays out with a log line if anything differs.
+
+**Effect** (Cheydinhal inn: out of the inn, into it, out again; 5 + 5 fresh launches each, fix on and off in turns):
+
+| Setting | Last image held before the world appears (exit / entry) | Loading screen length |
+|---|---|---|
+| 5120x2160 | 539 -> 230 ms / 225 -> 75 ms | unchanged |
+| 720p | 501 -> 226 ms / 163 -> 73 ms | unchanged |
+
+City gate and fast travel at 5120x2160 (Cheydinhal west gate in and out twice; fast travel to Cheydinhal, Weye, Leyawiin
+and the Imperial City; 3 + 3 fresh launches): the last image held 420-437 -> 166-213 ms at the gate and 327-421 ->
+113-160 ms after a fast travel, loading screens as long as before.
+
+---
+
+<a id="unfreezebehindloadingscreen"></a>
+
+### Exits settle behind the loading screen, like entries (`UnfreezeBehindLoadingScreen`, trade-off, off)
+
+[Evidence](research.md#unfreezebehindloadingscreen). **A trade-off**: off by default, switched on only by choice. It
+keeps the world running behind the loading screen for longer than the stock game does after an exit, which this
+project's rules do not accept as a default.
+
+**The problem.** Step into an inn and the picture fades in on your character standing normally in a room that is
+already lit and textured. Step out of it and you see your character drop into place, the shadows and lighting of the
+street settle and textures sharpen as the picture comes in. The game treats the two differently: once an interior has
+loaded, the game lets the world run behind the loading screen for the second or so before the fade-in; after an exit,
+a city gate or a fast travel, it keeps the world frozen (and not even drawn) until the fade-in has started, so all of
+that settling happens in view.
+
+**What we did.** With `UnfreezeBehindLoadingScreen=N`, when the new outdoor area has loaded and the world is still
+frozen, the fix calls the game's own "loading over" step, the one the game itself calls for interiors, and lets the
+world be drawn behind the loading screen. The loading screen then stays up until the world has run N ms of real frames
+(at most 3 s more): the game's twice-a-second check that starts the fade-in is skipped until then. After that the
+game's own fade-in runs as before. Drawing the world behind the loading screen while it stayed frozen was tried on its
+own and was not enough (the character still dropped into place).
+
+**What it changes.** This is not "same gameplay": like after entering an interior, the world runs for about a second
+before you see it, so nearby NPCs and creatures can move, and the loading screen is about 1 s longer. Entries are left
+alone (the game already does this for them).
+
+**Effect** (5120x2160; one run each: Cheydinhal inn door, the west gate in and out twice, four fast travels): with
+1000, all 11 exit-type transitions left their freeze 1.2-1.6 s before the fade-in (it was 0.2 s after it); the world
+ran 1.1-1.5 s of frames behind the loading screen; loading screen 3.5 -> 4.5 s for the inn exit, +1.0-1.1 s for the
+gate and the fast travels, 2.9 s for the inn entry as before. In play: on exits the character stands normally and the
+scene looks settled when the picture comes in, as after going indoors.
+
+**Fast travel and save loads on their own** (`UnfreezeBehindLoadingScreenFastTravel=N`, 0 = the same as above). After
+a fast travel the grass of the new area is still filling in during the first second or two of the fade-in (it needs
+about 2.5-3 s of the world running, measured), more than after a door. With this set, a fast travel holds the loading
+screen N ms instead, and doors and gates keep `UnfreezeBehindLoadingScreen`'s value. The fix recognises a fast travel
+by the map's own fast-travel request, which runs once for each fast travel from the map (and never for doors).
+Measured with 500 / 1000: the three fast travels held 1000 ms (world ran 1.1-1.5 s behind the loading screen), the
+teleports and the inn door 500 ms (0.6-0.8 s). Loading a save (Continue, the Load menu, quickload) gets the same value
+as fast travel: its textures need as long. The fix tells it from a door by what the game did: a load reads its save
+file through the engine's save system, a door or a gate reads none. A loading screen with a save read since the
+previous one ended gets the longer hold. Seen in play: a load from the main menu and one from the pause menu held
+1000 ms, a door 500 ms.
+
+---
+
+<a id="fadevtflushskip"></a>
+
+### No texture flush in the middle of the fade-in (`FadeVtFlushSkip`, trade-off, off)
+
+[Evidence](research.md#fadevtflushskip). **A trade-off**: off by default (`FadeVtFlushSkip=0`), switched on only by
+choice.
+
+**The problem.** After a door, a city gate or a fast travel the picture fades in over 2.5 seconds. 1.5 seconds into
+that fade the game empties its whole cache of streamed ("virtual") textures. Walls, roofs and stairs that had already
+loaded behind the loading screen go blurry while the picture is still coming in, then load again: about 8 seconds with
+the game's upload rate, about 2 seconds with `VtStreamingUploads=64`. It looks like a flash of blur right as you arrive.
+
+*Analogy:* a stage crew finishes setting the scene, the curtain starts to rise, and halfway up someone clears the props
+off the stage and the crew has to put them back while the audience watches.
+
+**What we did.** The flush is run by a timer the game starts with the fade-in. With `FadeVtFlushSkip=1` the timer still
+starts and fires, but what it would run (the console command `r.VT.Flush`) is skipped, so the textures loaded behind the
+loading screen stay. Needs a restart to switch on; afterwards it can be switched while the game runs.
+
+**What it changes.** The picture during the fade no longer loses detail, so it is not "same image" during the fade. Why
+the game flushes is not known; in tests the picture a few seconds after arriving was the same with and without the
+flush (within run-to-run differences). If ground or walls ever look wrong after arriving and only fix themselves when
+you walk away, switch it off.
 
 ---
 

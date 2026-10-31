@@ -380,13 +380,11 @@ static int g_pcDtors = 0;
 static int g_pcNestParent = -1;            // the delegate id whose run completes the nested ones at once
 static void* g_pcNested[4] = {};
 static bool (*g_pcNestHook)(void*) = nullptr;
-static void (*g_pcInUnit)(int id) = nullptr;  // called inside each delegate unit (ClothBuildDefer's questions to pacing)
 static bool FakeDelExec(void* inst)
 {
     const uint8_t* p = static_cast<const uint8_t*>(inst);
     const int id = *reinterpret_cast<const int*>(p + 0x20);
     g_pcDelRan.push_back(id);
-    if (g_pcInUnit) g_pcInUnit(id);
     g_pcSeq.push_back(id);
     g_pcClock += *reinterpret_cast<const uint64_t*>(p + 0x28);
     if (id == g_pcNestParent)
@@ -567,16 +565,13 @@ static uint64_t HashWords(uint64_t seed, const void* data, size_t bytes)
 #include "selftest_pso.h"          // PsoPrecompileFast's sites, trampoline and mode choices with fakes
 #include "selftest_destroybatch.h" // PhysicsDestroyBatch: sites and the wrapper with fakes
 #include "selftest_clothreg.h"    // ClothRegisterLite: sites, lite builds and their completion with fakes
-#include "selftest_clothdefer.h"     // ClothBuildDefer: sites, hooks and the defer rule (after ClothRegisterLite)
 #include "selftest_animpar.h"      // AnimTeardownParallel's shapes and the helper queue with fakes
 #include "selftest_cellbuf.h"      // CellBufferPacedEvict's shapes, the clamp stub and the buffer LRU with and without the fix
-#include "selftest_vramcounter.h"  // VramCounterFix: the Show VRAM counter
-#include "selftest_shaderscreen.h"  // ShaderScreenAfterDriverChange
+#include "selftest_doordiag.h"     // diagnostic DoorDiag: sites (locate only)
+#include "selftest_streamload.h"   // StreamBehindLoadingScreen: sites (locate only)
 #include "selftest_ledger.h"       // diagnostic HitchLedger: sites, record/ring/csv format, cost per frame
 #include "selftest_objreplace.h"   // ObjectReplaceCrashGuard: the in-place destroy site and the stub with a fake GUObjectArray
 #include "selftest_taskwait.h"     // TaskWaitDeadlockGuard: the task graph's worker wait, the wake-up protocol against fakes
-#include "selftest_display_native.h"  // MonitorNativeFromWindows / FullscreenAllResolutions
-#include "selftest_skinsss.h"      // SeparableSkinAbove4K: the switch logic against a fake variable
 #include "selftest_scan.h"         // FindAll: the fast pattern search against the reference search
 #include "selftest_ticksplit.h"        // diagnostic TickSplit: sites, entries/windows/top rows, cost per call (lab: perception split)
 
@@ -2141,153 +2136,6 @@ int wmain(int argc, wchar_t** argv)
         }
     }
 
-    // BowSneakAttackFix: a player's arrow hits the old engine's hit function once, the old engine's own impact with the
-    // Unreal side's sneak multiplier instead of its fixed 1.0.
-    {
-        Check(ApplyBowSneakAttackFix(), "bow sneak fix installed");
-        BowSneakInfo bi{};
-        Check(BowSneakAttackFixInfo(&bi), "bow sneak fix info");
-        if (Installed(bi.stub != nullptr, "BowSneakAttackFix (bow sneak attacks)")) {
-            Check(bi.queueCall == game.base + 0x65574B0, "the arrow hit handler's call at exe+0x65574B0");
-            Check(bi.impactCall == game.base + 0x6665A43, "the old engine's impact call at exe+0x6665A43");
-            Check(bi.thunk == game.base + 0x65A5200, "the hit thunk at exe+0x65A5200");
-            Check(bi.player == reinterpret_cast<void* const*>(game.base + 0x941F708), "the player pointer at exe+0x941F708");
-            Check(bi.queueCall[0] == 0xE8 && RipTarget(bi.queueCall, 1, 5) == bi.stub, "handler's call goes to the stub");
-            Check(bi.impactCall[0] == 0xE8 && RipTarget(bi.impactCall, 1, 5) == bi.stub + 16 && bi.impactCall[5] == 0x66 &&
-                      bi.impactCall[6] == 0x90,
-                  "impact's call [r10+868h] is now call stub; nop");
-            Check(*reinterpret_cast<void* const*>(bi.stub + 6) == bi.queueHook &&
-                      *reinterpret_cast<void* const*>(bi.stub + 22) == bi.impactHook,
-                  "stubs jump to the two hooks");
-            Check(ApplyBowSneakAttackFix(), "second installation finds the fix in place");
-
-            // The hooks with fakes: a fake player and target (vtables with the hit slot), arrows, a clock.
-            using HitFn = uint64_t (*)(void*, uint64_t, void*, void*, uint64_t, float, uint64_t);
-            static int thunkCalls = 0, slotCalls = 0;
-            static float lastMult = 0;
-            static uint64_t clockMs = 1000;
-            struct Fakes {
-                static uint64_t Thunk(void*, uint64_t, void*, void*, uint64_t, float mult, uint64_t)
-                {
-                    ++thunkCalls;
-                    lastMult = mult;
-                    return 1;
-                }
-                static uint64_t Slot(void*, uint64_t, void*, void*, uint64_t, float mult, uint64_t)
-                {
-                    ++slotCalls;
-                    lastMult = mult;
-                    return 2;
-                }
-                static uint64_t Clock() { return clockMs; }
-            };
-            static void* actorVtable[0x868 / 8 + 1] = {};
-            actorVtable[0x868 / 8] = reinterpret_cast<void*>(&Fakes::Slot);
-            static void* arrowVtable[1] = {};
-            static void* magicVtable[1] = {};
-            struct Obj { void** vtable; };
-            static Obj player{actorVtable}, npc{actorVtable}, target{actorVtable};
-            static Obj arrowA{arrowVtable}, arrowB{arrowVtable}, arrowC{arrowVtable}, magic{magicVtable};
-            static void* playerPtr = &player;
-            BowSneakAttackFixTestSetup(reinterpret_cast<void*>(&Fakes::Thunk), &playerPtr, &Fakes::Clock);
-            const auto queue = reinterpret_cast<HitFn>(bi.queueHook);
-            const auto impact = reinterpret_cast<HitFn>(bi.impactHook);
-            Check(impact(&player, 0, &arrowA, &target, 0, 1.0f, 0) == 2 && slotCalls == 1 && lastMult == 1.0f,
-                  "old engine's hit before any Unreal-side value: made at 1.0 (stock)");
-            clockMs += 1000;
-            Check(queue(&player, 0, &arrowB, &target, 3, 2.0f, 0) == 1 && thunkCalls == 1 && lastMult == 2.0f,
-                  "Unreal side's hit: made with its multiplier");
-            clockMs += 2000;
-            Check(impact(&player, 0, &arrowC, &target, 0, 1.0f, 0) == 2 && slotCalls == 2 && lastMult == 2.0f,
-                  "old engine's hit first: made with the Unreal side's multiplier (2.0, not 1.0)");
-            clockMs += 8;
-            Check(queue(&player, 0, &arrowC, &target, 3, 2.0f, 0) == 0 && thunkCalls == 1,
-                  "the same arrow's Unreal-side hit 8 ms later: not made (one hit per arrow)");
-            clockMs += 2000;
-            Check(queue(&player, 0, &arrowA, &target, 3, 3.0f, 0) == 1 && thunkCalls == 2 && lastMult == 3.0f,
-                  "Unreal side first (multiplier now 3.0): made");
-            Check(impact(&player, 0, &arrowA, &target, 0, 1.0f, 0) == 0 && slotCalls == 2,
-                  "the same arrow's old-engine hit: not made");
-            clockMs += 600;
-            Check(impact(&player, 0, &arrowA, &target, 0, 1.0f, 0) == 2 && slotCalls == 3 && lastMult == 3.0f,
-                  "the same arrow and target after 500 ms: a new hit, with the latest multiplier");
-            Check(impact(&player, 0, &magic, &target, 0, 1.0f, 0) == 2 && slotCalls == 4 && lastMult == 1.0f,
-                  "another projectile class: its 1.0 kept");
-            Check(impact(&npc, 0, &arrowB, &target, 0, 1.0f, 0) == 2 && slotCalls == 5 && lastMult == 1.0f &&
-                      queue(&npc, 0, &arrowB, &target, 3, 2.0f, 0) == 1 && thunkCalls == 3,
-                  "another attacker: both hits made as in the stock game");
-            SetBowSneakAttackFixEnabled(false);
-            Check(impact(&player, 0, &arrowB, &target, 0, 1.0f, 0) == 2 && slotCalls == 6 && lastMult == 1.0f &&
-                      queue(&player, 0, &arrowB, &target, 3, 2.0f, 0) == 1 && thunkCalls == 4,
-                  "switched off: both hits, the old engine's at 1.0, as in the stock game");
-            SetBowSneakAttackFixEnabled(true);
-            BowSneakAttackFixInfo(&bi);
-            Check(bi.skipped == 2 && bi.corrected == 2 && bi.oneOnly == 2, "second hits, corrected and 1.0 hits counted");
-            LogBowSneakAttackFixStats();
-            BowSneakAttackFixTestSetup(nullptr, nullptr, nullptr);
-        }
-    }
-
-    // AutosaveFollowsMenu: the level-up's and the scripts' autosaves are not made while all four of the menu's autosave
-    // options are off.
-    {
-        Check(ApplyAutosaveFollowsMenu(), "autosave fix installed");
-        AutosaveMenuInfo ai{};
-        Check(AutosaveFollowsMenuInfo(&ai), "autosave fix info");
-        if (Installed(ai.stub != nullptr, "AutosaveFollowsMenu (autosaves with the menu's options off)")) {
-            Check(ai.levelUpCall == game.base + 0x65FF287, "the level-up's autosave call at exe+0x65FF287");
-            Check(ai.scriptedCall == game.base + 0x6A07684, "the scripts' autosave call at exe+0x6A07684");
-            Check(ai.autosave == game.base + 0x6703BC0, "the autosave at exe+0x6703BC0");
-            Check(ai.switches[0] == game.base + 0x941DAD8 && ai.switches[1] == game.base + 0x941DB28 &&
-                      ai.switches[2] == game.base + 0x941DA80 && ai.switches[3] == game.base + 0x941DA68,
-                  "the menu's settings at exe+0x941DAD8 / DB28 / DA80 / DA68 (interior/exterior, travel, rest, wait)");
-            Check(ai.levelUpCall[0] == 0xE8 && RipTarget(ai.levelUpCall, 1, 5) == ai.stub, "level-up's call goes to the stub");
-            Check(ai.scriptedCall[0] == 0xE8 && RipTarget(ai.scriptedCall, 1, 5) == ai.stub + 16,
-                  "scripted autosave's call goes to the stub + 16");
-            Check(*reinterpret_cast<void* const*>(ai.stub + 6) == ai.levelUpHook &&
-                      *reinterpret_cast<void* const*>(ai.stub + 22) == ai.scriptedHook,
-                  "stubs jump to the two hooks");
-            Check(ApplyAutosaveFollowsMenu(), "second installation finds the fix in place");
-
-            // The hooks with a fake autosave and fake switches.
-            using SaveFn = void (*)(void*);
-            static int saves = 0;
-            static void* lastManager = nullptr;
-            struct Fakes {
-                static void Autosave(void* manager)
-                {
-                    ++saves;
-                    lastManager = manager;
-                }
-            };
-            static uint8_t sw[4] = {};
-            static const uint8_t* swp[4] = {&sw[0], &sw[1], &sw[2], &sw[3]};
-            AutosaveFollowsMenuTestSetup(reinterpret_cast<void*>(&Fakes::Autosave), swp);
-            const auto levelUp = reinterpret_cast<SaveFn>(ai.levelUpHook);
-            const auto scripted = reinterpret_cast<SaveFn>(ai.scriptedHook);
-            int manager = 0;
-            levelUp(&manager);
-            scripted(&manager);
-            Check(saves == 0, "all four menu options off: no level-up or scripted autosave");
-            for (int i = 0; i < 4; ++i) {
-                sw[i] = 1;
-                levelUp(&manager);
-                scripted(&manager);
-                sw[i] = 0;
-            }
-            Check(saves == 8 && lastManager == &manager, "any one option on: both autosaves made, with the game's argument");
-            SetAutosaveFollowsMenuEnabled(false);
-            levelUp(&manager);
-            scripted(&manager);
-            Check(saves == 10, "switched off: both autosaves made as in the stock game");
-            SetAutosaveFollowsMenuEnabled(true);
-            AutosaveFollowsMenuInfo(&ai);
-            Check(ai.skippedLevelUp == 1 && ai.skippedScripted == 1 && ai.made == 10, "skipped and made autosaves counted");
-            LogAutosaveFollowsMenuStats();
-            AutosaveFollowsMenuTestSetup(nullptr, nullptr);
-        }
-    }
-
     // HavokPickWarningGuard: the old engine's "Havok picks" warning box (a modal MessageBoxA on the OblivionThread) held back.
     {
         // A changed handler first (the pointer at exe+0x8FB7CC8 aimed at another function): the guard refuses and leaves the
@@ -2527,22 +2375,17 @@ int wmain(int argc, wchar_t** argv)
     pso::Run(game);
     // Diagnostic HitchLedger (selftest_ledger.h): before BulkIndexInsert's test (its lab probe times the same tick-group entry).
     hl::Run(game);
+    // Diagnostic DoorDiag (selftest_doordiag.h): its sites, located only.
+    dd::Run(game);
+    // StreamBehindLoadingScreen (selftest_streamload.h): its sites, located only (after the fade hook test).
+    sbl::Run(game);
     // Diagnostic TickSplit (selftest_ticksplit.h): rides on the ledger's tick-group hook.
     tsp::Run(game);
-    // MonitorNativeFromWindows / FullscreenAllResolutions (selftest_display_native.h).
-    dnat::Run(game);
-    // SeparableSkinAbove4K (selftest_skinsss.h).
-    skinsss::Run(game);
     // AnimTeardownParallel (lab prototype): dying NPC animation data's interpolators on helper threads (selftest_animpar.h).
     apar::Run(game);
     // CellBufferPacedEvict (lab prototype): spare cell buffer slots, overflow torn down one cell per OT frame (selftest_cellbuf.h); after
     // the ledger's test, which detours the same grid-change entry.
     cbuf::Run(game);
-
-    // VramCounterFix (selftest_vramcounter.h).
-    vramc::Run(game);
-    // ShaderScreenAfterDriverChange (selftest_shaderscreen.h).
-    shs::Run(game);
 
     // RestoreFsrAfterAltTab: FSR back on when a menu that was up at focus gain closes (the game's own focus-gained branch, run again).
     {
@@ -3758,50 +3601,6 @@ int wmain(int argc, wchar_t** argv)
                 NpcPacingTestFade(reinterpret_cast<const uint8_t* (*)()>(fcls));
             }
         }
-
-        // ClothBuildDefer's owner lookup: three delegates whose owner is like an equipment unit's (the character's body
-        // pairing component: no pointer at the actor's root-component offset), its outer a far actor. Pacing's walk ends at
-        // that owner: the units count as near and all run in their frame, as on main. Asked from inside them,
-        // NpcPacingDistantUnit and NpcPacingStillDistant walk on to the far actor, so a robe built there may wait
-        {
-            static FakeActor owActor{}, owRoot{}, owEquip{};
-            *reinterpret_cast<void**>(owActor.bytes + 0x1A0) = &owRoot;
-            *reinterpret_cast<void**>(owRoot.bytes + 0x20) = &owActor;
-            *reinterpret_cast<double*>(owRoot.bytes + 0x280) = 30000.0;
-            *reinterpret_cast<uintptr_t*>(owEquip.bytes + 0x1A0) = 0x10;  // no pointer: reading its outer faults
-            *reinterpret_cast<void**>(owEquip.bytes + 0x20) = &owActor;
-            static FakeDelInst ow[3]{};
-            for (int k = 0; k < 3; ++k) {
-                ow[k] = FakeDelInst{};
-                ow[k].vtable = reinterpret_cast<void*>(0x1234);
-                ow[k].weak = &owEquip;
-                ow[k].id = 90 + k;
-                ow[k].costUs = 6000;
-            }
-            static int askedFar, askedStill;
-            static uint64_t askedOwner;
-            askedFar = askedStill = 0;
-            askedOwner = 0;
-            g_pcInUnit = [](int) {
-                uint64_t owner = 0, frame = 0;
-                if (NpcPacingDistantUnit(&owner, &frame)) {
-                    ++askedFar;
-                    askedOwner = owner;
-                }
-                if (NpcPacingStillDistant(reinterpret_cast<uint64_t>(&owEquip))) ++askedStill;
-            };
-            g_pcDelRan.clear();
-            PcPost(kFakeEnd, 0, 0);
-            run(fakeMgr, -1);
-            for (int k = 0; k < 3; ++k) del(&ow[k]);
-            const size_t inFrame = g_pcDelRan.size();
-            end(fakeMgr, nullptr, 2, 0);
-            g_pcInUnit = nullptr;
-            Check(inFrame == 3 && g_pcDelRan == std::vector<int>({90, 91, 92}) && NpcPacingTestRead().fifo == 0 && !g_pcDeadlock,
-                  "pacing: an owner that faults at the root-component offset ends pacing's walk: near, all run at once (as on main)");
-            Check(askedFar == 3 && askedOwner == reinterpret_cast<uint64_t>(&owEquip) && askedStill == 3,
-                  "pacing (ClothBuildDefer): asked inside those units, the guarded walk reaches the far actor (a robe built there may wait)");
-        }
         SetNpcPacing(false, 4, 4096, 15, false);
         LogNpcPacingStats();
     }
@@ -4117,7 +3916,6 @@ int wmain(int argc, wchar_t** argv)
     }
 
     clr::ClothRegSelfTest(game);  // ClothRegisterLite (lab: also ClothRegisterSkip, ClothRegisterVerify)
-    cdf::ClothDeferSelfTest(game);  // ClothBuildDefer (its hooks run inside ClothRegisterLite's, as in the game)
 
     // ParallelStaticBodies: InitStaticBodies' call of CreateShapesAndActors (build 19115871), then the split against a fake.
     if (Installed(FindParallelStaticBodies(), "static bodies: InitStaticBodies' call found")) {
@@ -4412,6 +4210,78 @@ int wmain(int argc, wchar_t** argv)
         SetGpuSceneParallelUpload(true);
         Check(pair[0] == 0 && pair[1] == 0, "GPU scene parallel upload: ... and stays kept");
         GpuSceneParallelUploadTestSetup(nullptr);
+    }
+
+    // FadeVtFlushSkip : the fade-in's r.VT.Flush (exe+0x48774E0, build 19115871), its timer delegate's
+    // Execute / ExecuteIfSafe thunks (exe+0x4881630 / exe+0x48817D0) and their .rdata slots (exe+0x7D7BD00 / +0x7D7BD08);
+    // then the stubs on fake functions: off passes through to the game's thunk, on skips it (and ExecuteIfSafe returns true).
+    {
+        FadeVtFlushInfo fi{};
+        if (Installed(FindFadeVtFlush(&fi), "fade VT flush: r.VT.Flush function, timer delegate thunks and slots found")) {
+            auto rva = [&](const void* p) { return static_cast<unsigned>(static_cast<const uint8_t*>(p) - game.base); };
+            Check(rva(fi.flush) == 0x48774E0 && rva(fi.exec) == 0x4881630 && rva(fi.execIfSafe) == 0x48817D0,
+                  "fade VT flush: flush at exe+0x48774E0, thunks at exe+0x4881630 / exe+0x48817D0");
+            Check(rva(fi.execSlot) == 0x7D7BD00 && rva(fi.execIfSafeSlot) == 0x7D7BD08,
+                  "fade VT flush: delegate slots at exe+0x7D7BD00 / +0x7D7BD08");
+        }
+        static int calls = 0;
+        struct Fake {
+            static void Exec(void*) { ++calls; }
+            static bool ExecIfSafe(void*) { ++calls; return true; }
+        };
+        void* slots[2] = {nullptr, nullptr};
+        FadeVtFlushTestSetup(&slots[0], &slots[1], reinterpret_cast<void*>(&Fake::Exec), reinterpret_cast<void*>(&Fake::ExecIfSafe), true);
+        FadeVtFlushTestCall(nullptr, false);
+        FadeVtFlushTestCall(nullptr, true);
+        Check(calls == 2 && FadeVtFlushSkippedForTest() == 0, "fade VT flush: off passes both calls through to the game");
+        SetFadeVtFlushSkip(true);
+        FadeVtFlushTestCall(nullptr, false);
+        FadeVtFlushTestCall(nullptr, true);
+        Check(calls == 2 && FadeVtFlushSkippedForTest() == 2, "fade VT flush: on skips both calls");
+        SetFadeVtFlushSkip(false);
+        FadeVtFlushTestCall(nullptr, false);
+        Check(calls == 3, "fade VT flush: off again passes through");
+        FadeVtFlushTestSetup(nullptr, nullptr, nullptr, nullptr, false);
+    }
+
+    // VtStreamingUploads : the registration of r.VT.MaxUploadsPerFrame.Streaming (exe+0xA69B5B, build 19115871).
+    // Empty value pointer in the mapped exe; then the key on a fake value pair: N written over the game's 4 (both copies),
+    // written again when the game's settings put a value back, 0 puts back the game's value only if the value is still N.
+    if (Installed(FindVtStreamingUploads(), "VT streaming uploads: r.VT.MaxUploadsPerFrame.Streaming registration found")) {
+        int32_t* volatile* const slot = VtStreamingUploadsSlotForTest();
+        Check(*slot == nullptr, "VT streaming uploads: value pointer empty before registration");
+        SetVtStreamingUploads(64);  // nothing registered: nothing written, no crash
+        Check(*slot == nullptr, "VT streaming uploads: unregistered value left alone");
+    }
+    {
+        int32_t pair[2] = {4, 4};
+        int32_t* volatile fakeSlot = nullptr;
+        VtStreamingUploadsTestSetup(&fakeSlot);
+        SetVtStreamingUploads(64);
+        Check(pair[0] == 4, "VT streaming uploads: nothing written before registration");
+        fakeSlot = pair;
+        SetVtStreamingUploads(0);
+        Check(pair[0] == 4 && pair[1] == 4, "VT streaming uploads: 0 leaves the game's 4");
+        SetVtStreamingUploads(64);
+        Check(pair[0] == 64 && pair[1] == 64, "VT streaming uploads: 64 sets both copies");
+        SetVtStreamingUploads(64);
+        Check(pair[0] == 64 && pair[1] == 64, "VT streaming uploads: 64 twice stays 64");
+        pair[0] = pair[1] = 4;  // the game's graphics settings applied again
+        SetVtStreamingUploads(64);
+        Check(pair[0] == 64 && pair[1] == 64, "VT streaming uploads: set again after the game's settings put 4 back");
+        SetVtStreamingUploads(32);
+        Check(pair[0] == 32 && pair[1] == 32, "VT streaming uploads: a changed key value applied live");
+        SetVtStreamingUploads(0);
+        Check(pair[0] == 4 && pair[1] == 4, "VT streaming uploads: 0 puts back the game's 4");
+        SetVtStreamingUploads(0);
+        Check(pair[0] == 4 && pair[1] == 4, "VT streaming uploads: 0 twice leaves it");
+        SetVtStreamingUploads(64);
+        pair[0] = pair[1] = 16;  // changed after the fix by something else, then the key goes off
+        SetVtStreamingUploads(0);
+        Check(pair[0] == 16 && pair[1] == 16, "VT streaming uploads: 0 leaves a value that is no longer the fix's");
+        SetVtStreamingUploads(100000);
+        Check(pair[0] == 1024 && pair[1] == 1024, "VT streaming uploads: key capped at 1024");
+        VtStreamingUploadsTestSetup(nullptr);
     }
 
     // FrameGenCrashGuard: AMD FidelityFX's command list pool, the game's own amd_fidelityfx_dx12.dll loaded here, on a WARP device. The

@@ -11,26 +11,28 @@ driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 
 ## Unreleased
 
-- **Game bug fixed: autosaves with every autosave option off** (`AutosaveFollowsMenu`, on): with all four autosave
-  options of the Gameplay menu off (rest, wait, travel, entering or leaving an interior) the game still autosaved after
-  every level-up and whenever a quest's script asked for a save, two autosaves the menu has no option for. They now
-  follow the menu too: while all four options are off, they are not made; with any option on, the game saves as
-  before. Checked in play. New key `AutosaveFollowsMenu` (1).
-- **Game bug fixed: the real resolution of wide monitors** (`MonitorNativeFromWindows`, `FullscreenAllResolutions`, on):
-  monitors wider than 4095 pixels often name a smaller resolution first in their EDID (an Alienware AW3926QW says
-  3440x1440 for its 5120x2160), and the game took that as native: borderless showed it, and fullscreen listed only
-  resolutions of exactly its shape (3440x1440 alone). The native resolution now comes from Windows' preferred mode, and
-  the fullscreen list shows every mode Windows offers. New keys `MonitorNativeFromWindows` (1) and
-  `FullscreenAllResolutions` (1). Start-up only.
-- **New switch, off by default: bow sneak attacks at 1x** (`BowSneakAttackFix`, game bug): both engines check where a
-  player's arrow lands; the new one uses the bow's sneak multiplier, the old one always 1x, and whichever sees the hit
-  first wins (in one session of 23 sneak shots: 10 at 2x, 9 at 1x, 4 hit twice). With 1 each arrow hits once, with the
-  sneak multiplier (checked in play: 20 of 20 at 2x). Off by default because it changes damage.
-- **New trade-off switch, off by default: magenta specks on skin** (`SeparableSkinAbove4K`): with Effects Quality Ultra
-  and a render wider than 3840 pixels (an ultrawide at DLAA or FSR Native AA), sunlit skin and cloth edges show glowing
-  magenta specks (a game bug, also without this DLL). With 1 skin scattering uses the engine's separable method
-  (`r.SSS.Burley.Quality 0`) while the render is that wide; skin looked the same at play distance, about 0.2 ms less GPU
-  time at 5120x2160. Live.
+- **The world appears sooner after a door, a city gate or a fast travel** (`StreamBehindLoadingScreen`, on): during a
+  transition the game empties its texture memory, and once the new area has loaded it held the last loading-screen
+  image until that area's textures were streamed back in. They now stream in while the loading screen is still idling,
+  so that wait is over in about 10 ms instead of 0.1-0.3 s. Cheydinhal inn at 5120x2160: last image held before the
+  world appears 539 -> 230 ms stepping out, 225 -> 75 ms stepping in; the loading screen is not longer, video memory
+  peak and the first picture are the same. City gate and fast travel: 420-437 -> 166-213 ms and 327-421 -> 113-160 ms.
+  New key `StreamBehindLoadingScreen` (1).
+- **New trade-off switch, off by default:** `UnfreezeBehindLoadingScreen` makes exits, city gates and fast travel work
+  like entering an interior: the world is unfrozen and drawn behind the loading screen for N ms (e.g. 1000) before the
+  fade-in, so your character already stands normally and the scene has settled when the picture comes in. The loading
+  screen is about 1 s longer with 1000, and the world runs that long unseen (as it already does after entries).
+  `UnfreezeBehindLoadingScreenFastTravel` (0 = the same) gives fast travel and save loads their own hold.
+- **New trade-off switch, off by default:** `FadeVtFlushSkip` stops the blur flash right as you arrive through a door, a
+  city gate or a fast travel: 1.5 s into the fade-in the game empties its whole streamed-texture cache (`r.VT.Flush`),
+  so walls and roofs that had already loaded go blurry and reload in view. With the switch on that flush is skipped; in
+  tests the picture a few seconds later was the same either way.
+- **New trade-off switch, off by default:** `VtStreamingUploads` lets walls, roofs and stairs reach full detail sooner
+  after stepping outdoors: the streamed ("virtual") textures upload N pages per frame instead of the game's 4. At the
+  Imperial City Waterfront lighthouse exit (5120x2160) the stair walls are fully detailed as the fade-in completes with
+  64, instead of about 8 s later. No Engine.ini line can set this value; the fix does.
+- **New diagnostic** `DoorDiag` (off, not in the shipped ini): per transition, the loading-screen timeline, each texture
+  stream-all's wait and render-target pool misses, in the log.
 
 ## 1.2.3-beta
 For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Thanks to MitochondriaOverlords for issue #5,
