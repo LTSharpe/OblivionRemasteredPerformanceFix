@@ -11,29 +11,26 @@ driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 
 ## Unreleased
 
-- **No autosave stutter with HDR on** (`SaveThumbnailAsync`): with HDR output the game reads the save's picture a second
-  way (as high-precision colour, then converted on the main thread), which the takeover did not cover, so every autosave
-  in HDR still stopped the game's main thread: 115-174 ms frames at 5120x2160 HDR10 on an RTX 5090. That read is now
-  copied and converted off the main thread too, with tables built from the game's own conversion (the self-test runs the
-  game's converter and quantiser on every 10-bit value and 8,192 random pixels: identical). Benchmark (the Cheydinhal
-  inn door, HDR10, 5 runs each side): the autosave's frame 101 ms entering and 126 ms leaving without the change,
-  12 and 22 ms with it (medians). In play: no frame of 25 ms or more at eight door autosaves.
-- **Our bug fixed: a rare start-up crash in `PsoPrecompileFast`'s driver-thread check**: the cold-cache guard found the
-  driver's compile threads with a Windows thread snapshot, which maps memory once for every thread on the PC. The game's
-  built-in web browser (CEF) hooks that call while it starts, and a call at the wrong moment jumped to address 0 (2
-  start-up crashes in about 40 launches, the monitor thread in the crash report). The threads are now listed with one
-  `NtQuerySystemInformation` call, which maps nothing; the same threads are found.
-- **Game bug fixed: the shader screen after a driver update** (`ShaderScreenAfterDriverChange`, on): the game waits for
-  its shader building only on its very first start, so after a new graphics driver it builds everything while you play.
-  Now a changed card or driver brings back the game's own first-start shader screen, at the engine's fast pace; your
-  settings are kept, and the first start with the fix only notes the card. Test with NVIDIA's cache emptied before every
-  start (3 starts without, 2 with): about 3 minutes on the screen, then in the first flight 1 hitch instead of about
-  40, the worst frame about 50 ms instead of up to 2 s, the 1 % low about 70 fps instead of 60. New key
-  `ShaderScreenAfterDriverChange` (1).
-- **Game bug fixed: "Show VRAM" showed 0/0** (`VramCounterFix`, on): the counter reads two numbers the engine never fills
-  in, so it said "VRAM: 0/0" on every PC. When both are 0 it now shows the game's video memory use and the budget
-  Windows gives it, from the DXGI reading the DLL already makes once a second (RTX 5090: "VRAM: 7,635/31,419"). New key
-  `VramCounterFix` (1).
+- **Game bug fixed: autosaves with every autosave option off** (`AutosaveFollowsMenu`, on): with all four autosave
+  options of the Gameplay menu off (rest, wait, travel, entering or leaving an interior) the game still autosaved after
+  every level-up and whenever a quest's script asked for a save, two autosaves the menu has no option for. They now
+  follow the menu too: while all four options are off, they are not made; with any option on, the game saves as
+  before. Checked in play. New key `AutosaveFollowsMenu` (1).
+- **Game bug fixed: the real resolution of wide monitors** (`MonitorNativeFromWindows`, `FullscreenAllResolutions`, on):
+  monitors wider than 4095 pixels often name a smaller resolution first in their EDID (an Alienware AW3926QW says
+  3440x1440 for its 5120x2160), and the game took that as native: borderless showed it, and fullscreen listed only
+  resolutions of exactly its shape (3440x1440 alone). The native resolution now comes from Windows' preferred mode, and
+  the fullscreen list shows every mode Windows offers. New keys `MonitorNativeFromWindows` (1) and
+  `FullscreenAllResolutions` (1). Start-up only.
+- **New switch, off by default: bow sneak attacks at 1x** (`BowSneakAttackFix`, game bug): both engines check where a
+  player's arrow lands; the new one uses the bow's sneak multiplier, the old one always 1x, and whichever sees the hit
+  first wins (in one session of 23 sneak shots: 10 at 2x, 9 at 1x, 4 hit twice). With 1 each arrow hits once, with the
+  sneak multiplier (checked in play: 20 of 20 at 2x). Off by default because it changes damage.
+- **New trade-off switch, off by default: magenta specks on skin** (`SeparableSkinAbove4K`): with Effects Quality Ultra
+  and a render wider than 3840 pixels (an ultrawide at DLAA or FSR Native AA), sunlit skin and cloth edges show glowing
+  magenta specks (a game bug, also without this DLL). With 1 skin scattering uses the engine's separable method
+  (`r.SSS.Burley.Quality 0`) while the render is that wide; skin looked the same at play distance, about 0.2 ms less GPU
+  time at 5120x2160. Live.
 
 ## 1.2.3-beta
 For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Thanks to MitochondriaOverlords for issue #5,

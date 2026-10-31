@@ -85,6 +85,10 @@ struct Config {
     bool prepareCollisionBehindLoadingScreen = true;   // PrepareCollisionBehindLoadingScreen: hand a transition's new area to physics while still frozen (A-B clean, 2026-10-05)
     bool editorIdLookupGuard = true;   // NameLookupCrashGuard: name lookups skip freed name-table entries instead of crashing (game bug)
     bool trapCrashGuard = true;        // TrapCrashGuard: traps drop actors that no longer exist instead of crashing (game bug)
+    bool bowSneakAttackFix = false;    // BowSneakAttackFix (off: changes damage): one hit per player arrow, the old engine's with the Unreal side's sneak
+                                       // multiplier (game bug: bow sneak attacks at 1x or hit twice)
+    bool autosaveFollowsMenu = true;   // AutosaveFollowsMenu: no level-up or scripted autosave while every autosave option in the
+                                       // menu is off (game bug)
     bool havokPickWarningGuard = true; // HavokPickWarningGuard: the old engine's "Havok picks" warning box no longer stops the game (game bug)
     bool frameGenCrashGuard = true;    // FrameGenCrashGuard: FSR 3 frame generation waits for a free command list instead of crashing (AMD library)
     int objectReplaceGuard = 1;        // ObjectReplaceCrashGuard: an in-place object re-creation whose destroy kept its slot releases it instead of
@@ -103,6 +107,12 @@ struct Config {
     bool frameGenCameraInfo = true;   // FrameGenCameraInfo: the camera desc for AMD's ML frame generation (SDK 2.x DLLs)
     int frameGenPacingTuning = 1;      // FrameGenPacingTuning: AMD's FG present pacing tuning (FSR 3.1.4 or SDK 2.x DLLs): 0 game's, 1 Set B but the driver's own swap chain left alone, 2 Set A, 3 Set B everywhere (1)
     bool displayModeCache = true;      // DisplayModeCache: GetMonitorsInfo reads each monitor's mode list once (checked each time)
+    bool monitorNativeFromWindows = true;   // MonitorNativeFromWindows (game bug, on by default): a monitor's native
+                                            // resolution from Windows' preferred mode, not the EDID's first timing (start-up only)
+    bool fullscreenAllResolutions = true;   // FullscreenAllResolutions (on by default): every mode of the monitor
+                                            // in the fullscreen resolution list (start-up only)
+    bool separableSkinAbove4K = false;  // SeparableSkinAbove4K (off, trade-off): r.SSS.Burley.Quality 0 while the
+                                         // render is wider than 3840 (the magenta skin specks on ultrawides at DLAA); live
     bool screenshotFilterFast = true;  // MenuScreenshotFilter: the menu's same-size ImageResize of its screenshot, same bytes in SSE2
     int screenshotReadbackConvert = 1; // ScreenshotReadbackConvert: the screenshot readback's R10G10B10A2 -> FColor conversion in SSE2 (identical
                                        // bytes; start-up install, then live): 0 off, 1 on, 2 on + verify against the game's loop
@@ -657,6 +667,40 @@ void HavokPickWarningGuardTestFunctions(void* fakeHandler, const void* returnAdd
 bool TrapTargetGuardInfo(TrapGuardInfo* out);
 void TrapTargetGuardTestFunctions(void* fakeUpdate, void* fakeRemove);  // self-test only
 bool TrapTargetGuardTestIsActor(const void* object);                   // self-test only: the guard's liveness check
+// bow_sneak.cpp (BowSneakAttackFix: a player's arrow hits the old engine's hit function once, the old engine's own
+// impact with the Unreal side's sneak multiplier instead of a fixed 1.0)
+struct BowSneakInfo {
+    uint8_t* queueCall;   // the Arrow_hit_Reverse_Pairing handler's call (now to the stub)
+    uint8_t* impactCall;  // the old engine's projectile impact's call [r10+868h] (now call stub; nop)
+    uint8_t* stub;
+    void* thunk;          // the hit thunk the handler calls
+    void* const* player;  // the old engine's player pointer
+    void* queueHook;
+    void* impactHook;
+    uint64_t skipped, corrected, oneOnly;
+};
+bool ApplyBowSneakAttackFix();                     // start-up (two calls on the OblivionThread's code)
+void SetBowSneakAttackFixEnabled(bool enabled);    // switchable live; off = both hits as in the stock game
+void LogBowSneakAttackFixStats();
+bool BowSneakAttackFixInfo(BowSneakInfo* out);
+void BowSneakAttackFixTestSetup(void* fakeThunk, void* const* fakePlayer, uint64_t (*clock)());  // self-test only
+// autosave_menu.cpp (AutosaveFollowsMenu: the level-up's and the scripts' autosaves are not made while all four of the
+// menu's autosave options are off)
+struct AutosaveMenuInfo {
+    uint8_t* levelUpCall;          // the level-up's call of the autosave (now to the stub)
+    uint8_t* scriptedCall;         // the scripts' Autosave command's call (now to the stub + 16)
+    uint8_t* stub;
+    void* autosave;                // the old engine's autosave function
+    const uint8_t* switches[4];    // bSaveOnInteriorExteriorSwitch, bSaveOnTravel, bSaveOnRest, bSaveOnWait
+    void* levelUpHook;
+    void* scriptedHook;
+    uint64_t skippedLevelUp, skippedScripted, made;
+};
+bool ApplyAutosaveFollowsMenu();                   // start-up (two calls on the OblivionThread's code)
+void SetAutosaveFollowsMenuEnabled(bool enabled);  // switchable live; off = both autosaves as in the stock game
+void LogAutosaveFollowsMenuStats();
+bool AutosaveFollowsMenuInfo(AutosaveMenuInfo* out);
+void AutosaveFollowsMenuTestSetup(void* fakeAutosave, const uint8_t* const* fakeSwitches);  // self-test only (nullptr: restore)
 // FrameGenCrashGuard (framegen_guard.cpp): AMD FidelityFX frame generation's command list pool waits for a free list instead of
 // crashing. Installed when amd_fidelityfx_dx12.dll loads (or at once if it is loaded before the game's code runs).
 bool WatchFrameGenLibrary(bool beforeGameCode);
@@ -728,6 +772,25 @@ struct FsrLibraryInfo {
     char name[96] = {};
 };
 FsrLibraryInfo DescribeFsrLibrary(const void* module);  // module nullptr = the loaded amd_fidelityfx_dx12.dll
+
+// menus/display_native.cpp (MonitorNativeFromWindows, FullscreenAllResolutions; on by default): a
+// monitor's native resolution from Windows' preferred mode instead of its EDID's first timing; the fullscreen list
+// without the native-aspect filter. Start-up only.
+struct DisplayNativeInfoOut {
+    uint8_t* callSite;         // RebuildDisplayMetrics' call to GetMonitorsInfo
+    uint8_t* getMonitorsInfo;
+    uint8_t* filterJump;       // the fullscreen filter's jnz
+};
+bool FindDisplayNative(DisplayNativeInfoOut* out);  // locate only (true if either site is found)
+bool InstallMonitorNativeFromWindows();
+bool InstallFullscreenAllResolutions();
+void LogDisplayNativeStats();
+
+// SeparableSkinAbove4K (trade-off): separable skin scattering while the render is wider than 4K (skin_separable.cpp).
+void SetSeparableSkinAbove4K(bool on);            // once per second from the monitor; live
+void LogSeparableSkinAbove4KStats();
+void SeparableSkinTestSetup(int32_t* data, const float* percent, const int* windowWidth);  // self-test only: fakes
+void** SeparableSkinConsoleManager();             // &GConsoleManager as found from the game's lookups (null: not found)
 
 // display_modes.cpp (DisplayModeCache: the graphics settings page re-reads every monitor's display mode list 8 times)
 struct DisplayModeCacheInfoOut {

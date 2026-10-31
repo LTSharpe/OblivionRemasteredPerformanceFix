@@ -26,6 +26,8 @@ Config LoadConfig(const wchar_t* iniPath)
         get(L"Fixes", L"PrepareCollisionBehindLoadingScreen", c.prepareCollisionBehindLoadingScreen) != 0;
     c.editorIdLookupGuard = get(L"Fixes", L"NameLookupCrashGuard", c.editorIdLookupGuard) != 0;
     c.trapCrashGuard = get(L"Fixes", L"TrapCrashGuard", c.trapCrashGuard) != 0;
+    c.bowSneakAttackFix = get(L"Fixes", L"BowSneakAttackFix", c.bowSneakAttackFix) != 0;
+    c.autosaveFollowsMenu = get(L"Fixes", L"AutosaveFollowsMenu", c.autosaveFollowsMenu) != 0;
     c.havokPickWarningGuard = get(L"Fixes", L"HavokPickWarningGuard", c.havokPickWarningGuard) != 0;
     c.frameGenCrashGuard = get(L"Fixes", L"FrameGenCrashGuard", c.frameGenCrashGuard) != 0;
     c.objectReplaceGuard = get(L"Fixes", L"ObjectReplaceCrashGuard", c.objectReplaceGuard);
@@ -36,6 +38,9 @@ Config LoadConfig(const wchar_t* iniPath)
     c.frameGenCameraInfo = get(L"Fixes", L"FrameGenCameraInfo", c.frameGenCameraInfo) != 0;
     c.frameGenPacingTuning = get(L"Fixes", L"FrameGenPacingTuning", c.frameGenPacingTuning);
     c.displayModeCache = get(L"Fixes", L"DisplayModeCache", c.displayModeCache) != 0;
+    c.monitorNativeFromWindows = get(L"Fixes", L"MonitorNativeFromWindows", c.monitorNativeFromWindows) != 0;
+    c.fullscreenAllResolutions = get(L"Fixes", L"FullscreenAllResolutions", c.fullscreenAllResolutions) != 0;
+    c.separableSkinAbove4K = get(L"Fixes", L"SeparableSkinAbove4K", c.separableSkinAbove4K) != 0;
     c.screenshotFilterFast = get(L"Fixes", L"MenuScreenshotFilter", c.screenshotFilterFast) != 0;
     c.screenshotReadbackConvert = get(L"Fixes", L"ScreenshotReadbackConvert", c.screenshotReadbackConvert);
     c.screenshotParallel = get(L"Fixes", L"ScreenshotParallel", c.screenshotParallel);

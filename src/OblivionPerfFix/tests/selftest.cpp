@@ -575,6 +575,8 @@ static uint64_t HashWords(uint64_t seed, const void* data, size_t bytes)
 #include "selftest_ledger.h"       // diagnostic HitchLedger: sites, record/ring/csv format, cost per frame
 #include "selftest_objreplace.h"   // ObjectReplaceCrashGuard: the in-place destroy site and the stub with a fake GUObjectArray
 #include "selftest_taskwait.h"     // TaskWaitDeadlockGuard: the task graph's worker wait, the wake-up protocol against fakes
+#include "selftest_display_native.h"  // MonitorNativeFromWindows / FullscreenAllResolutions
+#include "selftest_skinsss.h"      // SeparableSkinAbove4K: the switch logic against a fake variable
 #include "selftest_scan.h"         // FindAll: the fast pattern search against the reference search
 #include "selftest_ticksplit.h"        // diagnostic TickSplit: sites, entries/windows/top rows, cost per call (lab: perception split)
 
@@ -2139,6 +2141,153 @@ int wmain(int argc, wchar_t** argv)
         }
     }
 
+    // BowSneakAttackFix: a player's arrow hits the old engine's hit function once, the old engine's own impact with the
+    // Unreal side's sneak multiplier instead of its fixed 1.0.
+    {
+        Check(ApplyBowSneakAttackFix(), "bow sneak fix installed");
+        BowSneakInfo bi{};
+        Check(BowSneakAttackFixInfo(&bi), "bow sneak fix info");
+        if (Installed(bi.stub != nullptr, "BowSneakAttackFix (bow sneak attacks)")) {
+            Check(bi.queueCall == game.base + 0x65574B0, "the arrow hit handler's call at exe+0x65574B0");
+            Check(bi.impactCall == game.base + 0x6665A43, "the old engine's impact call at exe+0x6665A43");
+            Check(bi.thunk == game.base + 0x65A5200, "the hit thunk at exe+0x65A5200");
+            Check(bi.player == reinterpret_cast<void* const*>(game.base + 0x941F708), "the player pointer at exe+0x941F708");
+            Check(bi.queueCall[0] == 0xE8 && RipTarget(bi.queueCall, 1, 5) == bi.stub, "handler's call goes to the stub");
+            Check(bi.impactCall[0] == 0xE8 && RipTarget(bi.impactCall, 1, 5) == bi.stub + 16 && bi.impactCall[5] == 0x66 &&
+                      bi.impactCall[6] == 0x90,
+                  "impact's call [r10+868h] is now call stub; nop");
+            Check(*reinterpret_cast<void* const*>(bi.stub + 6) == bi.queueHook &&
+                      *reinterpret_cast<void* const*>(bi.stub + 22) == bi.impactHook,
+                  "stubs jump to the two hooks");
+            Check(ApplyBowSneakAttackFix(), "second installation finds the fix in place");
+
+            // The hooks with fakes: a fake player and target (vtables with the hit slot), arrows, a clock.
+            using HitFn = uint64_t (*)(void*, uint64_t, void*, void*, uint64_t, float, uint64_t);
+            static int thunkCalls = 0, slotCalls = 0;
+            static float lastMult = 0;
+            static uint64_t clockMs = 1000;
+            struct Fakes {
+                static uint64_t Thunk(void*, uint64_t, void*, void*, uint64_t, float mult, uint64_t)
+                {
+                    ++thunkCalls;
+                    lastMult = mult;
+                    return 1;
+                }
+                static uint64_t Slot(void*, uint64_t, void*, void*, uint64_t, float mult, uint64_t)
+                {
+                    ++slotCalls;
+                    lastMult = mult;
+                    return 2;
+                }
+                static uint64_t Clock() { return clockMs; }
+            };
+            static void* actorVtable[0x868 / 8 + 1] = {};
+            actorVtable[0x868 / 8] = reinterpret_cast<void*>(&Fakes::Slot);
+            static void* arrowVtable[1] = {};
+            static void* magicVtable[1] = {};
+            struct Obj { void** vtable; };
+            static Obj player{actorVtable}, npc{actorVtable}, target{actorVtable};
+            static Obj arrowA{arrowVtable}, arrowB{arrowVtable}, arrowC{arrowVtable}, magic{magicVtable};
+            static void* playerPtr = &player;
+            BowSneakAttackFixTestSetup(reinterpret_cast<void*>(&Fakes::Thunk), &playerPtr, &Fakes::Clock);
+            const auto queue = reinterpret_cast<HitFn>(bi.queueHook);
+            const auto impact = reinterpret_cast<HitFn>(bi.impactHook);
+            Check(impact(&player, 0, &arrowA, &target, 0, 1.0f, 0) == 2 && slotCalls == 1 && lastMult == 1.0f,
+                  "old engine's hit before any Unreal-side value: made at 1.0 (stock)");
+            clockMs += 1000;
+            Check(queue(&player, 0, &arrowB, &target, 3, 2.0f, 0) == 1 && thunkCalls == 1 && lastMult == 2.0f,
+                  "Unreal side's hit: made with its multiplier");
+            clockMs += 2000;
+            Check(impact(&player, 0, &arrowC, &target, 0, 1.0f, 0) == 2 && slotCalls == 2 && lastMult == 2.0f,
+                  "old engine's hit first: made with the Unreal side's multiplier (2.0, not 1.0)");
+            clockMs += 8;
+            Check(queue(&player, 0, &arrowC, &target, 3, 2.0f, 0) == 0 && thunkCalls == 1,
+                  "the same arrow's Unreal-side hit 8 ms later: not made (one hit per arrow)");
+            clockMs += 2000;
+            Check(queue(&player, 0, &arrowA, &target, 3, 3.0f, 0) == 1 && thunkCalls == 2 && lastMult == 3.0f,
+                  "Unreal side first (multiplier now 3.0): made");
+            Check(impact(&player, 0, &arrowA, &target, 0, 1.0f, 0) == 0 && slotCalls == 2,
+                  "the same arrow's old-engine hit: not made");
+            clockMs += 600;
+            Check(impact(&player, 0, &arrowA, &target, 0, 1.0f, 0) == 2 && slotCalls == 3 && lastMult == 3.0f,
+                  "the same arrow and target after 500 ms: a new hit, with the latest multiplier");
+            Check(impact(&player, 0, &magic, &target, 0, 1.0f, 0) == 2 && slotCalls == 4 && lastMult == 1.0f,
+                  "another projectile class: its 1.0 kept");
+            Check(impact(&npc, 0, &arrowB, &target, 0, 1.0f, 0) == 2 && slotCalls == 5 && lastMult == 1.0f &&
+                      queue(&npc, 0, &arrowB, &target, 3, 2.0f, 0) == 1 && thunkCalls == 3,
+                  "another attacker: both hits made as in the stock game");
+            SetBowSneakAttackFixEnabled(false);
+            Check(impact(&player, 0, &arrowB, &target, 0, 1.0f, 0) == 2 && slotCalls == 6 && lastMult == 1.0f &&
+                      queue(&player, 0, &arrowB, &target, 3, 2.0f, 0) == 1 && thunkCalls == 4,
+                  "switched off: both hits, the old engine's at 1.0, as in the stock game");
+            SetBowSneakAttackFixEnabled(true);
+            BowSneakAttackFixInfo(&bi);
+            Check(bi.skipped == 2 && bi.corrected == 2 && bi.oneOnly == 2, "second hits, corrected and 1.0 hits counted");
+            LogBowSneakAttackFixStats();
+            BowSneakAttackFixTestSetup(nullptr, nullptr, nullptr);
+        }
+    }
+
+    // AutosaveFollowsMenu: the level-up's and the scripts' autosaves are not made while all four of the menu's autosave
+    // options are off.
+    {
+        Check(ApplyAutosaveFollowsMenu(), "autosave fix installed");
+        AutosaveMenuInfo ai{};
+        Check(AutosaveFollowsMenuInfo(&ai), "autosave fix info");
+        if (Installed(ai.stub != nullptr, "AutosaveFollowsMenu (autosaves with the menu's options off)")) {
+            Check(ai.levelUpCall == game.base + 0x65FF287, "the level-up's autosave call at exe+0x65FF287");
+            Check(ai.scriptedCall == game.base + 0x6A07684, "the scripts' autosave call at exe+0x6A07684");
+            Check(ai.autosave == game.base + 0x6703BC0, "the autosave at exe+0x6703BC0");
+            Check(ai.switches[0] == game.base + 0x941DAD8 && ai.switches[1] == game.base + 0x941DB28 &&
+                      ai.switches[2] == game.base + 0x941DA80 && ai.switches[3] == game.base + 0x941DA68,
+                  "the menu's settings at exe+0x941DAD8 / DB28 / DA80 / DA68 (interior/exterior, travel, rest, wait)");
+            Check(ai.levelUpCall[0] == 0xE8 && RipTarget(ai.levelUpCall, 1, 5) == ai.stub, "level-up's call goes to the stub");
+            Check(ai.scriptedCall[0] == 0xE8 && RipTarget(ai.scriptedCall, 1, 5) == ai.stub + 16,
+                  "scripted autosave's call goes to the stub + 16");
+            Check(*reinterpret_cast<void* const*>(ai.stub + 6) == ai.levelUpHook &&
+                      *reinterpret_cast<void* const*>(ai.stub + 22) == ai.scriptedHook,
+                  "stubs jump to the two hooks");
+            Check(ApplyAutosaveFollowsMenu(), "second installation finds the fix in place");
+
+            // The hooks with a fake autosave and fake switches.
+            using SaveFn = void (*)(void*);
+            static int saves = 0;
+            static void* lastManager = nullptr;
+            struct Fakes {
+                static void Autosave(void* manager)
+                {
+                    ++saves;
+                    lastManager = manager;
+                }
+            };
+            static uint8_t sw[4] = {};
+            static const uint8_t* swp[4] = {&sw[0], &sw[1], &sw[2], &sw[3]};
+            AutosaveFollowsMenuTestSetup(reinterpret_cast<void*>(&Fakes::Autosave), swp);
+            const auto levelUp = reinterpret_cast<SaveFn>(ai.levelUpHook);
+            const auto scripted = reinterpret_cast<SaveFn>(ai.scriptedHook);
+            int manager = 0;
+            levelUp(&manager);
+            scripted(&manager);
+            Check(saves == 0, "all four menu options off: no level-up or scripted autosave");
+            for (int i = 0; i < 4; ++i) {
+                sw[i] = 1;
+                levelUp(&manager);
+                scripted(&manager);
+                sw[i] = 0;
+            }
+            Check(saves == 8 && lastManager == &manager, "any one option on: both autosaves made, with the game's argument");
+            SetAutosaveFollowsMenuEnabled(false);
+            levelUp(&manager);
+            scripted(&manager);
+            Check(saves == 10, "switched off: both autosaves made as in the stock game");
+            SetAutosaveFollowsMenuEnabled(true);
+            AutosaveFollowsMenuInfo(&ai);
+            Check(ai.skippedLevelUp == 1 && ai.skippedScripted == 1 && ai.made == 10, "skipped and made autosaves counted");
+            LogAutosaveFollowsMenuStats();
+            AutosaveFollowsMenuTestSetup(nullptr, nullptr);
+        }
+    }
+
     // HavokPickWarningGuard: the old engine's "Havok picks" warning box (a modal MessageBoxA on the OblivionThread) held back.
     {
         // A changed handler first (the pointer at exe+0x8FB7CC8 aimed at another function): the guard refuses and leaves the
@@ -2380,6 +2529,10 @@ int wmain(int argc, wchar_t** argv)
     hl::Run(game);
     // Diagnostic TickSplit (selftest_ticksplit.h): rides on the ledger's tick-group hook.
     tsp::Run(game);
+    // MonitorNativeFromWindows / FullscreenAllResolutions (selftest_display_native.h).
+    dnat::Run(game);
+    // SeparableSkinAbove4K (selftest_skinsss.h).
+    skinsss::Run(game);
     // AnimTeardownParallel (lab prototype): dying NPC animation data's interpolators on helper threads (selftest_animpar.h).
     apar::Run(game);
     // CellBufferPacedEvict (lab prototype): spare cell buffer slots, overflow torn down one cell per OT frame (selftest_cellbuf.h); after
