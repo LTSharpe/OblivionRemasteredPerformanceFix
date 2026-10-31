@@ -156,6 +156,8 @@ DWORD WINAPI MonitorThread(LPVOID)
         SetReadbackConvertMode(cfg.screenshotReadbackConvert);  // ScreenshotReadbackConvert: no-op unless installed at start-up
         SetScreenshotParallel(cfg.screenshotParallel);          // ScreenshotParallel: no-op unless installed at start-up
         if (g_focusHooked) SetFocusRestoreEnabled(cfg.restoreFsrAfterAltTab);
+        SetHdrMenuBackground(cfg.hdrMenuBackground);            // HdrMenuBackground: no-op unless installed
+        SetHdrSaveThumbnail(cfg.hdrSaveThumbnail);              // HdrSaveThumbnail: no-op unless installed
         SetMenuOpenFlashFix(cfg.menuOpenFlashFix);  // MenuOpenFlashFix: no-op unless installed at start-up
         if (g_physAnimHooked) SetPhysAnimNoEmptyLock(cfg.physAnimNoEmptyLock);
         SetRigTraceReuse(cfg.rigTraceReuse);  // RigTraceReuse: no-op unless installed at start-up
@@ -205,6 +207,9 @@ DWORD WINAPI MonitorThread(LPVOID)
         PsoPrecompileWatchDriver();  // the cold-cache guard's driver-thread reading (no-op unless installed and precompiling)
         SetAnimTeardownParallel(ParallelHelpersAllowed(cfg) ? cfg.animTeardownParallel : 0);    // AnimTeardownParallel: no-op unless installed at start-up
         SetCellBufferPacedEvict(cfg.cellBufferPacedEvict);    // CellBufferPacedEvict: no-op unless installed at start-up
+        HdrMenuMonitorTick();                                 // HdrMenuRows: reads Save_Settings.sav once (no-op unless installed)
+        SetHdrGamma22(cfg.hdrGamma22, cfg.hdrGamma22White);   // HdrGamma22 (trade-off): live (no-op unless installed)
+        HdrGammaMonitorTick();                                // ... fits a curve the game thread asked for
         SetPhysicsPushParallel(ParallelHelpersAllowed(cfg) ? cfg.physicsPushParallel : 0, cfg.physicsPushMin);  // PhysicsPushParallel: no-op unless installed
         if (g_navmeshFound) SetNavmeshBuildNoBusyWait(cfg.navmeshBuildNoBusyWait);
         if (g_busyWaitFound) SetBusyWaitFlagCheck(cfg.busyWaitFlagCheck);
@@ -248,6 +253,9 @@ DWORD WINAPI MonitorThread(LPVOID)
             LogFrameGenAsyncComputeState();
             LogFrameGenCameraInfoStats();
             LogFrameGenPacingStats();
+            LogHdrGammaStats();       // HdrGamma22 (no-op unless it wrote)
+            LogHdrMenuBackgroundStats();  // HdrMenuBackground (no-op unless it converted)
+            LogHdrSaveThumbnailStats();   // HdrSaveThumbnail (no-op unless a save's picture passed)
             LogDisplayModeCacheStats();
             LogImageResizeStats();
             LogReadbackConvertStats();
@@ -652,6 +660,26 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
     // route's start-up also runs before WinMain).
     if (cfg.naniteInitialRootPages) SetNaniteInitialRootPages(cfg.naniteInitialRootPages, beforeGameCode);
     else Log("[nanite] NaniteInitialRootPages=0: the game's 2048 root pages");
+    // HdrMenuBackground (trade-off): the menu screenshot handler's ImageResize call redirected always (the wrapper
+    // passes through while off or not HDR10); the ini switches it live.
+    if (ApplyHdrMenuBackground(beforeGameCode)) SetHdrMenuBackground(cfg.hdrMenuBackground);
+    // HdrSaveThumbnail (trade-off): the save's screenshot callback's copy redirected always (the wrapper only
+    // copies while off or not HDR10); the ini switches it live.
+    if (ApplyHdrSaveThumbnail(beforeGameCode)) SetHdrSaveThumbnail(cfg.hdrSaveThumbnail);
+    // HdrMenuRows, HudAspectRow and DlssRayReconstruction: before FrameRateLimitAtStart, whose detour of frame generation's
+    // switch hides the pattern Altar's command setter is found by. No code patched; the Graphics page's rows are made from
+    // NpcCreationPacing's frame hook once the settings tables exist. Only if on at startup.
+    if (cfg.hdrMenuRows || cfg.dlssRayReconstruction || cfg.hudAspectRow) {
+        if (!g_pacingHooked) Log("[hdrmenu] NpcCreationPacing's frame hook is not installed: HdrMenuRows / DlssRayReconstruction / HudAspectRow not installed");
+        else InstallHdrMenu(cfg.hdrMenuRows, cfg.dlssRayReconstruction, cfg.hudAspectRow, beforeGameCode);
+    }
+    if (!cfg.hdrMenuRows) Log("[hdrmenu] HdrMenuRows off in OblivionPerfFix.ini (takes a restart to switch on)");
+    if (!cfg.dlssRayReconstruction) Log("[rrrow] DlssRayReconstruction off in OblivionPerfFix.ini (takes a restart to switch on)");
+    if (!cfg.hudAspectRow) Log("[hudaspect] HudAspectRow off in OblivionPerfFix.ini (takes a restart to switch on)");
+    // HdrGamma22 (trade-off): no code patched; the HDR tone curve's block is found here and refitted from
+    // NpcCreationPacing's frame hook while the ini switch is on (live, also when off at startup).
+    if (!g_pacingHooked) Log("[hdrgamma] NpcCreationPacing's frame hook is not installed: HdrGamma22 not installed");
+    else if (InstallHdrGamma()) SetHdrGamma22(cfg.hdrGamma22, cfg.hdrGamma22White);
     // FrameRateLimitAtStart (game bug): frame generation's switch, detoured only if != 0 at start-up and while it is still off
     // (acts once, at its first switch on).
     if (cfg.frameRateLimitAtStart) InstallFrameCapStart(beforeGameCode, cfg.frameRateLimitAtStart);

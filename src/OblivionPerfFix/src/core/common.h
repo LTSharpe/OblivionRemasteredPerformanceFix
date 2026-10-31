@@ -85,10 +85,6 @@ struct Config {
     bool prepareCollisionBehindLoadingScreen = true;   // PrepareCollisionBehindLoadingScreen: hand a transition's new area to physics while still frozen (A-B clean, 2026-10-05)
     bool editorIdLookupGuard = true;   // NameLookupCrashGuard: name lookups skip freed name-table entries instead of crashing (game bug)
     bool trapCrashGuard = true;        // TrapCrashGuard: traps drop actors that no longer exist instead of crashing (game bug)
-    bool bowSneakAttackFix = false;    // BowSneakAttackFix (off: changes damage): one hit per player arrow, the old engine's with the Unreal side's sneak
-                                       // multiplier (game bug: bow sneak attacks at 1x or hit twice)
-    bool autosaveFollowsMenu = true;   // AutosaveFollowsMenu: no level-up or scripted autosave while every autosave option in the
-                                       // menu is off (game bug)
     bool havokPickWarningGuard = true; // HavokPickWarningGuard: the old engine's "Havok picks" warning box no longer stops the game (game bug)
     bool frameGenCrashGuard = true;    // FrameGenCrashGuard: FSR 3 frame generation waits for a free command list instead of crashing (AMD library)
     int objectReplaceGuard = 1;        // ObjectReplaceCrashGuard: an in-place object re-creation whose destroy kept its slot releases it instead of
@@ -107,12 +103,6 @@ struct Config {
     bool frameGenCameraInfo = true;   // FrameGenCameraInfo: the camera desc for AMD's ML frame generation (SDK 2.x DLLs)
     int frameGenPacingTuning = 1;      // FrameGenPacingTuning: AMD's FG present pacing tuning (FSR 3.1.4 or SDK 2.x DLLs): 0 game's, 1 Set B but the driver's own swap chain left alone, 2 Set A, 3 Set B everywhere (1)
     bool displayModeCache = true;      // DisplayModeCache: GetMonitorsInfo reads each monitor's mode list once (checked each time)
-    bool monitorNativeFromWindows = true;   // MonitorNativeFromWindows (game bug, on by default): a monitor's native
-                                            // resolution from Windows' preferred mode, not the EDID's first timing (start-up only)
-    bool fullscreenAllResolutions = true;   // FullscreenAllResolutions (on by default): every mode of the monitor
-                                            // in the fullscreen resolution list (start-up only)
-    bool separableSkinAbove4K = false;  // SeparableSkinAbove4K (off, trade-off): r.SSS.Burley.Quality 0 while the
-                                         // render is wider than 3840 (the magenta skin specks on ultrawides at DLAA); live
     bool screenshotFilterFast = true;  // MenuScreenshotFilter: the menu's same-size ImageResize of its screenshot, same bytes in SSE2
     int screenshotReadbackConvert = 1; // ScreenshotReadbackConvert: the screenshot readback's R10G10B10A2 -> FColor conversion in SSE2 (identical
                                        // bytes; start-up install, then live): 0 off, 1 on, 2 on + verify against the game's loop
@@ -239,39 +229,29 @@ struct Config {
                                         // (needs ParallelStaticBodies at start-up; live; identical)
     bool gpuSceneParallelUpload = true;  // GpuSceneParallelUpload: r.GPUScene.ParallelUpdate 1 (the GPU scene's instance upload of a
                                          // streamed area on all workers; identical; live)
-    int vtStreamingUploads = 0;        // VtStreamingUploads (off by default): r.VT.MaxUploadsPerFrame.Streaming set to
-                                       // this (streamed virtual texture pages uploaded per frame; the game's 4; 0 = the game's
-                                       // value; live)
     bool hitchLedger = false;          // Diagnostic HitchLedger: slow game-thread frames' stage times to
                                        // OblivionPerfFix-ledger.csv (installed only if on at start-up, then switched live)
     int hitchLedgerMs = 25;            // ... a frame counts as slow from this period (ms, the cap's sleep included)
-    bool doorDiag = false;             // diagnostic DoorDiag (not in the shipped ini): door/loading-screen timeline,
-                                       // stream-all timing, render-target pool misses/flushes (installed only if on at start-up)
-    bool doorDiagEarlyStream = false;  // ... experiment: stream-all once when the loading screen idles (live)
-    bool fadeVtFlushSkip = false;      // FadeVtFlushSkip (off by default): the r.VT.Flush the game runs 1.5 s into a
-                                       // transition's fade-in skipped (installed only if on at start-up, then live)
-    bool streamBehindLoading = true;   // StreamBehindLoadingScreen: a new area's textures stream while its loading screen is still
-                                       // up, so the fade-in is not held for them (installed only if on at start-up, then live)
-    int unfreezeBehindLoading = 0;     // prototype UnfreezeBehindLoadingScreen (trade-off, off by default): after an
-                                       // exit, ms the world runs behind the loading screen before the fade-in, as after an
-                                       // interior entry (0 = off; live; needs StreamBehindLoadingScreen)
-    int unfreezeBehindLoadingFastTravel = 0;  // the same after a fast travel, in ms (0 = UnfreezeBehindLoadingScreen's
-                                              // value; on only while UnfreezeBehindLoadingScreen is on; live)
+    bool hdrMenuRows = false;          // HdrMenuRows (off by default): an HDR section on the PC Graphics page (HDR,
+                                       // peak, paper white, black floor, mid-tone; start-up only; needs NpcCreationPacing)
+    bool hudAspectRow = false;          // HudAspectRow (off by default): a "HUD Aspect Ratio" row (4:3 / 16:9 /
+                                        // 21:9 / 32:9 / Wide) in the Graphics page's General section (start-up only)
+    bool dlssRayReconstruction = false;  // DlssRayReconstruction (off by default, trade-off): a "DLSS - Ray
+                                         // Reconstruction" row in the Graphics page's Advanced section (start-up only)
+    bool hdrGamma22 = true;            // HdrGamma22 (TRADE-OFF, on by default; HDR only): the HDR picture's darks as an SDR
+                                       // monitor shows them (gamma 2.2), the curve refitted in memory (live; needs NpcCreationPacing)
+    bool hdrMenuBackground = false;    // HdrMenuBackground (TRADE-OFF, off by default): the player menu's background
+                                       // in HDR10 shown at the world's nits, not its PQ values as colour (start-up install, live)
+    bool hdrSaveThumbnail = false;     // HdrSaveThumbnail (TRADE-OFF, off by default): a save's thumbnail made in
+                                       // HDR10 converted the same way (start-up install, live)
+    int hdrGamma22White = 95;         // not in the shipped ini: HdrGamma22's reference white = this / 10 x the Mid-Tone (live)
     bool hitchLedgerTickSplit = false; // HitchLedgerTickSplit (diagnostic, public since 1.2.3): diagnostics/tick_split.cpp, the
                                        // game thread's tick time by kind, class and group to OblivionPerfFix-ticksplit.csv
                                        // (needs HitchLedger=1; installed only if on at start-up, then live)
-    bool vramCounterFix = true;        // VramCounterFix: the Graphics page's "Show VRAM" counter shows the game's video
-                                       // memory use and budget instead of 0/0 (game bug; start-up install, live)
-    bool shaderScreenAfterDriverChange = true;   // ShaderScreenAfterDriverChange (game bug): the game's first-launch
-                                                 // shader screen at start-up after a driver/card change (start-up only)
     bool npcCreationPacing = true;    // NpcCreationPacing: far-away NPC creation spread over frames 
     int pacingBudgetMs = 4;           // not in the shipped ini: NPC unit time per frame before far units wait
     int pacingMinDistance = 4096;      // not in the shipped ini: only actors farther than this (game units) wait
     int pacingMaxLagFrames = 15;       // not in the shipped ini: work older than this many frames runs regardless
-    bool clothBuildDefer = true;       // ClothBuildDefer: npcs/cloth_defer.cpp, a far, unseen NPC's first cloth simulation
-                                       // build waits a few frames, repeated requests merge (needs NpcCreationPacing; timing
-                                       // change; start-up install on the version.dll route, then live)
-    int clothDeferQuietFrames = 6;     // not in the shipped ini: ... frames without a new request before it is built
     bool pacingUseSlack = true;        // not in the shipped ini: under a frame-rate cap, use the cap's sleep as budget
     bool pacingFlowWait = true;        // not in the shipped ini: a level flow waits for the main queue instead of draining it
     bool pacingLeanFlowDrain = true;   // PacingLeanFlowDrain: a level flow at its wait bound drains the owed main queue only;
@@ -312,6 +292,7 @@ int NavLinkFastTestSkip(const uint8_t* tile, const uint8_t* target, int side);  
 uint8_t* NavLinkFastTestSite(int which);   // self-test only: -1 the findConnectingPolys call, 0-3 addTile's connectExtLinks calls
 // ---- framegen/frame_cap_start.cpp (FrameRateLimitAtStart, game bug) ----
 bool FindFrameCapStart();
+uint8_t* AltarCommandSetter();  // Altar's command setter, bool (const {FString name, FString value}*, bool force); nullptr if not found
 bool InstallFrameCapStart(bool beforeGameCode, int mode);  // start-up only (version.dll and OBSE64 routes, while T's state is off)
 bool FrameCapStartTestPatched();                           // self-test: T's entry jump and trampoline
 bool FrameCapStartTestRun(void* fakeOrig, void* fakeGetter, void* fakeHash, void* fakeFind, void* fakeSet, const void* name,
@@ -607,6 +588,7 @@ bool ApplyObjectReplaceGuard();            // start-up (one call site in StaticA
 void SetObjectReplaceGuardMode(int mode);  // live: 1 on; lab 2 = log only
 void LogObjectReplaceGuardStats();
 bool ObjectReplaceGuardInfo(ObjectReplaceGuardInfoOut* out);
+uint8_t* FindObjectArrayFromDtor();                    // GUObjectArray from ~UObjectBase (no patching; nullptr if not exactly one match)
 bool ObjectReplaceGuardTestPatched();                  // self-test only
 void ObjectReplaceGuardTestArray(uint8_t* fakeArray);  // self-test only: a fake GUObjectArray
 
@@ -682,40 +664,6 @@ void HavokPickWarningGuardTestFunctions(void* fakeHandler, const void* returnAdd
 bool TrapTargetGuardInfo(TrapGuardInfo* out);
 void TrapTargetGuardTestFunctions(void* fakeUpdate, void* fakeRemove);  // self-test only
 bool TrapTargetGuardTestIsActor(const void* object);                   // self-test only: the guard's liveness check
-// bow_sneak.cpp (BowSneakAttackFix: a player's arrow hits the old engine's hit function once, the old engine's own
-// impact with the Unreal side's sneak multiplier instead of a fixed 1.0)
-struct BowSneakInfo {
-    uint8_t* queueCall;   // the Arrow_hit_Reverse_Pairing handler's call (now to the stub)
-    uint8_t* impactCall;  // the old engine's projectile impact's call [r10+868h] (now call stub; nop)
-    uint8_t* stub;
-    void* thunk;          // the hit thunk the handler calls
-    void* const* player;  // the old engine's player pointer
-    void* queueHook;
-    void* impactHook;
-    uint64_t skipped, corrected, oneOnly;
-};
-bool ApplyBowSneakAttackFix();                     // start-up (two calls on the OblivionThread's code)
-void SetBowSneakAttackFixEnabled(bool enabled);    // switchable live; off = both hits as in the stock game
-void LogBowSneakAttackFixStats();
-bool BowSneakAttackFixInfo(BowSneakInfo* out);
-void BowSneakAttackFixTestSetup(void* fakeThunk, void* const* fakePlayer, uint64_t (*clock)());  // self-test only
-// autosave_menu.cpp (AutosaveFollowsMenu: the level-up's and the scripts' autosaves are not made while all four of the
-// menu's autosave options are off)
-struct AutosaveMenuInfo {
-    uint8_t* levelUpCall;          // the level-up's call of the autosave (now to the stub)
-    uint8_t* scriptedCall;         // the scripts' Autosave command's call (now to the stub + 16)
-    uint8_t* stub;
-    void* autosave;                // the old engine's autosave function
-    const uint8_t* switches[4];    // bSaveOnInteriorExteriorSwitch, bSaveOnTravel, bSaveOnRest, bSaveOnWait
-    void* levelUpHook;
-    void* scriptedHook;
-    uint64_t skippedLevelUp, skippedScripted, made;
-};
-bool ApplyAutosaveFollowsMenu();                   // start-up (two calls on the OblivionThread's code)
-void SetAutosaveFollowsMenuEnabled(bool enabled);  // switchable live; off = both autosaves as in the stock game
-void LogAutosaveFollowsMenuStats();
-bool AutosaveFollowsMenuInfo(AutosaveMenuInfo* out);
-void AutosaveFollowsMenuTestSetup(void* fakeAutosave, const uint8_t* const* fakeSwitches);  // self-test only (nullptr: restore)
 // FrameGenCrashGuard (framegen_guard.cpp): AMD FidelityFX frame generation's command list pool waits for a free list instead of
 // crashing. Installed when amd_fidelityfx_dx12.dll loads (or at once if it is loaded before the game's code runs).
 bool WatchFrameGenLibrary(bool beforeGameCode);
@@ -788,25 +736,6 @@ struct FsrLibraryInfo {
 };
 FsrLibraryInfo DescribeFsrLibrary(const void* module);  // module nullptr = the loaded amd_fidelityfx_dx12.dll
 
-// menus/display_native.cpp (MonitorNativeFromWindows, FullscreenAllResolutions; on by default): a
-// monitor's native resolution from Windows' preferred mode instead of its EDID's first timing; the fullscreen list
-// without the native-aspect filter. Start-up only.
-struct DisplayNativeInfoOut {
-    uint8_t* callSite;         // RebuildDisplayMetrics' call to GetMonitorsInfo
-    uint8_t* getMonitorsInfo;
-    uint8_t* filterJump;       // the fullscreen filter's jnz
-};
-bool FindDisplayNative(DisplayNativeInfoOut* out);  // locate only (true if either site is found)
-bool InstallMonitorNativeFromWindows();
-bool InstallFullscreenAllResolutions();
-void LogDisplayNativeStats();
-
-// SeparableSkinAbove4K (trade-off): separable skin scattering while the render is wider than 4K (skin_separable.cpp).
-void SetSeparableSkinAbove4K(bool on);            // once per second from the monitor; live
-void LogSeparableSkinAbove4KStats();
-void SeparableSkinTestSetup(int32_t* data, const float* percent, const int* windowWidth);  // self-test only: fakes
-void** SeparableSkinConsoleManager();             // &GConsoleManager as found from the game's lookups (null: not found)
-
 // display_modes.cpp (DisplayModeCache: the graphics settings page re-reads every monitor's display mode list 8 times)
 struct DisplayModeCacheInfoOut {
     void** slot;            // the exe's import slot for USER32!EnumDisplaySettingsW (now the hook)
@@ -829,27 +758,23 @@ bool ApplyImageResizeFix(bool beforeGameCode);  // redirects one call (two bytes
 void SetImageResizeFixEnabled(bool enabled);    // switchable live; off = the game's own loop
 void LogImageResizeStats();
 bool ImageResizeFixInfo(uint8_t** call, uint8_t** original, uint8_t** stub, void** hook);
-// vram_counter.cpp (VramCounterFix): the "Show VRAM" counter's query reads two adapter fields the shipping build
-// never updates (0/0); with both 0, filled from the monitor thread's DXGI sample (memory_monitor.cpp)
-bool ApplyVramCounterFix(bool beforeGameCode);  // redirects the query's two calls (start-up)
-void SetVramCounterFix(bool on);                // live
-void LogVramCounterFixStats();
-struct VramCounterInfo {
-    uint8_t* query;    // the game's query (budget MB, used MB)
-    uint8_t* calls[2]; // the overlay's call and GetUsedVRAMMB's exec thunk's call
-    uint8_t* stub;
-    void* hook;
-    uint64_t filled, gameValues, unknown;
-};
-bool VramCounterFixInfo(VramCounterInfo* out);
-void VramCounterFixTestSetup(void* original, bool (*latest)(uint64_t*, uint64_t*));  // self-test
-bool LatestGameVram(uint64_t* used, uint64_t* budget);  // memory_monitor.cpp: last DXGI sample (bytes); false = none yet
-// shader_screen.cpp (ShaderScreenAfterDriverChange, game bug): the start-up's Save_Settings check (which decides the
-// game's first-launch shader screen) answers "no save" once after the graphics card or driver changed
-bool ApplyShaderScreenAfterDriverChange(bool beforeGameCode, const wchar_t* dir);  // start-up only; dir: the DLL's folder
-bool ShaderScreenInfo(uint8_t** call, uint8_t** original, uint8_t** stub, void** hook);
-void ShaderScreenTestSetup(void* original, bool (*gpu)(char*, size_t), const wchar_t* recordPath);  // self-test
-void ShaderScreenPrecompileFinished();  // pso_precompile.cpp: the start-up precompile ended (records a pending card/driver)
+// menu_hdr_background.cpp (HdrMenuBackground, TRADE-OFF, off by default): in HDR10 the menu's background
+// screenshot holds sRGB-encoded PQ values the UI shows as colour; remapped to sRGB at the same nits
+bool ApplyHdrMenuBackground(bool beforeGameCode);  // redirects the handler's one ImageResize call (start-up)
+void SetHdrMenuBackground(bool on);                // live
+void LogHdrMenuBackgroundStats();
+bool HdrMenuBackgroundInfo(uint8_t** call, uint8_t** original, uint8_t** stub, void** hook, void*** manager);
+void HdrMenuBackgroundTable(float uiNits, uint8_t (&table)[256]);  // screenshot byte (sRGB-encoded PQ) -> sRGB at the same nits
+void HdrMenuBackgroundTestSetup(void* original, const int32_t* hdr, const int32_t* device, const float* uiNits);  // self-test
+// (same file) HdrSaveThumbnail (TRADE-OFF, off by default): the save's screenshot callback's pixel copy
+// through a wrapper that converts the holder's bytes with the same table in HDR10
+bool ApplyHdrSaveThumbnail(bool beforeGameCode);   // redirects the callback's one copy call (start-up)
+void SetHdrSaveThumbnail(bool on);                 // live
+void LogHdrSaveThumbnailStats();
+uint8_t* HdrSaveThumbnailResolve(uint8_t* p);      // the game's copy when p is the stub, else p (SaveThumbnailAsync's check)
+bool HdrSaveThumbnailInfo(uint8_t** call, uint8_t** original, uint8_t** stub, void** hook);
+void HdrSaveThumbnailTestSetup(void* original);    // self-test: the copy the wrapper calls
+void** HdrConsoleManager();                        // &GConsoleManager (menu_hdr_background.cpp's lookup), or null; monitor thread
 // UE's ImageResize for equal sizes (2x2 box filter, truncated, alpha 255 if forceOpaque) on 4-byte FColor pixels
 void BoxFilter2x2(int32_t w, int32_t h, const uint32_t* src, uint32_t* dst, bool forceOpaque);
 
@@ -884,8 +809,6 @@ bool OsPageCacheInfo(OsPageCacheInfoOut* out);
 bool InstallPsoPrecompileFast(bool beforeGameCode);  // SetBatchMode's entry detour (start-up)
 void SetPsoPrecompileFast(bool enabled);             // live (the game thread's timer applies it at its next check)
 void SetPsoPrecompileFastInGameMenus(bool enabled);  // live: Fast also in menus after play started (default: the game's pace)
-void SetPsoPrecompileScreenHold(bool on);  // ShaderScreenAfterDriverChange: UE's Fast, no cold guard, until the main menu
-bool PsoPrecompileScreenHold();
 void LogPsoPrecompileStats();
 struct PsoPrecompileInfoOut {
     uint8_t* setBatchMode;
@@ -917,7 +840,6 @@ void SetPsoPrecompileFastBudget(float ms, int coldQueue);  // live: render-threa
 void PsoPrecompileTestStatics(uint32_t* batchSize, float* batchTime, int64_t* active);  // self-test: fakes for the statics
 void PsoPrecompileWatchDriver();               // monitor thread, once a second: the driver's compile threads (cold-cache guard)
 void PsoPrecompileTestDriverBusy(double cores);  // self-test: one second's reading of the driver's compile threads
-int PsoPrecompileTestOwnThreads(uint32_t* mainThread);  // self-test: this process's threads (NtQuerySystemInformation) and the first one
 // anim_teardown.cpp (AnimTeardownParallel, lab prototype: dying NPC animation data's interpolators on helper threads; off by default)
 bool FindAnimTeardownParallel();                         // locate and verify everything (no patching)
 bool InstallAnimTeardownParallel(bool beforeGameCode);   // start-up only (three calls redirected)
@@ -939,6 +861,46 @@ bool FindCellBufferPacedEvict();                          // locate and verify e
 bool InstallCellBufferPacedEvict(bool beforeGameCode);   // start-up only (before the TES constructor; last: chains detours)
 void SetCellBufferPacedEvict(int mode);                  // live: 0 crossing-frame teardown (as the game), 1 paced
 void LogCellBufferPacedEvictStats();
+// settings/hdr_menu.cpp (HdrMenuRows, off by default): an HDR section on the game's PC Graphics page
+// (a new settings table and category row, in memory; game thread): HDR, peak, paper white, black floor, mid-tone
+struct HdrMenuInfoOut {
+    uint8_t* fromString;   // FText::FromString(const FString&)
+    uint8_t* fnameCtor;    // FName(const TCHAR*, EFindName)
+    uint8_t* malloc;       // FMemory::Malloc
+    uint8_t* free;         // FMemory::Free (checked: the same GMalloc)
+    uint8_t* gmalloc;
+    uint8_t* objectArray;  // GUObjectArray
+    uint8_t* setter;       // Altar's command setter (the HDR variables synced to the shown state once)
+    uint8_t* addOrUpdate;  // UAltarGameUserSetting::AddOrUpdateSettingsToSave
+    uint8_t* saveWriter;   // the settings save's writer (Save_Settings slot)
+    const uint8_t* saveSlot;  // its slot name FString
+    uint8_t* spawnObject;  // UGameplayStatics::SpawnObject (NewObject for the HDR section's table)
+};
+bool FindHdrMenu(HdrMenuInfoOut* out);   // locate only; false = unavailable (logged)
+bool InstallHdrMenu(bool hdrRows, bool rayReconstruction, bool hudAspect, bool beforeGameCode);  // start-up, the parts that are on (needs NpcCreationPacing's frame hook)
+uint8_t* FindProcessEvent();                       // HudAspectRow: UObject::ProcessEvent by its prologue, or null
+bool HudAspectIntRegistrationFound();              // HudAspectRow: the console manager's int registration as expected (self-test)
+float HudPadding(float w, float h, float scale, float aspect);  // HudAspectRow: Slate padding per side for a centred box (-1: no viewport)
+bool RrLockInfo(uint8_t** call, uint8_t** original, uint8_t** stub, void** hook);  // self-test: the upscaler lock's lookup call (installs it)
+void RrLockTestSetup(void* original);    // self-test: the lookup the wrapper calls
+void HdrMenuFrameEnd();                  // game thread, once per frame (NpcCreationPacing's frame hook)
+void HdrMenuMonitorTick();               // monitor thread, every second (its first tick reads Save_Settings.sav)
+// render/hdr_gamma.cpp (HdrGamma22, TRADE-OFF, off by default): the HDR tone curve's darks re-decoded as
+// gamma 2.2 (an SDR monitor's) instead of sRGB, by refitting the curve's spline in its parameter block (no code patched)
+struct HdrGammaInfoOut {
+    uint8_t* getter;   // the tone-curve block's getter (every pass copies the block through it)
+    uint8_t* block;    // the block (20 floats, .data)
+    uint8_t* builder;  // the tone-scale parameter build (its 4.8 / 1.55 mid-point stores)
+};
+bool FindHdrGamma(HdrGammaInfoOut* out);  // locate only
+bool InstallHdrGamma();                   // start-up (needs NpcCreationPacing's frame hook); nothing written while off
+void SetHdrGamma22(bool on, int whiteX10);  // monitor thread (live); W = whiteX10 / 10 x the Mid-Tone
+void HdrGammaFrameEnd();                  // game thread, once per frame (NpcCreationPacing's frame hook)
+void HdrGammaMonitorTick();               // monitor thread, every second: fits a pending curve
+void LogHdrGammaStats();
+bool HdrGammaSelfFit(const float* block, double factor, double* worst, float* out);  // self-test: the fit on a recorded block
+double HdrGammaEval(const float* block, double x);  // self-test: the curve's output (nits) at input x
+
 bool BuildCellBufferClampStub(uint8_t* mem, const void* grids, const void* bound, const void* back);  // mem: 2 pages
 struct CellBufferInfoOut {
     uint8_t *clamp, *grids, *bound, *insert, *teardown, *dataHandler, *grid, *site1Ret, *site2Ret, *tesSlot, *flagsSlot,
@@ -1239,28 +1201,6 @@ bool NpcPacingInfo(NpcPacingInfoOut* out);
 void NpcPacingTestSetup(const NpcPacingTestFakes& fakes);  // self-test only
 NpcPacingTestState NpcPacingTestRead();                    // self-test only
 bool NpcPacingPlayerPos(double* x, double* y, double* z);  // game thread: the player's position (UE units), if known
-// ClothBuildDefer (game thread): inside a unit of a far, unseen actor in a frame that defers: true, that unit's owner
-// (its delegate's weak object pointer) and the pacing frame; and later, whether that owner is still far and unseen. Both
-// walk past an owner chain's non-actors (an equipment unit's body pairing component), which pacing's own walk does not
-bool NpcPacingDistantUnit(uint64_t* ownerWeak, uint64_t* frame);
-bool NpcPacingStillDistant(uint64_t ownerWeak);
-// ---- npcs/cloth_defer.cpp (ClothBuildDefer) ----
-// RecreateClothSimulationProxy asked for inside a far, unseen actor's NpcCreationPacing unit while the component has no
-// simulation yet waits (later requests merge into it) and is made in a later frame, within the pacing budget
-bool InstallClothBuildDefer(bool beforeGameCode);   // start-up only (version.dll route; after ClothRegisterLite)
-void SetClothBuildDefer(bool on, int quietFrames);  // live
-void LogClothBuildDeferStats();
-uint64_t ClothDeferFrame(uint64_t frame, bool flushAll, uint64_t spentUs, uint64_t budgetUs, bool unitsRan,
-                         int* built = nullptr);  // NpcCreationPacing's frame start (game thread): the builds due now; their time (us)
-void* ClothDeferTestRecreate();                                           // self-test only: the detoured entry
-void ClothDeferTestSetFakes(void* recreate, void* unregister, void* suspended);  // self-test only; this thread plays the game thread
-void ClothDeferTestSetDistant(int mode, uint64_t frame);                  // self-test only: -1 = NpcCreationPacing decides, 0/1 forced
-bool ClothDeferTestSites(void*** unregisterSlot, void** suspendedCall, void** enabledThunk);  // self-test only
-void* ClothDeferTestUnregisterNext();                                     // self-test only: what OnUnregister's hook calls
-void ClothDeferTestCallRecreate(uint8_t* component);                      // self-test only
-void ClothDeferTestCallUnregister(uint8_t* component);                    // self-test only
-bool ClothDeferTestCallSuspended(uint8_t* component);                     // self-test only
-size_t ClothDeferTestPending();                                           // self-test only
 // hitch_ledger.cpp (diagnostic HitchLedger): per slow game-thread frame, its stage times into
 // OblivionPerfFix-ledger.csv (docs/stutter-ledger.md). NpcCreationPacing's frame hooks feed it.
 struct LedgerPacing {          // NpcCreationPacing's cumulative game-thread counters at a frame end (us)
@@ -1297,67 +1237,6 @@ bool HitchLedgerInfo(HitchLedgerInfoOut* out);
 void HitchLedgerTestSetup(uint64_t (*clock)(), void* fakeTg, void* fakeSync, const wchar_t* path);  // self-test only
 void HitchLedgerTestGridAdd(uint64_t us);          // self-test only: an OT grid change of this length
 void HitchLedgerTestClose();                       // self-test only: closes the csv
-// fade_vt_flush.cpp (FadeVtFlushSkip, off by default): the r.VT.Flush the game runs 1.5 s into a door's fade-in.
-struct FadeVtFlushInfo {
-    uint8_t* flush = nullptr;
-    uint8_t* exec = nullptr;
-    uint8_t* execIfSafe = nullptr;
-    void** execSlot = nullptr;
-    void** execIfSafeSlot = nullptr;
-};
-bool FindFadeVtFlush(FadeVtFlushInfo* out);        // locate only (no patching); false = unavailable (logged)
-bool InstallFadeVtFlushSkip();                     // start-up only (two .rdata slots)
-void SetFadeVtFlushSkip(bool on);                  // monitor thread, live
-void LogFadeVtFlushStats();
-void FadeVtFlushTestSetup(void** execSlot, void** execIfSafeSlot, void* origExec, void* origExecIfSafe, bool installed);  // self-test
-void FadeVtFlushTestCall(void* delegateInstance, bool ifSafe);                                                         // self-test
-uint32_t FadeVtFlushSkippedForTest();                                                                                  // self-test
-// door_diag.cpp (diagnostic DoorDiag): door / loading-screen timeline, stream-all timing, render-target pool
-// misses and flushes, and the DoorDiagEarlyStream experiment.
-struct DoorDiagInfoOut {
-    uint8_t* pool = nullptr;
-    int32_t* flushFlag = nullptr;      // r.bFlushRenderTargetsOnWorldCleanup's int
-    uint8_t* freeAll = nullptr;
-    uint8_t* findFree = nullptr;
-    uint8_t* elemSize = nullptr;
-    uint8_t* streamAll = nullptr;
-    void** streamAllSlot = nullptr;
-};
-bool FindDoorDiag(DoorDiagInfoOut* out);           // locate only (no patching); false = unavailable (logged)
-bool InstallDoorDiag(bool beforeGameCode);         // start-up only
-void SetDoorDiagEarlyStream(bool on);              // monitor thread, live
-void DoorDiagFrameEnd();                           // game thread, once per frame (NpcCreationPacing's frame hook)
-void LogDoorDiagStats();
-// stream_behind_loading.cpp (StreamBehindLoadingScreen): a new area's textures stream while its loading screen is still up
-// (the stored pool size set back + the streaming manager's non-blocking update, once the gate is armed and loading is idle).
-struct StreamBehindLoadingInfo {
-    uint8_t* gateBody = nullptr;
-    uint8_t* arm = nullptr;
-    void* platformGet = nullptr;  // IPlatformFeaturesModule::Get, from the settings save's writer (save loads: their save read)
-    void** cvarStatic = nullptr;
-    void** singleton = nullptr;
-    void** asyncLoading = nullptr;
-    uint8_t* travelPending = nullptr;
-    uint8_t* update = nullptr;
-    uint32_t poolOffset = 0, getWorldSlot = 0;
-    void* armHook = nullptr;
-    // the world drawing for UnfreezeBehindLoadingScreen (optional: nullptr / 0 when not found)
-    void** execSlot = nullptr;
-    void** execIfSafeSlot = nullptr;
-    uint8_t* gameViewport = nullptr;
-    uint32_t drawFlagOffset = 0;
-    uint8_t* setLoadingFreeze = nullptr;  // prototype UnfreezeBehindLoadingScreen
-};
-bool FindStreamBehindLoading(StreamBehindLoadingInfo* out);  // locate only; false = unavailable (logged)
-bool InstallStreamBehindLoading(bool beforeGameCode);       // one entry detour (the gate-arming function); needs the fade hook found
-void SetStreamBehindLoading(bool on);                       // monitor thread, live
-void SetUnfreezeBehindLoading(int ms);                      // monitor thread, live (0 = off); prototype, trade-off
-void SetUnfreezeBehindLoadingFastTravel(int ms);            // ... its hold for fast travels (0 = UnfreezeBehindLoadingScreen's); live
-void StreamBehindLoadingFrameEnd();                         // game thread, once per frame (NpcCreationPacing's frame hook)
-void LogStreamBehindLoadingStats();
-// an exec function (UFunction thunk) by its registered name, checked against a byte pattern (stream_behind_loading.cpp);
-// nullptr unless the name, its native-table pair and the match are each exactly one
-uint8_t* FindExecByName(const char* name, const char* shape);
 // translate_frame_fence.cpp (RdgParallelTranslate guard): an RHI thread fence after every FRHICommandListImmediate::BeginFrame, as
 // UE 5.5 orders its BeginFrame, so the buffer defragmentation can run while parallel translate is on.
 bool FindFrameFence();                         // locate BeginFrame, RHIThreadFence, the event release (no patching)
@@ -1401,9 +1280,7 @@ bool SaveCallSiteValid(const GameModule& game, const uint8_t* call);  // an E8 h
 // saves/save_thumb.cpp (SaveThumbnailAsync): the save's thumbnail read back without the game / render thread waiting
 bool InstallSaveThumbAsync(uint8_t* readBackCall, void* getViewportScreenShot);  // start-up, from InstallSaveBytes
 void SetSaveThumbAsync(int mode, bool timers);
-bool SaveThumbTakeOver(void* viewport, const void* rect, bool hdr = false);  // game thread, in place of the read-back (hdr: the HDR route's); true = taken over
-bool SaveThumbHdrInfo(uint8_t** readCall, void** toFColorSrgb);           // self-test: the HDR route's redirected read call and the quantiser (false: not installed)
-void SaveThumbTestHdrConvert(const uint32_t* r10, uint32_t n, uint32_t* out);  // self-test: the HDR route's tables on R10G10B10A2 pixels
+bool SaveThumbTakeOver(void* viewport, const void* rect);  // game thread, in place of the read-back; true = taken over
 void LogSaveThumbStats();
 int SaveThumbTestDeliverOrder(const bool* save, int n, int* order);  // self-test only: the helper's delivery order
 // saves/save_refid.cpp (SaveRefIdIndex; lab: the SaveGame timer): the old engine save's formID -> refID lookups through a hash index
@@ -1441,7 +1318,6 @@ bool InstallClothRegisterSkip(bool beforeGameCode);  // start-up only (version.d
 void SetClothRegisterLite(int mode);                 // ClothRegisterLite: 0 off, 3 all lite + completion (lab: 1 all builds of a
                                                      // call but the last lite, learned; 2 only the registration build); live
 bool ClothRegisterLiteAvailable();
-void** ClothRegisterUnregisterSlot();               // for ClothBuildDefer: OnUnregister's slot while this file's hook holds it
 void ClothRegisterLiteTestSetup(void* addRules, void* ccEnable, void* ccUpdate);  // self-test only (after ClothRegisterTestSetup)
 void LogClothRegisterStats();
 bool ClothRegisterInfo(ClothRegisterInfoOut* out);
@@ -1487,12 +1363,6 @@ bool FindGpuSceneParallelUpload();                 // the console variable's reg
 void SetGpuSceneParallelUpload(bool enabled);      // once per second from the monitor; switchable live
 void GpuSceneParallelUploadTestSetup(int32_t* volatile* slot);  // self-test only: a fake value pointer slot
 int32_t* volatile* GpuSceneParallelUploadSlotForTest();         // self-test only
-// VtStreamingUploads : r.VT.MaxUploadsPerFrame.Streaming set to N (vt_streaming_uploads.cpp).
-bool FindVtStreamingUploads();                     // the console variable's registration and value pointer (no patching)
-void SetVtStreamingUploads(int uploads);           // once per second from the monitor; 0 = the game's value; live
-void LogVtStreamingUploadsStats();
-void VtStreamingUploadsTestSetup(int32_t* volatile* slot);  // self-test only: a fake value pointer slot
-int32_t* volatile* VtStreamingUploadsSlotForTest();         // self-test only
 // DirtyTreeQuickInsert: greedy sibling choice for dirty-element-tree inserts ("equivalent" class).
 bool InstallDirtyTreeQuickInsert(bool beforeGameCode);  // start-up only (three calls redirected)
 void SetDirtyTreeQuickInsert(bool enabled);             // switchable live

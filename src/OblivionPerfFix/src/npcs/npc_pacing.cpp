@@ -1296,6 +1296,8 @@ void MaxTickRateHook(void* engine)
     g.origMaxTick(engine);
     const uint64_t t1 = NowUs();
     if (!OnGameThread()) return;
+    HdrMenuFrameEnd();   // HdrMenuRows / HudAspectRow / DlssRayReconstruction (no-op unless installed)
+    HdrGammaFrameEnd();  // HdrGamma22 (no-op unless installed; writes only while on)
     {
         LedgerPacing lp;
         lp.unitCumUs = g.unitCumUs;

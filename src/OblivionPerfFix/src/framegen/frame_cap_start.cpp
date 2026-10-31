@@ -386,6 +386,15 @@ bool FindFrameCapStart()
     return true;
 }
 
+uint8_t* AltarCommandSetter()
+{
+    // Altar's command setter as T calls it (its two calls agree); located from the pattern, not from g_set (the self-test fakes it)
+    const auto sw = FindAll(Game().text, ParsePattern(kSwitch));
+    if (sw.size() != 1 || sw[0][kSetCallA] != 0xE8 || sw[0][kSetCallB] != 0xE8) return nullptr;
+    uint8_t* const a = RipTarget(sw[0] + kSetCallA, 1, 5);
+    return a == RipTarget(sw[0] + kSetCallB, 1, 5) && Game().text.Contains(a) ? a : nullptr;
+}
+
 bool InstallFrameCapStart(bool beforeGameCode, int mode)
 {
     if (!FindFrameCapStart()) return false;

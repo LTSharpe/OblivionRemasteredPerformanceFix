@@ -11,28 +11,22 @@ driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 
 ## Unreleased
 
-- **The world appears sooner after a door, a city gate or a fast travel** (`StreamBehindLoadingScreen`, on): during a
-  transition the game empties its texture memory, and once the new area has loaded it held the last loading-screen
-  image until that area's textures were streamed back in. They now stream in while the loading screen is still idling,
-  so that wait is over in about 10 ms instead of 0.1-0.3 s. Cheydinhal inn at 5120x2160: last image held before the
-  world appears 539 -> 230 ms stepping out, 225 -> 75 ms stepping in; the loading screen is not longer, video memory
-  peak and the first picture are the same. City gate and fast travel: 420-437 -> 166-213 ms and 327-421 -> 113-160 ms.
-  New key `StreamBehindLoadingScreen` (1).
-- **New trade-off switch, off by default:** `UnfreezeBehindLoadingScreen` makes exits, city gates and fast travel work
-  like entering an interior: the world is unfrozen and drawn behind the loading screen for N ms (e.g. 1000) before the
-  fade-in, so your character already stands normally and the scene has settled when the picture comes in. The loading
-  screen is about 1 s longer with 1000, and the world runs that long unseen (as it already does after entries).
-  `UnfreezeBehindLoadingScreenFastTravel` (0 = the same) gives fast travel and save loads their own hold.
-- **New trade-off switch, off by default:** `FadeVtFlushSkip` stops the blur flash right as you arrive through a door, a
-  city gate or a fast travel: 1.5 s into the fade-in the game empties its whole streamed-texture cache (`r.VT.Flush`),
-  so walls and roofs that had already loaded go blurry and reload in view. With the switch on that flush is skipped; in
-  tests the picture a few seconds later was the same either way.
-- **New trade-off switch, off by default:** `VtStreamingUploads` lets walls, roofs and stairs reach full detail sooner
-  after stepping outdoors: the streamed ("virtual") textures upload N pages per frame instead of the game's 4. At the
-  Imperial City Waterfront lighthouse exit (5120x2160) the stair walls are fully detailed as the fade-in completes with
-  64, instead of about 8 s later. No Engine.ini line can set this value; the fix does.
-- **New diagnostic** `DoorDiag` (off, not in the shipped ini): per transition, the loading-screen timeline, each texture
-  stream-all's wait and render-target pool misses, in the log.
+- **New switches, off by default: rows in the Graphics menu.** `HdrMenuRows`: an HDR section on the PC Graphics page
+  (HDR, Peak Brightness, Paper White, Black Floor, Mid-Tone), made from the game's own rows, saved like them, and greyed
+  out the way the game greys its own rows (the sliders while HDR is off, Brightness Intensity while it is on); with HDR
+  on, the saved peak brightness is used from the start (the game used 1000 nits after every launch until it was
+  changed). `HudAspectRow`: a "HUD Aspect Ratio" row (Wide, 4:3, 16:9, 21:9, 32:9) that keeps the HUD in a centred
+  area on wide screens; menus and full-screen effects stay full width. `DlssRayReconstruction` (trade-off): a "DLSS -
+  Ray Reconstruction" row for the denoiser the game's DLSS plugin has but never offers; needs NVIDIA's nvngx_dlssd.dll
+  (not included); about 0.4 ms GPU time at 5120x2160 on an RTX 5090.
+- **New trade-off switch, on by default (HDR only): HDR shadows as on an SDR monitor** (`HdrGamma22`): the game's HDR picture
+  copies its SDR picture as Windows decodes SDR (sRGB), so its darks sit 1.7-2.7x higher than on an SDR monitor (gamma
+  2.2). With 1 the HDR tone curve is refitted in memory so darks and mid-tones match SDR at gamma 2.2; highlights, peak,
+  black floor and the HUD stay; nothing changes in SDR. `HdrGamma22=0` gives the game's HDR curve. Live.
+- **New trade-off switches, off by default: the menu background and save thumbnails in HDR** (`HdrMenuBackground`,
+  `HdrSaveThumbnail`): in HDR10 the menu's background screenshot and a save's thumbnail hold PQ values that the UI shows
+  as colour, so both look grey and washed out. With 1 they are converted to the colours the UI shows at the same
+  brightness. Live.
 
 ## 1.2.3-beta
 For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Thanks to MitochondriaOverlords for issue #5,
