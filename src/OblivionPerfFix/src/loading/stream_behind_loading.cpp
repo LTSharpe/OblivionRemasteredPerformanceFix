@@ -664,7 +664,7 @@ bool FindStreamBehindLoading(StreamBehindLoadingInfo* out)
     return true;
 }
 
-bool InstallStreamBehindLoading(bool beforeGameCode)
+bool InstallStreamBehindLoading(bool beforeGameCode, bool tradeOffs)
 {
     if (g.installed) return true;
     if (!FindStreamBehindLoading(nullptr)) return false;
@@ -686,6 +686,16 @@ bool InstallStreamBehindLoading(bool beforeGameCode)
     if (!PatchEntry(g.arm, region, beforeGameCode)) {
         Log("[streamload] could not detour the gate-arming function at exe+0x%X: not installed", Rva(g.arm));
         return false;
+    }
+    // The trade-off's redirections (the gate delegate's two slots, the fast-travel thunk's call, and on the first frame
+    // the save system's LoadGame slot) only when UnfreezeBehindLoadingScreen is on at start-up: with the default the
+    // only change to the game's code is the gate-arming detour above.
+    g.loadHookTried = !tradeOffs;
+    if (!tradeOffs) {
+        g.installed = true;
+        Log("[streamload] installed: textures of a new area stream behind the loading screen once its loading is done "
+            "(UnfreezeBehindLoadingScreen 0 at start-up: its hooks not installed; takes a restart to switch on)");
+        return true;
     }
     if (g.drawFound) {  // pass-through until UnfreezeBehindLoadingScreen holds a tick
         if (WritePointer(g.execSlot, reinterpret_cast<void*>(&ExecHook)) &&

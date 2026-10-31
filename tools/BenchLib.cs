@@ -1984,7 +1984,10 @@ namespace OblvBench
     ///   dialog    the game shows a message box (fatal error, "video driver crashed", ...)
     ///   hung      its window has not answered Windows messages for HungSec seconds
     ///   stalled   the OblvBench mod's heartbeat (bench-heartbeat.txt in the runtime folder, rewritten every second from
-    ///             the game thread's frame loop) has not advanced for StallSec seconds
+    ///             the game thread's frame loop) has not advanced for StallSec seconds; paused (at most
+    ///             ShaderScreenMaxSec from the watch's start) while OblivionPerfFix.log says the game's first-launch shader
+    ///             screen is up (ShaderScreenAfterDriverChange after a driver update) and for ShaderScreenAfterSec after the
+    ///             precompile behind it has finished, since the mod's frame loop does not run behind that screen
     ///   driver    a display driver timeout (TDR, System log "Display" event 4101) since the watch began
     /// Problem is null while all is well. Dismiss() closes what such a failure leaves on screen (crash
     /// reporter, error-report and AMD driver pop-ups that appeared since the watch began, the game's
@@ -2010,6 +2013,14 @@ namespace OblvBench
         static int pid;
         static Process proc;
         static DateTime since;                 // local time the watch began
+        static int generation;                 // one per Start: a check still in flight from an earlier watch writes nothing
+        [ThreadStatic] static int threadGeneration;
+        static DateTime watchStartUtc;
+        static string[] fixLogPaths = new string[0];   // OblivionPerfFix.log next to the game exe (version.dll) or in OBSE\Plugins
+        static DateTime nextFixLogRead, screenFinishedSeenUtc;
+        static bool screenUp, screenNoted, pauseOpen;   // pauseOpen: a paused stall check not yet reported as back on
+        static int shown;                      // log lines already handed out by NewLines
+        public static int ShaderScreenMaxSec = 360, ShaderScreenAfterSec = 120;
         static string heartbeatPath;
         static string problem, kind;
         static readonly List<string> log = new List<string>();
@@ -2040,10 +2051,19 @@ namespace OblvBench
                 pid = processId; heartbeatPath = heartbeat; problem = null; kind = null; amdNote = null;
                 lastFrames = -1; lastAdvance = DateTime.UtcNow; hungSince = DateTime.MinValue;
                 since = DateTime.Now; nextEventCheck = DateTime.UtcNow;
+                watchStartUtc = DateTime.UtcNow; nextFixLogRead = DateTime.MinValue; screenFinishedSeenUtc = DateTime.MinValue;
+                screenUp = false; screenNoted = false; pauseOpen = false; fixLogPaths = new string[0];
                 try { proc = Process.GetProcessById(processId); } catch (Exception) { proc = null; }
+                try
+                {
+                    string dir = Path.GetDirectoryName(proc.MainModule.FileName);
+                    fixLogPaths = new[] { Path.Combine(dir, "OblivionPerfFix.log"), Path.Combine(dir, "OBSE", "Plugins", "OblivionPerfFix.log") };
+                }
+                catch (Exception) { }
                 amdBefore = AmdWindows();
                 running = true;
-                thread = new Thread(Loop) { IsBackground = true, Name = "GameWatch" };
+                int g = ++generation;
+                thread = new Thread(() => { threadGeneration = g; Loop(); }) { IsBackground = true, Name = "GameWatch" };
                 thread.Start();
             }
         }
@@ -2055,12 +2075,16 @@ namespace OblvBench
             if (t != null) t.Join(3000);
         }
 
-        public static string[] TakeLog() { lock (sync) { string[] r = log.ToArray(); log.Clear(); return r; } }
+        public static string[] TakeLog() { lock (sync) { string[] r = log.ToArray(); log.Clear(); shown = 0; return r; } }
+        /// The log lines added since the last call, without taking them (TakeLog still gets them for a crash folder): the
+        /// runner prints them as they come (the shader-screen stall pause and its end).
+        public static string[] NewLines() { lock (sync) { if (shown > log.Count) shown = 0; string[] r = log.GetRange(shown, log.Count - shown).ToArray(); shown = log.Count; return r; } }
 
         static void Note(string k, string what)
         {
             lock (sync)
             {
+                if (threadGeneration != generation) return;   // a check from an earlier watch (its game is gone)
                 if (problem != null) return;
                 if (amdNote != null) what += " (" + amdNote + ")";
                 problem = what; kind = k;
@@ -2070,7 +2094,7 @@ namespace OblvBench
 
         static void Loop()
         {
-            while (running)
+            while (running && threadGeneration == generation)
             {
                 try { Check(); } catch (Exception e) { lock (sync) log.Add("watch error: " + e.Message); }
                 Thread.Sleep(500);
@@ -2116,7 +2140,8 @@ namespace OblvBench
             }
             else hungSince = DateTime.MinValue;
             // heartbeat of the frame loop
-            if (lastFrames >= 0 && DateTime.UtcNow > StallGraceUntil && (DateTime.UtcNow - lastAdvance).TotalSeconds >= StallSec)
+            if (lastFrames >= 0 && DateTime.UtcNow > StallGraceUntil && (DateTime.UtcNow - lastAdvance).TotalSeconds >= StallSec &&
+                !InShaderScreenGrace)
             {
                 Note("stalled", string.Format("no game frame for {0:F0} s (frame {1})", (DateTime.UtcNow - lastAdvance).TotalSeconds, lastFrames));
                 return;
@@ -2134,9 +2159,76 @@ namespace OblvBench
             }
         }
 
+        /// True while the game's first-launch shader screen (OblivionPerfFix ShaderScreenAfterDriverChange) is up, and for
+        /// ShaderScreenAfterSec after its precompile has finished, within ShaderScreenMaxSec of the watch's start. The stall
+        /// check pauses then, and the runner's start-up waits allow for it.
+        public static bool InShaderScreenGrace
+        {
+            get
+            {
+                lock (sync)
+                {
+                    DateTime now = DateTime.UtcNow;
+                    if ((now - watchStartUtc).TotalSeconds > ShaderScreenMaxSec)
+                    {
+                        if (pauseOpen) { pauseOpen = false; log.Add(string.Format("{0:HH:mm:ss} shader-screen grace over ({1} s from the launch): stall check back on", DateTime.Now, ShaderScreenMaxSec)); }
+                        return false;
+                    }
+                    if (now >= nextFixLogRead)
+                    {
+                        nextFixLogRead = now.AddSeconds(2);
+                        string tail = FixLogTail();
+                        if (tail != null)
+                        {
+                            int up = tail.LastIndexOf("[pso] the game's shader screen is up", StringComparison.Ordinal);
+                            int done = tail.LastIndexOf("[shaderscreen] the precompile has finished", StringComparison.Ordinal);
+                            screenUp = up >= 0;
+                            if (up >= 0 && done > up && screenFinishedSeenUtc == DateTime.MinValue) screenFinishedSeenUtc = now;
+                        }
+                    }
+                    if (!screenUp) return false;
+                    bool grace = screenFinishedSeenUtc == DateTime.MinValue || (now - screenFinishedSeenUtc).TotalSeconds < ShaderScreenAfterSec;
+                    if (grace && !screenNoted)
+                    {
+                        screenNoted = true; pauseOpen = true;
+                        log.Add(string.Format("{0:HH:mm:ss} the game's shader screen is up (OblivionPerfFix ShaderScreenAfterDriverChange): stall check paused (no frame for {2:F0} s, frame {3}), at most {1} s from the launch",
+                                              DateTime.Now, ShaderScreenMaxSec, lastFrames < 0 ? 0 : (now - lastAdvance).TotalSeconds, lastFrames));
+                    }
+                    if (!grace && pauseOpen)
+                    {
+                        pauseOpen = false;
+                        log.Add(string.Format("{0:HH:mm:ss} shader-screen grace over ({1:F0} s after the precompile finished): stall check back on", DateTime.Now, (now - screenFinishedSeenUtc).TotalSeconds));
+                    }
+                    return grace;
+                }
+            }
+        }
+
+        // The last 256 KB of this game's OblivionPerfFix.log written since the watch began, or null.
+        static string FixLogTail()
+        {
+            foreach (string path in fixLogPaths)
+            {
+                try
+                {
+                    if (!File.Exists(path) || File.GetLastWriteTimeUtc(path) < watchStartUtc.AddSeconds(-5)) continue;
+                    using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                    {
+                        long start = Math.Max(0, fs.Length - 262144);
+                        fs.Seek(start, SeekOrigin.Begin);
+                        using (var r = new StreamReader(fs)) return r.ReadToEnd();
+                    }
+                }
+                catch (Exception) { }
+            }
+            return null;
+        }
+
         static void ReadHeartbeat()
         {
             if (string.IsNullOrEmpty(heartbeatPath) || !File.Exists(heartbeatPath)) return;
+            // a file left by an earlier game (written before this watch began) says nothing about this one
+            try { if (File.GetLastWriteTimeUtc(heartbeatPath) < watchStartUtc.AddSeconds(-1)) return; } catch (Exception) { return; }
             string text;
             try
             {
@@ -2149,7 +2241,15 @@ namespace OblvBench
             if (p.Length < 2 || !long.TryParse(p[1], out frames)) return;
             lock (sync)
             {
-                if (frames != lastFrames) { lastFrames = frames; lastAdvance = DateTime.UtcNow; }
+                if (frames != lastFrames)
+                {
+                    if (pauseOpen)
+                    {
+                        pauseOpen = false;
+                        log.Add(string.Format("{0:HH:mm:ss} game frames again (frame {1} after {2:F0} s without one): stall check back on", DateTime.Now, frames, (DateTime.UtcNow - lastAdvance).TotalSeconds));
+                    }
+                    lastFrames = frames; lastAdvance = DateTime.UtcNow;
+                }
             }
         }
 

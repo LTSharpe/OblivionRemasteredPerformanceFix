@@ -8,17 +8,22 @@
 // (UGameplayStatics::DoesSaveGameExist, called at exe+0x44E12C4), and the movie player's set-up (exe+0x44E8350) adds the
 // ShaderLoadingScreenMovie and its precompile callbacks only while that flag is set. After the first launch the settings
 // save exists, so after a driver update the precompile runs in the background into play instead (with a cold driver
-// cache ~3 minutes on the test PC, ~35 hitches a minute in the first flight: notes/p7b-shader-cache.md). Players rename
+// cache ~3 minutes on the test PC, ~35 hitches a minute in the first flight: docs/research.md). Players rename
 // Save_Settings.sav to get the screen back, which also resets every setting.
 //
 // The fix. That one call goes through a wrapper. It calls the game's DoesSaveGameExist, then compares the graphics card
-// the game runs on (DXGI: vendor, device, the user-mode driver version; the hardware adapter with the most dedicated
+// the game runs on (DXGI: vendor, device, the UMD (user-mode driver) version; the hardware adapter with the most dedicated
 // video memory, as in memory_monitor.cpp) with the one recorded in OblivionPerfFix-gpu.txt next to the DLL. If the record
 // exists and differs, the wrapper answers "no settings save" to this one caller only, so the game takes its own
 // first-launch path: the shader screen, with the game's own pace and timeout. Settings are loaded as always (the game's
 // other DoesSaveGameExist callers are untouched). The new card and driver are recorded once the precompile has finished
 // (PsoPrecompileFast sees its end; a start-up closed behind the screen shows it again next time). No record yet (the first
 // launch with the switch on): it is written and nothing else happens. Delete the file to record again.
+// It cannot loop: before the screen is taken, a second line "shown N <card>" is written to the record (that write is also
+// the check that the file can be written: if it fails, start-up stays the game's, since the screen would otherwise come
+// back at every start). The line goes when the new card is recorded. If the screen was already shown twice for this card
+// and driver without being recorded (each start-up closed behind it, or the precompile's end never seen), the card is
+// recorded at once and start-up stays the game's.
 //
 // What changes. After a driver or card change, start-up waits on the game's shader screen until its precompile is done
 // (minutes with a cold driver cache), as on the game's first launch, instead of compiling during play. Nothing else.
@@ -56,6 +61,7 @@ ExistsFn g_original = nullptr;
 std::wstring g_recordPath;
 bool (*g_testGpu)(char*, size_t) = nullptr;
 int g_decision = -1;  // -1 not asked yet, 0 game's answer, 1 first-launch path taken
+int g_shownUnrecorded = 0;  // the "shown N" count written at this start-up (-1: the record could not be written)
 char g_pending[96] = "";  // the new card and driver, recorded once the precompile has finished (PsoPrecompileFast sees it)
 
 // "vendor device subsys rev driver" of the hardware adapter with the most dedicated video memory.
@@ -63,7 +69,7 @@ bool CurrentGpu(char* out, size_t size)
 {
     if (g_testGpu) return g_testGpu(out, size);
     HMODULE dxgi = GetModuleHandleW(L"dxgi.dll");
-    if (!dxgi) dxgi = LoadLibraryW(L"dxgi.dll");
+    if (!dxgi) dxgi = LoadLibraryExW(L"dxgi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!dxgi) return false;
     auto create = reinterpret_cast<HRESULT(WINAPI*)(REFIID, void**)>(GetProcAddress(dxgi, "CreateDXGIFactory1"));
     IDXGIFactory1* factory = nullptr;
@@ -88,23 +94,43 @@ bool CurrentGpu(char* out, size_t size)
     return found;
 }
 
-bool ReadRecord(char* out, size_t size)
+// The record's first line (the recorded card and driver); shown / shownGpu: the optional second line "shown N <card>"
+// (0 / "" without it).
+bool ReadRecord(char* out, size_t size, int* shown = nullptr, char* shownGpu = nullptr, size_t shownSize = 0)
 {
+    if (shown) *shown = 0;
+    if (shownGpu && shownSize) shownGpu[0] = 0;
     FILE* f = nullptr;
     if (_wfopen_s(&f, g_recordPath.c_str(), L"rb") != 0 || !f) return false;
-    const size_t n = fread(out, 1, size - 1, f);
+    char buf[256];
+    const size_t n = fread(buf, 1, sizeof buf - 1, f);
     fclose(f);
-    out[n] = 0;
-    for (size_t i = n; i > 0 && (out[i - 1] == '\r' || out[i - 1] == '\n' || out[i - 1] == ' '); --i) out[i - 1] = 0;
+    buf[n] = 0;
+    size_t eol = strcspn(buf, "\r\n");
+    const size_t len = eol < size - 1 ? eol : size - 1;
+    memcpy(out, buf, len);
+    out[len] = 0;
+    for (size_t i = len; i > 0 && out[i - 1] == ' '; --i) out[i - 1] = 0;
+    const char* rest = buf + eol;
+    while (*rest == '\r' || *rest == '\n') ++rest;
+    int count = 0;
+    char gpu[96] = "";
+    if (shown && shownGpu && sscanf_s(rest, "shown %d %95[^\r\n]", &count, gpu, static_cast<unsigned>(sizeof gpu)) == 2 &&
+        count > 0) {
+        *shown = count;
+        snprintf(shownGpu, shownSize, "%s", gpu);
+    }
     return out[0] != 0;
 }
 
-bool WriteRecord(const char* gpu)
+// The record, and with shownCount > 0 the "shown N <card>" line.
+bool WriteRecord(const char* gpu, int shownCount = 0, const char* shownGpu = nullptr)
 {
     FILE* f = nullptr;
     if (_wfopen_s(&f, g_recordPath.c_str(), L"wb") != 0 || !f) return false;
-    const bool ok = fprintf(f, "%s\r\n", gpu) > 0;
-    fclose(f);
+    bool ok = fprintf(f, "%s\r\n", gpu) > 0;
+    if (ok && shownCount > 0 && shownGpu) ok = fprintf(f, "shown %d %s\r\n", shownCount, shownGpu) > 0;
+    ok = fclose(f) == 0 && ok;
     return ok;
 }
 
@@ -113,7 +139,8 @@ bool ExistsWrapper(const void* slotName, int32_t userIndex)
     const bool exists = g_original(slotName, userIndex);
     if (g_decision != -1) return g_decision == 1 ? false : exists;
     g_decision = 0;
-    char now[96] = "", before[96] = "";
+    char now[96] = "", before[96] = "", shownGpu[96] = "";
+    int shown = 0;
     if (!exists) {
         Log("[shaderscreen] no settings save yet: the game's first launch shows its shader screen anyway");
         if (CurrentGpu(now, sizeof now)) WriteRecord(now);
@@ -123,7 +150,7 @@ bool ExistsWrapper(const void* slotName, int32_t userIndex)
         Log("[shaderscreen] the graphics card could not be read (DXGI): start-up as the game decides");
         return exists;
     }
-    if (!ReadRecord(before, sizeof before)) {
+    if (!ReadRecord(before, sizeof before, &shown, shownGpu, sizeof shownGpu)) {
         const bool ok = WriteRecord(now);
         Log("[shaderscreen] graphics card and driver recorded (%s)%s; the shader screen returns after the next change", now,
             ok ? "" : " - writing OblivionPerfFix-gpu.txt failed");
@@ -133,6 +160,24 @@ bool ExistsWrapper(const void* slotName, int32_t userIndex)
         Log("[shaderscreen] graphics card and driver unchanged (%s): start-up as usual", now);
         return exists;
     }
+    // Never a loop: at most two shows for one card and driver without the record catching up, and only with a record
+    // that can be written (the "shown" line written now is that check).
+    const int already = strcmp(shownGpu, now) == 0 ? shown : 0;
+    if (already >= 2) {
+        const bool ok = WriteRecord(now);
+        Log("[shaderscreen] graphics card or driver changed (%s -> %s), but the shader screen was already shown twice for it "
+            "without the precompile's end being recorded: start-up as the game decides; %s", before, now,
+            ok ? "the card is recorded now" : "writing OblivionPerfFix-gpu.txt failed");
+        g_shownUnrecorded = already;
+        return exists;
+    }
+    if (!WriteRecord(before, already + 1, now)) {
+        Log("[shaderscreen] graphics card or driver changed (%s -> %s), but OblivionPerfFix-gpu.txt cannot be written: "
+            "start-up as the game decides (the shader screen would come back at every start)", before, now);
+        g_shownUnrecorded = -1;
+        return exists;
+    }
+    g_shownUnrecorded = already + 1;
     g_decision = 1;
     // Recorded once the precompile has finished, so a start-up closed behind the screen shows it again next time; without
     // PsoPrecompileFast (which sees the end) it is recorded now.
@@ -242,7 +287,10 @@ void ShaderScreenTestSetup(void* original, bool (*gpu)(char*, size_t), const wch
     g_testGpu = gpu;
     if (recordPath) g_recordPath = recordPath;
     g_decision = -1;
+    g_shownUnrecorded = 0;
     g_pending[0] = 0;
 }
+
+int ShaderScreenShownUnrecorded() { return g_shownUnrecorded; }
 
 }  // namespace opf

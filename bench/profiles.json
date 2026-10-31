@@ -53,6 +53,10 @@
     "description": "Video recording: the monitor's resolution borderless, FSR performance, ray tracing on (mode 3), Shadows High (the rest Ultra), no frame generation (online video plays at most 60 fps), v-sync off, no frame cap, SDR (HDR off), brightness -3",
     "res": "native", "mode": "borderless", "upscaler": "fsr", "fsrQuality": 3, "fg": 0, "rt": 1, "qualityOptions": { "ShadowQuality": 2 }, "cvars": { "Altar.GraphicsOptions.HDR": 0, "Altar.GraphicsOptions.Brightness": -3 }
   },
+  "user-nofg": {
+    "description": "The player's graphics settings without frame generation (fixed copy of -Profile user as of 2026-10-30, user decision: the promo-style target): the monitor's resolution borderless, FSR performance, ray tracing on at High (rtMode 2 = LightingMode 2, as the player has since ~2026-10-30), Ultra except Shadows, Global Illumination, Reflections and Foliage at High, no frame generation, v-sync off, no frame cap, SDR (HDR off), brightness -3",
+    "res": "native", "mode": "borderless", "upscaler": "fsr", "fsrQuality": 3, "fg": 0, "rt": 1, "rtMode": 2, "qualityOptions": { "ShadowQuality": 2, "GlobalIlluminationQuality": 2, "ReflectionQuality": 2, "FoliageQuality": 2 }, "cvars": { "Altar.GraphicsOptions.HDR": 0, "Altar.GraphicsOptions.Brightness": -3 }
+  },
   "promo-fg": {
     "description": "Video recording with frame generation: as user (the monitor's resolution borderless, FSR performance, frame generation on, ray tracing on, Shadows High, the rest Ultra, frame rate capped at 60 before frame generation), plus SDR (HDR off) and brightness -3 as in promo",
     "res": "native", "mode": "borderless", "upscaler": "fsr", "fsrQuality": 3, "fg": 1, "rt": 1, "qualityOptions": { "ShadowQuality": 2 }, "cvars": { "t.MaxFPS": 60, "Altar.GraphicsOptions.HDR": 0, "Altar.GraphicsOptions.Brightness": -3 }

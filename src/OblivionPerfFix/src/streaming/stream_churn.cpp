@@ -438,12 +438,17 @@ uint64_t UploadLag(uint64_t gameLag)
     const uint32_t start = g_uploadRampStart.load(std::memory_order_relaxed);
     const uint32_t frames = g_uploadRampFrames.load(std::memory_order_relaxed);
     if (!start) return gameLag;
-    const uint32_t elapsed = g_uploadFrames.load(std::memory_order_relaxed) - start;
+    const uint32_t now = g_uploadFrames.load(std::memory_order_relaxed);
+    const uint32_t elapsed = now - start;  // wraps when switched off before the first clean-up (start 1, now 0): ends at once
     if (elapsed >= frames) {
         uint32_t expected = start;
-        if (g_uploadRampStart.compare_exchange_strong(expected, 0))
-            Log("[upload] kept upload memory handed back over %u frames, oldest first (longest clean-up %.1f ms)", elapsed,
-                g_uploadRampMaxUs.exchange(0) / 1000.0);
+        if (g_uploadRampStart.compare_exchange_strong(expected, 0)) {
+            if (now < start)  // nothing was kept yet: the game's clean-up from the first frame on
+                Log("[upload] kept upload memory: none yet (off before the first clean-up), the game's clean-up from now");
+            else
+                Log("[upload] kept upload memory handed back over %u frames, oldest first (longest clean-up %.1f ms)", elapsed,
+                    g_uploadRampMaxUs.exchange(0) / 1000.0);
+        }
         return gameLag;
     }
     const uint64_t from = g_uploadRampFrom.load(std::memory_order_relaxed);

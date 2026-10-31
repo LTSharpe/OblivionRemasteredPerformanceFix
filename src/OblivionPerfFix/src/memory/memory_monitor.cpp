@@ -35,6 +35,32 @@
 // once there is twice the threshold free for 60 seconds. While the game's video memory stays over the budget Windows
 // gives it, upload retention is suspended first, then parallel translate if needed, only while that helps (see
 // VramRelief). Each change is logged. What is drawn never changes.
+//
+// SharedMemoryGpu (default 2; worker allyfreeze, 2026-10-31). On a GPU without its own memory (D3D12 UMA: integrated
+// GPUs, APUs, handhelds such as the ROG Ally) every GPU allocation, upload heaps included, is system RAM: D3D12's L0 pool
+// and DXGI's LOCAL segment group are the same memory there, and the "video memory budget" is the share of RAM Windows lets
+// the GPU have; it does not see what the CPU side uses. On a 16 GB handheld the stock game already runs close to the end of
+// RAM, and what the fixes keep on purpose (UploadMemoryKeep's upload pools up to ~0.5 GB, GpuSceneKeepCapacity's and
+// RtSceneBufferKeep's spare buffer capacity, LumenKeepArrayCapacity's spare array capacity, OsPageCache's 64 MB) then comes
+// out of the same RAM the game and Windows need. A player's ROG Ally (16 GB, Z1 Extreme) froze hard with 1.2.1 defaults.
+// So once the game's device exists, the monitor thread asks it once (D3D12CreateDevice on the game's adapter returns the
+// game's own device, a per-adapter singleton; CheckFeatureSupport D3D12_FEATURE_ARCHITECTURE1, else ..._ARCHITECTURE)
+// and, on a UMA GPU, those fixes act as the game (through their stock paths: upload pools released over UploadMemoryKeep's
+// ramp, Lumen arrays and GPU scene buffers shrinking at their next resize, the TLAS buffer re-created as in the game,
+// OsPageCache off), RdgParallelTranslate's automatic mode stays off, and CommandAllocatorTrim counts as "tight" (spare
+// copy allocators handed back after loads: less than the game keeps). Until the answer is in (seconds after the device is
+// made, before any world loads) the automatic parallel translate waits; the keeps start as configured.
+// The automatic mode (2) is narrower than "UMA" (decided 2026-10-31): only on Windows itself, not under Wine
+// (Proton on Linux and the Steam Deck, CrossOver on Apple Silicon Macs: ntdll exports wine_get_version there; those
+// systems handle running out of RAM their own way: macOS compressing and swapping, Linux's OOM killer ending the game),
+// and only with less than 20 GB of RAM installed. 20 GB: handhelds and APU laptops come with 16, 24 or 32 GB; the
+// installed size (GetPhysicallyInstalledSystemMemory, from the firmware's table) counts the GPU's carve-out, so it is the
+// module size give or take a little, and 20 lies half way between 16 and 24: the 16 GB Ally / Legion Go / Claw are in,
+// the 24 GB Ally X (where players report the fixes working well) and bigger APUs keep the fixes. When the installed size
+// is not available Windows' total is used (the carve-out not counted: a 24 GB device giving the GPU 4 GB or more would
+// then count as small, the safe side). Under Wine the device is not asked at all.
+// SharedMemoryGpu=0 keeps the fixes as on a GPU with its own memory, 1 acts as on a shared-memory GPU on any PC (how the
+// path is tested on a desktop). Live; one log line per change, naming the reasons (UMA, Wine, RAM).
 #include "common.h"
 
 #include <d3d12.h>
@@ -205,6 +231,66 @@ void OpenAdapter()
     } else if (best) best->Release();
 }
 
+// ---- SharedMemoryGpu: does the game's GPU use system RAM? ----
+
+std::atomic<int> g_gpuKind{static_cast<int>(GpuMemoryKind::Pending)};
+
+// "UMA yes, Wine no, RAM 16.0 GB installed: applies" and the like, for the log lines.
+void SharedGpuReasons(int mode, GpuMemoryKind kind, const SharedGpuHost& host, char* out, size_t size)
+{
+    const bool on = SharedMemoryGpuWanted(mode, kind, host.wine, host.ramMB);
+    sprintf_s(out, size, "UMA %s, Wine %s, RAM %.1f GB %s: SharedMemoryGpu=%d %s",
+              kind == GpuMemoryKind::Shared      ? "yes"
+              : kind == GpuMemoryKind::Dedicated ? "no"
+              : kind == GpuMemoryKind::Pending   ? "not asked yet"
+              : host.wine                        ? "not asked (Wine)"
+                                                 : "not known",
+              host.wine ? "yes" : "no", host.ramMB / 1024.0, host.ramInstalled ? "installed" : host.ramMB ? "seen by Windows" : "(not known)",
+              mode,
+              mode == 1 ? "(forced in the ini) applies"
+              : mode == 0 ? "(off in the ini) does not apply"
+              : on      ? "(automatic) applies"
+              : kind != GpuMemoryKind::Shared ? "(automatic) does not apply: not a UMA GPU"
+              : host.wine ? "(automatic) does not apply: under Wine"
+                          : "(automatic) does not apply: 20 GB of RAM or more");
+}
+
+// Once, on the monitor thread, after OpenAdapter found the game's GPU (so the game's device exists). Under Wine not asked.
+void DetectGpuMemoryKind(int mode)
+{
+    if (g_gpuKind.load() != static_cast<int>(GpuMemoryKind::Pending) || !g_adapter) return;
+    const SharedGpuHost host = SharedGpuHostFacts();
+    DXGI_ADAPTER_DESC1 desc{};
+    g_adapter->GetDesc1(&desc);
+    DXGI_QUERY_VIDEO_MEMORY_INFO local{}, nonLocal{};
+    g_adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local);
+    g_adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &nonLocal);
+    HMODULE d3d12 = GetModuleHandleW(L"d3d12.dll");
+    auto create = d3d12 ? reinterpret_cast<PFN_D3D12_CREATE_DEVICE>(GetProcAddress(d3d12, "D3D12CreateDevice")) : nullptr;
+    ID3D12Device* d = nullptr;
+    GpuMemoryKind kind = GpuMemoryKind::Unknown;
+    bool coherent = false, own = false;
+    if (!host.wine && create && SUCCEEDED(create(g_adapter, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&d))) && d) {
+        const ULONG refs = d->AddRef();
+        d->Release();
+        own = refs <= 2;  // only our reference: the runtime made a new device; asked all the same, then released
+        kind = QueryGpuMemoryKind(d, &coherent);
+        d->Release();
+    }
+    g_gpuKind = static_cast<int>(kind);
+    char reasons[200];
+    SharedGpuReasons(mode, kind, host, reasons, sizeof reasons);
+    Log("[mem] the game's GPU memory: %s (D3D12 architecture%s%s); DXGI: dedicated %.2f GB, dedicated system %.2f GB, shared "
+        "system %.2f GB, budget %.2f GB local / %.2f GB non-local; %s",
+        kind == GpuMemoryKind::Shared      ? "system RAM (UMA)"
+        : kind == GpuMemoryKind::Dedicated ? "its own video memory"
+        : host.wine                        ? "not asked under Wine"
+                                           : "not known (treated as a GPU with its own memory)",
+        kind == GpuMemoryKind::Unknown ? " not answered" : coherent ? ", cache-coherent" : "", own ? ", asked on a new device" : "",
+        desc.DedicatedVideoMemory / kGB, desc.DedicatedSystemMemory / kGB, desc.SharedSystemMemory / kGB, local.Budget / kGB,
+        nonLocal.Budget / kGB, reasons);
+}
+
 // For RdgParallelTranslate's automatic mode: the largest dedicated video memory among the hardware GPUs, asked once (monitor thread;
 // dxgi.dll is loaded here, never under the loader lock). The game runs on the biggest GPU of the PC in practice.
 uint64_t g_largestGpuMB = 0;
@@ -223,6 +309,86 @@ bool LatestGameVram(uint64_t* used, uint64_t* budget)
     *used = g_lastVram.load(std::memory_order_relaxed);
     *budget = g_lastVramBudget.load(std::memory_order_relaxed);
     return *budget != 0;
+}
+
+GpuMemoryKind GameGpuMemoryKind() { return static_cast<GpuMemoryKind>(g_gpuKind.load()); }
+
+GpuMemoryKind QueryGpuMemoryKind(void* device, bool* cacheCoherent)
+{
+    *cacheCoherent = false;
+    auto* d = static_cast<ID3D12Device*>(device);
+    if (!d) return GpuMemoryKind::Unknown;
+    __try {
+        D3D12_FEATURE_DATA_ARCHITECTURE1 a1{};
+        if (SUCCEEDED(d->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE1, &a1, sizeof a1))) {
+            *cacheCoherent = a1.CacheCoherentUMA != FALSE;
+            return a1.UMA ? GpuMemoryKind::Shared : GpuMemoryKind::Dedicated;
+        }
+        D3D12_FEATURE_DATA_ARCHITECTURE a{};
+        if (SUCCEEDED(d->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE, &a, sizeof a))) {
+            *cacheCoherent = a.CacheCoherentUMA != FALSE;
+            return a.UMA ? GpuMemoryKind::Shared : GpuMemoryKind::Dedicated;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return GpuMemoryKind::Unknown;
+}
+
+SharedGpuHost SharedGpuHostFacts()
+{
+    static const SharedGpuHost facts = [] {
+        SharedGpuHost f;
+        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        f.wine = ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr;
+        using InstalledFn = BOOL(WINAPI*)(PULONGLONG kb);
+        const auto installed = reinterpret_cast<InstalledFn>(
+            GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetPhysicallyInstalledSystemMemory"));
+        ULONGLONG kb = 0;
+        if (installed && installed(&kb) && kb) {
+            f.ramMB = kb / 1024;
+            f.ramInstalled = true;
+        } else {
+            MEMORYSTATUSEX ms{sizeof ms};
+            if (GlobalMemoryStatusEx(&ms)) f.ramMB = ms.ullTotalPhys >> 20;
+        }
+        return f;
+    }();
+    return facts;
+}
+
+bool SharedMemoryGpuPossible(int mode, bool wine, uint64_t ramMB)
+{
+    if (mode == 0) return false;
+    if (mode == 1) return true;
+    return !wine && ramMB && ramMB < kSharedGpuMaxRamMB;  // 2 (and any other value): automatic
+}
+
+bool SharedMemoryGpuWanted(int mode, GpuMemoryKind kind, bool wine, uint64_t ramMB)
+{
+    if (mode == 1) return true;
+    return SharedMemoryGpuPossible(mode, wine, ramMB) && kind == GpuMemoryKind::Shared;
+}
+
+bool SharedMemoryGpuWaitForAnswer(int mode)
+{
+    const SharedGpuHost host = SharedGpuHostFacts();
+    return mode != 1 && SharedMemoryGpuPossible(mode, host.wine, host.ramMB) && GameGpuMemoryKind() == GpuMemoryKind::Pending;
+}
+
+namespace {
+bool SharedNow(int mode)
+{
+    const SharedGpuHost host = SharedGpuHostFacts();
+    return SharedMemoryGpuWanted(mode, GameGpuMemoryKind(), host.wine, host.ramMB);
+}
+}  // namespace
+
+bool AllocatorTrimTightStep(bool tight, uint64_t vram, uint64_t budget, uint64_t headroom, bool shared)
+{
+    if (!headroom || shared) return true;
+    if (budget && vram + headroom > budget) return true;
+    if (budget && vram + headroom + (512ull << 20) <= budget) return false;
+    return tight;
 }
 
 uint64_t LargestGpuMemoryMB(const char** name)
@@ -350,6 +516,17 @@ Interval g_interval;
 //   the page file instead. Under half the threshold (512 MB by default) commit relief starts at once, not after 3 s:
 //   without a page file (commit limit = RAM) a streaming burst can use up 1 GB of commit within those seconds.
 std::atomic<bool> g_reliefRam{false}, g_reliefCommit{false}, g_reliefVram{false}, g_reliefVramTranslate{false};
+std::atomic<bool> g_sharedActive{false};  // SharedMemoryGpu in effect (the last UpdateMemory)
+int g_sharedModeLogged = -1;              // the SharedMemoryGpu value of the last UpdateMemory (-1: none yet)
+
+// SharedMemoryGpu in effect: the keeps act as the game (main.cpp also turns GpuSceneKeepCapacity, RtSceneBufferKeep,
+// OsPageCache and RdgParallelTranslate=2 by relief.shared).
+void ApplySharedGpu(bool shared, MemoryRelief* relief)
+{
+    relief->shared = shared;
+    relief->lumen = relief->lumen || shared;
+    relief->upload = relief->upload || shared;
+}
 int g_ramPressureSeconds = 0, g_ramClearSeconds = 0, g_commitPressureSeconds = 0, g_commitClearSeconds = 0;
 unsigned g_ramEpisodes = 0, g_commitEpisodes = 0;
 
@@ -537,11 +714,10 @@ void UpdateRelief(const Sample& s, const Config& cfg)
     // CommandAllocatorTrim's own step (its ini switch, not MemoryRelief's): while over the budget, command allocator pools keep only the
     // last few seconds' need.
     // "Tight": within AllocatorTrimHeadroomMB of the budget; it ends only 512 MB below that (no flip-flop at the line).
+    // On a shared-memory GPU (SharedMemoryGpu) always tight: there the budget is a share of RAM that the CPU side also uses.
     const uint64_t headroom = static_cast<uint64_t>((std::max)(cfg.allocatorTrimHeadroomMB, 0)) << 20;
     static bool tight = false;  // unknown budget: as the game
-    if (!headroom) tight = true;
-    else if (s.vramBudget && s.vram + headroom > s.vramBudget) tight = true;
-    else if (s.vramBudget && s.vram + headroom + (512ull << 20) <= s.vramBudget) tight = false;
+    tight = AllocatorTrimTightStep(tight, s.vram, s.vramBudget, headroom, SharedNow(cfg.sharedMemoryGpu));
     SetAllocatorTrimPressure(s.vramBudget && s.vram > s.vramBudget, tight);
     if (!cfg.memoryRelief) {
         g_reliefVram = false;
@@ -733,9 +909,13 @@ bool g_reportEnabled = false;
 
 void WriteGpuCrashReport(const CONTEXT* ctx)
 {
-    Log("[gpucrash] the game reports a GPU crash (thread %lu); OblivionPerfFix %s state: parallel translate %s, memory relief %s/%s/%s",
+    const GpuMemoryKind kind = GameGpuMemoryKind();
+    Log("[gpucrash] the game reports a GPU crash (thread %lu); OblivionPerfFix %s state: parallel translate %s, memory relief %s/%s/%s, "
+        "GPU memory %s%s",
         GetCurrentThreadId(), OPF_VERSION, RdgParallelTranslateActive() ? "on" : "off", g_reliefRam ? "RAM" : "-",
-        g_reliefCommit ? "commit" : "-", g_reliefVram ? "VRAM" : "-");
+        g_reliefCommit ? "commit" : "-", g_reliefVram ? "VRAM" : "-",
+        kind == GpuMemoryKind::Shared ? "shared (UMA)" : kind == GpuMemoryKind::Dedicated ? "dedicated" : "not known",
+        g_sharedActive ? ", keeps as the game (SharedMemoryGpu)" : "");
     // The device: UE's TerminateOnGPUCrash got it as its argument, so it is in a register or on this stack.
     ULONG_PTR stackLo = 0, stackHi = 0;
     GetCurrentThreadStackLimits(&stackLo, &stackHi);
@@ -791,6 +971,7 @@ bool InstallGpuCrashReport()
 void UpdateMemory(const Config& cfg, MemoryRelief* relief)
 {
     OpenAdapter();
+    DetectGpuMemoryKind(cfg.sharedMemoryGpu);
     Sample s = TakeSample();
     g_lastVram.store(s.vram, std::memory_order_relaxed);
     g_lastVramBudget.store(s.vramBudget, std::memory_order_relaxed);
@@ -803,10 +984,22 @@ void UpdateMemory(const Config& cfg, MemoryRelief* relief)
     if (s.vram > in.vramMax) in.vramMax = s.vram, in.vramBudgetAtMax = s.vramBudget;
     if (s.vramBudget && s.vram > s.vramBudget) ++in.overBudgetSeconds;
     UpdateRelief(s, cfg);
+    const bool shared = SharedNow(cfg.sharedMemoryGpu);
+    if (g_sharedActive.exchange(shared) != shared || (g_sharedModeLogged != -1 && cfg.sharedMemoryGpu != g_sharedModeLogged)) {
+        char reasons[200];
+        SharedGpuReasons(cfg.sharedMemoryGpu, GameGpuMemoryKind(), SharedGpuHostFacts(), reasons, sizeof reasons);
+        Log(shared ? "[mem] %s: UploadMemoryKeep, LumenKeepArrayCapacity, GpuSceneKeepCapacity, RtSceneBufferKeep and OsPageCache act "
+                     "as the game, RdgParallelTranslate=2 stays off, CommandAllocatorTrim hands spare copy memory back after loads "
+                     "(SharedMemoryGpu=0: as on a GPU with its own memory)"
+                   : "[mem] %s: the memory-keeping fixes as configured",
+            reasons);
+    }
+    g_sharedModeLogged = cfg.sharedMemoryGpu;
     relief->lumen = g_reliefCommit;
     relief->upload = g_reliefRam || g_reliefCommit || g_reliefVram;
     relief->translate = g_reliefVramTranslate;
     relief->osCache = g_reliefRam || g_reliefCommit;
+    ApplySharedGpu(shared, relief);
 }
 
 void LogMemoryStats()
@@ -823,6 +1016,7 @@ void LogMemoryStats()
     if (g_reliefRam) strcat_s(relief, "+RAM");
     if (g_reliefCommit) strcat_s(relief, "+commit");
     if (g_reliefVram) strcat_s(relief, g_reliefVramTranslate ? "+VRAM2" : "+VRAM1");
+    if (g_sharedActive) strcat_s(relief, "+shared");
     Log("[mem] RAM free %.2f GB (min %.2f) of %.1f, commit free %.2f GB (min %.2f) of %.1f (page files can grow %.1f GB), game private %.2f GB (max %.2f), working set %.2f GB; %s; relief %s (episodes RAM %u, commit %u, VRAM %u of which helped %u)",
         s.ramFree / kGB, in.ramFreeMin / kGB, s.ramTotal / kGB, s.commitFree / kGB, in.commitFreeMin / kGB, s.commitLimit / kGB,
         s.commitGrow / kGB, s.priv / kGB, in.privMax / kGB, s.ws / kGB, vram, relief[0] ? relief + 1 : "off", g_ramEpisodes,
@@ -866,5 +1060,15 @@ void* GpuCrashReportTestFind(const void* words, size_t count)
 }
 
 bool GpuCrashReportTestDred(void* device) { return LogDredGuarded(static_cast<ID3D12Device*>(device)); }
+
+// Self-test: the relief a detected GPU kind gives with SharedMemoryGpu = mode, Windows itself roomy (the live state's
+// kind is put back afterwards). Same rule as UpdateMemory.
+void MemoryReliefTestSharedGpu(GpuMemoryKind kind, int mode, bool wine, uint64_t ramMB, MemoryRelief* relief)
+{
+    const int was = g_gpuKind.exchange(static_cast<int>(kind));
+    *relief = MemoryRelief{};
+    ApplySharedGpu(SharedMemoryGpuWanted(mode, GameGpuMemoryKind(), wine, ramMB), relief);
+    g_gpuKind = was;
+}
 
 }  // namespace opf

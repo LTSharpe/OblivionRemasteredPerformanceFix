@@ -772,10 +772,10 @@ bool ActorLocation(const uint8_t* obj, double* x, double* y, double* z)
     return std::isfinite(*x) && std::isfinite(*y) && std::isfinite(*z);
 }
 
-// ActorLocation for any object of an owner chain (ClothBuildDefer's owner lookup): an equipment delegate's owner is the
-// character's body pairing component, whose word at the actor's root-component offset holds data, not a pointer. That
-// object is no actor; the walk goes on with its outer, the character. Pacing's own walk (ResolveDelegate) ends there
-// as before: the unit counts as near and runs whatever the budget.
+// ActorLocation for any object of an owner chain: a smaller object (an equipment or hair delegate's owner, e.g. the
+// character's body pairing component) has no root component at that offset, and the word read there can be an invalid
+// pointer. That object is no actor; the walk goes on with its outer (ClothBuildDefer's owner lookup; lab PacingOwnerWalk).
+// Pacing's own walk in the public build (ResolveDelegate) ends there as before: the unit counts as near.
 bool ActorLocationGuarded(const uint8_t* obj, double* x, double* y, double* z)
 {
     __try {
@@ -874,7 +874,8 @@ bool FarFrom(double x, double y, double z)
 // A delegate's owner (the weak pointer at +0x18) -> the actor it belongs to (itself or an outer); distant = farther than
 // the minimum distance and not rendered recently (PacingFadeAware: or still invisible in its spawn fade-in). Unknown
 // counts as near (runs as before). guarded: an object that faults at the root-component offset is skipped instead of
-// ending the walk (ClothBuildDefer only).
+// ending the walk (ClothBuildDefer's questions; lab: also pacing's own walk with PacingOwnerWalk). log: pacing's own
+// call (the first 16 resolutions are logged; lab: its counters).
 bool ResolveOwner(const uint8_t* ownerWeak, uintptr_t* key, bool* distant, bool log, bool guarded)
 {
     *key = 0;
@@ -883,9 +884,10 @@ bool ResolveOwner(const uint8_t* ownerWeak, uintptr_t* key, bool* distant, bool 
     if (!g.testPlayer && (!g.outerOk || !g.weakGet)) return false;
     __try {
         const uint8_t* obj = static_cast<const uint8_t*>(g.weakGet(ownerWeak));
+        const bool walk = guarded;
         for (int i = 0; obj && i < 4; ++i) {
             double x, y, z;
-            if (guarded ? ActorLocationGuarded(obj, &x, &y, &z) : ActorLocation(obj, &x, &y, &z)) {
+            if (walk ? ActorLocationGuarded(obj, &x, &y, &z) : ActorLocation(obj, &x, &y, &z)) {
                 *key = reinterpret_cast<uintptr_t>(obj);
                 const bool far1 = FarFrom(x, y, z);
                 bool seen = far1 && RecentlyRendered(obj);
@@ -918,6 +920,17 @@ bool ResolveOwner(const uint8_t* ownerWeak, uintptr_t* key, bool* distant, bool 
 bool ResolveDelegate(const uint8_t* inst, uintptr_t* key, bool* distant)
 {
     return ResolveOwner(inst + kOwnerWeakOffset, key, distant, true, false);
+}
+
+// ClothBuildDefer's questions (asked from inside a unit, or at the frame start): the same decision as pacing's with the
+// guarded walk, leaving what pacing's own resolution set for its caller as it was (lastFadeHeld; lab: the decision bits
+// and the type it resolves for). Port of PR #31 onto the lab (lab-only state is restored too).
+bool ResolveOwnerQuiet(const uint8_t* ownerWeak, uintptr_t* key, bool* distant)
+{
+    const bool fadeHeld = g.lastFadeHeld;
+    const bool r = ResolveOwner(ownerWeak, key, distant, false, true);
+    g.lastFadeHeld = fadeHeld;
+    return r;
 }
 
 // ---- guards (game thread) ----
@@ -1675,7 +1688,7 @@ bool NpcPacingDistantUnit(uint64_t* ownerWeak, uint64_t* frame)
         // build held without it, 9 with it)
         uintptr_t key;
         bool distant;
-        if (!ResolveOwner(g.unitWeak, &key, &distant, false, true) || !distant) return false;
+        if (!ResolveOwnerQuiet(g.unitWeak, &key, &distant) || !distant) return false;
     }
     memcpy(ownerWeak, g.unitWeak, sizeof *ownerWeak);
     *frame = g.frame;
@@ -1687,7 +1700,7 @@ bool NpcPacingStillDistant(uint64_t ownerWeak)
     if (!g.installed || !OnGameThread() || !g.allowDefer || !g.enabled.load(std::memory_order_relaxed)) return false;
     uintptr_t key;
     bool distant;
-    return ResolveOwner(reinterpret_cast<const uint8_t*>(&ownerWeak), &key, &distant, false, true) && distant;
+    return ResolveOwnerQuiet(reinterpret_cast<const uint8_t*>(&ownerWeak), &key, &distant) && distant;
 }
 
 bool NpcPacingPlayerPos(double* x, double* y, double* z)

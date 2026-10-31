@@ -10,7 +10,10 @@
 -- share one Lua state and Lua is not thread-safe, which is what silently killed the old
 -- LoopAsync flight loop. If the frame loop is not available or
 -- never runs, the bootstrap falls back to the old LoopAsync + ExecuteInGameThread poll
--- ("driver async": commands work, flight does not).
+-- ("driver async": commands work, flight does not). From that fallback it registers a new frame loop from the game
+-- thread every few seconds; the first loop that runs takes over and the async poll stops (2026-10-31: a game started
+-- through its first-launch shader screen, which OblivionPerfFix's ShaderScreenAfterDriverChange brings back after a driver
+-- update, never ran the loop registered at mod start).
 
 -- Both folders are written into the deployed copy of this file by tools\Install-UE4SS.ps1 (the repo, and the runtime
 -- folder from tools\GamePaths.ps1 Get-BenchRuntimeDir: run\ in the public repo).
@@ -146,27 +149,74 @@ local function OnFrame()
     end
 end
 
-local function StartFrameDriver()
+-- Each registered loop has an id; only the active one (driver.loopId) drives OnFrame. A loop registered from the async
+-- fallback (rearm) becomes the active one the first time it runs; any other loop that runs later does nothing.
+local loopSeq, loopHandles = 0, {}
+local function StartFrameDriver(rearm)
     if type(LoopInGameThreadAfterFrames) ~= "function" then return false, "LoopInGameThreadAfterFrames is missing" end
+    loopSeq = loopSeq + 1
+    local id = loopSeq
     local ok, handle = pcall(LoopInGameThreadAfterFrames, FRAME_STEP, function()
+        if driver.loopId ~= id then
+            if driver.mode ~= "async" or driver.loopId ~= nil then          -- not the active loop: cancel it if possible
+                if loopHandles[id] ~= nil and type(CancelDelayedAction) == "function" then pcall(CancelDelayedAction, loopHandles[id]); loopHandles[id] = nil end
+                return
+            end
+            driver.loopId = id; driver.mode = "frame"
+            log(string.format("frame loop running (loop %d, %.1f s after start): the async poll stops", id, os.clock() - driver.started))
+        end
         local ok2, err = pcall(OnFrame)              -- never let an error reach UE4SS (it may drop the loop)
         if not ok2 then LogError("driver", err) end
     end)
     if not ok then return false, tostring(handle) end
-    driver.mode = "frame"; driver.handle = handle
+    loopHandles[id] = handle
+    if not rearm then driver.mode = "frame"; driver.loopId = id; driver.handle = handle end
     return true
 end
 
 -- ---------------------------------------------------------------- async driver (fallback)
 -- The pre-2026-10-04 bootstrap: a 50 ms LoopAsync poll that hands work to the game thread.
 
+-- Test switch for the fallback above (lab: tools\Run-Benchmark.ps1 -TestSkipFrameLoop <s>; off unless the file exists):
+-- bench-test-frameloop.txt in the runtime folder ("skip <s>"), read and removed at start, so only the next game is
+-- affected. The frame loop is not registered at start (as in a game started through the shader screen: the loop never
+-- runs), so the 20 s check falls back to the async poll; its re-arms begin <s> seconds after the mod started.
+local testSkip, testRearmAt = false, 0
+do
+    local path = RUNTIME .. "bench-test-frameloop.txt"
+    local f = io.open(path, "r")
+    if f then
+        local text = f:read("*a") or ""; f:close(); os.remove(path)
+        local n = tonumber(text:match("skip%s+(%d+)"))
+        if n then testSkip = true; testRearmAt = n end
+    end
+end
+
 local function StartAsyncDriver()
-    driver.mode = "async"
+    driver.mode = "async"; driver.loopId = nil
     local queue, pending, pendingSince = {}, false, 0
+    local nextRearm, rearms = math.max(os.clock() + 5, driver.started + testRearmAt), 0
     LoopAsync(POLL_MS, function()
+        if driver.mode == "frame" then                   -- a re-armed frame loop took over: this poll ends
+            if #queue > 0 then
+                local left = queue; queue = {}
+                log(string.format("%d queued command line(s) handed to the frame loop", #left))
+                ExecuteInGameThread(function() RunLines(left) end)
+            end
+            return true
+        end
         local ok, err = pcall(function()
             local now = os.clock()
             pcall(Heartbeat, now)
+            -- try the frame loop again, registered from the game thread, every 5 s (at most 120 times: 10 min)
+            if now >= nextRearm and rearms < 120 and type(ExecuteInGameThread) == "function" then
+                nextRearm = now + 5; rearms = rearms + 1
+                ExecuteInGameThread(function()
+                    if driver.mode ~= "async" then return end
+                    local okR, whyR = StartFrameDriver(true)
+                    if not okR and rearms == 1 then log("WARN frame loop re-arm failed: " .. tostring(whyR)) end
+                end)
+            end
             if pending and now - pendingSince > 2 then pending = false; log("WARN game-thread callback lost, re-armed") end
             local busy = Busy()
             if not busy and now - lastCommand > IDLE_AFTER_S and now - lastPoll < IDLE_POLL_S then return end
@@ -199,7 +249,13 @@ end
 
 -- ---------------------------------------------------------------- start
 
-local started, why = StartFrameDriver()
+local started, why
+if testSkip then
+    log(string.format("TEST frame loop not registered at start (bench-test-frameloop.txt): fallback after 20 s, re-arms from %d s", testRearmAt))
+    driver.mode = "frame"; started = true                -- as a registered loop that never runs
+else
+    started, why = StartFrameDriver()
+end
 if started then
     -- One-off check that the frame loop really runs; this tiny async callback removes itself as soon
     -- as it has seen a frame (normally on its first call).

@@ -15,7 +15,7 @@
 // 4 both (1x then 2x, about 8 ms apart). docs/research.md, "Bow sneak attacks at 1x".
 //
 // The fix, both on the OblivionThread (where both calls run), only for hits whose attacker is the player:
-//  - one hit per arrow: each hit with an arrow is remembered (arrow and target, 500 ms); a second hit of the same
+//  - one hit per arrow: each hit with an arrow is remembered (arrow and target, 250 ms); a second hit of the same
 //    arrow on the same target, from either path, is not made (the first one already dealt the damage, the message,
 //    the counters and the reaction);
 //  - the old engine's hit uses the multiplier the Unreal side computed for the player's most recent arrow hit (the
@@ -76,7 +76,10 @@ constexpr size_t kHitSlot = 0x868;
 // The hit with a projectile (vtable +0x868): rcx attacker, dl, r8 arrow, r9 target, then kind, multiplier, flag.
 using HitFn = uint64_t (*)(void* attacker, uint64_t a2, void* arrow, void* target, uint64_t kind, float mult, uint64_t flag);
 
-constexpr uint64_t kSameArrowMs = 500;
+// The two paths' hits of one arrow come 8-9 ms apart (the contributor's probe); 250 ms covers them with a wide margin
+// while keeping short the window in which a new arrow at a freed arrow's address, on the same target, could lose its hit
+// (review rev124: 500 ms before 1.2.4's release).
+constexpr uint64_t kSameArrowMs = 250;
 constexpr int kRecent = 16;
 
 struct Recent {
@@ -101,8 +104,9 @@ int g_next = 0;
 uint64_t (*g_now)() = &GetTickCount64;    // the self-test steps a fake clock
 std::atomic<int> g_hitLines{0};
 
-// One log line per player arrow hit (the first kHitLines of a session), so the fix can be checked in play.
-constexpr int kHitLines = 200;
+// One log line per player arrow hit (the first kHitLines of a session), so the fix can be checked in play; on by
+// default since 1.2.4, so only the first 20 (the minute stats line counts the rest).
+constexpr int kHitLines = 20;
 void LogHit(const char* path, const void* arrow, const void* target, float in, float used, const char* what)
 {
     if (g_hitLines.fetch_add(1, std::memory_order_relaxed) >= kHitLines) return;

@@ -6,7 +6,7 @@
 // 64-bit fields at +0x760 and +0x768, scaled to MB (x 2^-20). Their order and use match the engine's cached DXGI video
 // memory info on the D3D12 adapter: the first is the budget Windows gives the process (shown as {1}, the total), the
 // second its current use ({0}). The shipping build never refreshes that cache, so both stay 0 and the counter reads 0/0
-// on every PC (Steam reports on AMD and NVIDIA; Bethesda's support called it a known bug). This PC (RTX 5090): 0/0.
+// on every PC (Steam reports on AMD and NVIDIA; Bethesda's support called it a known bug; the contributor's PC: 0/0).
 //
 // The fix. The query's two direct calls (the widget's update, exe+0x48C2511, and GetUsedVRAMMB's exec thunk,
 // exe+0x46019EB) go through a small wrapper. It calls the game's function first; only when both numbers come back 0 it

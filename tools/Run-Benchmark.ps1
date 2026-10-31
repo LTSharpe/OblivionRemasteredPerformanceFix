@@ -84,6 +84,7 @@ param(
     [double]$MenuHoldSec = 0,                            # lab only: after a launch, stay this long at the main menu before entering the world (a player looking at the menu while the precompile runs)
     [switch]$MenuPsoWait,                                # after a launch, wait at the main menu (hidden) until the game's start-up PSO precompile has finished (at most 6 min), then enter the world: the scenes start in the same state with or without the fix, with no warm-up scene (the benchmark kit, 2026-10-24)
     [int]$StallSec = 0,                                  # lab only: the watchdog ends a game whose frame counter stood still this long (0 = its default, 30 s); the window-not-responding limit (20 s) is raised with it; e.g. 150 to let a cold-cache start-up stall or UE's own 120 s render-thread timeout play out
+    [int]$TestSkipFrameLoop = 0,                         # lab test of the OblvBench mod's fallback (docs\benchmark.md): in the next game the mod does not register its frame loop at start, falls back to the async poll after 20 s and re-arms the loop from this many seconds after its start; 0 = off
     [int]$CpuLimit = 0,                                  # lab only: act as an N-core CPU without SMT: the game runs in a Job object limited to N logical processors (one per physical core) from its start, and -corelimit=N -physicalcorelimit=N size UE's thread pools for N (0 = off)
     [string[]]$ExtraGameArgs = @(),                      # lab only: more game command-line arguments for this launch (e.g. '-corelimit=8', '-physicalcorelimit=4' to act as a smaller CPU)
     [switch]$SelfTest                                    # passive 15 s capture of the running game: checks PresentMon, sampler, analysis and report without sending it anything
@@ -145,6 +146,12 @@ function Get-ReuseIgnoredWarning {
 function Step([string]$msg) {
     Write-Host ("[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $msg)
     Set-BenchStatus @{ message = $msg }
+}
+# The watchdog's notes as they come (the shader-screen stall pause and its end): in the run output and in report.md.
+$script:watchNotes = New-Object System.Collections.Generic.List[string]
+function Write-WatchNotes {
+    if (-not ('OblvBench.GameWatch' -as [type])) { return }
+    foreach ($l in [OblvBench.GameWatch]::NewLines()) { $script:watchNotes.Add($l); Step "watch: $l" }
 }
 function Opt($obj, [string]$name, $default) { if ($obj -and $obj.PSObject.Properties[$name]) { $obj.$name } else { $default } }
 if (-not $Start) { $Start = Opt $scn 'start' 'fresh' }
@@ -559,11 +566,14 @@ function Get-GamePlace {
 function Wait-MainMenu([double]$timeoutSec = 180) {
     $sw = [Diagnostics.Stopwatch]::StartNew(); $menu = ''
     while ($menu -ne 'ready') {
-        if ($sw.Elapsed.TotalSeconds -gt $timeoutSec) { throw "GAMEDOWN: stuck: the main menu did not come up within $timeoutSec s (last answer: $menu)" }
+        # the game's first-launch shader screen (OblivionPerfFix ShaderScreenAfterDriverChange, after a driver update) holds
+        # start-up for minutes: wait for it (GameWatch bounds that to ShaderScreenMaxSec from the launch)
+        if ($sw.Elapsed.TotalSeconds -gt $timeoutSec -and -not [OblvBench.GameWatch]::InShaderScreenGrace) { throw "GAMEDOWN: stuck: the main menu did not come up within $timeoutSec s (last answer: $menu)" }
         $menu = Send-Bench 'menu' -TimeoutMs 5000 -NoThrow
         if ($menu -in 'eula=0', 'setup=0') {
             throw 'NEEDSUSER: The game is waiting for its first-start steps (licence agreement, display/sound settings). Start it once by hand, go through them to the main menu, close it, then run the benchmark again.'
         }
+        Write-WatchNotes
         if ($menu -ne 'ready') { Wait-Game 0.4 }
     }
     $s = Wait-BenchState $atMenu -TimeoutSec 60 -Stable 2 -PollMs 300
@@ -596,12 +606,19 @@ function Start-BenchGame([string]$why) {
             # below the minimum spec (6 cores) the game shows "Thank you for installing ..." at start-up: answered with OK, as a player would
             if ($CpuLimit -lt 6) { [OblvBench.GameWatch]::AcceptBoxPrefix = 'Thank you for installing'; [OblvBench.GameWatch]::AcceptedBoxes = 0; [OblvBench.GameWatch]::AcceptLog = '' }
         }
+        $testFile = Join-Path $script:BenchRun 'bench-test-frameloop.txt'   # read and removed by the mod at its start
+        if ($TestSkipFrameLoop -gt 0 -and -not $script:testSkipWritten) {
+            $script:testSkipWritten = $true
+            Set-Content -LiteralPath $testFile "skip $TestSkipFrameLoop" -Encoding ascii
+            Step "TEST (-TestSkipFrameLoop): the mod does not register its frame loop at start in this game (re-arms from $TestSkipFrameLoop s)"
+        } elseif (Test-Path -LiteralPath $testFile) { Remove-Item -LiteralPath $testFile -ErrorAction SilentlyContinue }
         try { $game = Start-Game -Unobtrusive:(-not $Visible) -Audible:$Audible -GameArgs $script:GameLaunchArgs -CpuMask $cpuMask }
         catch {
             if ($CpuLimit -gt 0 -and $CpuLimit -lt 6) { Step "minimum-spec box: answered $([OblvBench.GameWatch]::AcceptedBoxes) time(s) $([OblvBench.GameWatch]::AcceptLog)" }
             if ($try -ge 2 -or "$_" -match '^(NEEDSUSER|DEADLINE)') { throw }
             Step "start failed ($_), trying once more"
             [OblvBench.GameWatch]::Dismiss() | ForEach-Object { Step "dismissed: $_" }
+            [OblvBench.GameWatch]::Stop()                # the failed game's watch ends here: nothing of it may reach the next try
             if (Get-Game) { Stop-Process -Id (Get-Game).Id -Force -ErrorAction SilentlyContinue }
             Start-Sleep -Seconds 10
         }
@@ -619,6 +636,18 @@ function Start-BenchGame([string]$why) {
     Save-SessionState $state
     Step 'waiting for the main menu (skipping the start-up videos and the title screen)'
     Wait-MainMenu
+    Write-WatchNotes
+    # The mod's frame loop (flight, the spectator camera) can start late: in a game where the loop registered at the mod's
+    # start never runs (seen once after the shader screen, 2026-10-31) the mod's async fallback re-registers it every 5 s.
+    # Wait for it here (at most 90 s) rather than fail at 'spectate on'.
+    $ping = Send-Bench 'ping' -TimeoutMs 5000 -NoThrow
+    if ($ping -notmatch 'driver=frame') {
+        Step "waiting for the mod's frame loop ($ping)"
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        while ($ping -notmatch 'driver=frame' -and $sw.Elapsed.TotalSeconds -lt 90) { Wait-Game 1; Write-WatchNotes; $ping = Send-Bench 'ping' -TimeoutMs 5000 -NoThrow }
+        Step $(if ($ping -match 'driver=frame') { "the mod's frame loop runs ($([int]$sw.Elapsed.TotalSeconds) s later)" } else { "the mod's frame loop did not start within 90 s ($ping)" })
+        Write-WatchNotes
+    }
     if ($Visible) { Step (Set-GameForeground) }          # a game started by Steam may come up behind the console
     $game
 }
@@ -1954,6 +1983,7 @@ function Write-Report($result, [string]$runDir) {
     $caps = @($result.sessions | ForEach-Object { $_.frameCap } | Where-Object { $_ } | Select-Object -Unique)
     if ($caps.Count) { $md.Add("Frame rate capped at $($caps -join ' / ') fps during the run (t.MaxFPS; $(if ($result.profile.own) { "the player's own settings" } else { 'set by the profile' })): fps cannot go above it."); $md.Add('') }
     if (-not @($result.sessions | Where-Object { $_.startedGame }).Count) { $md.Add('The game process was reused from an earlier run (with a fresh world per pass): good for iterating, but fps can drift within a long session, so confirm small differences with -Session fresh.'); $md.Add('') }
+    if ($result.watch) { $md.Add('Watchdog: ' + (@($result.watch) -join '; ')); $md.Add('') }
     if ($result.underTest.Count) { $md.Add('Under test: ' + (($result.underTest.GetEnumerator() | ForEach-Object { "``$($_.Key)=$($_.Value)``" }) -join ', ')); $md.Add('') }
     $perf = $result.sessions | Where-Object { $_.kind -eq 'perf' }
     if ($perf -and $perf.scenes) {
@@ -2207,6 +2237,8 @@ for ($run = 1; $run -le $Runs; $run++) {
         }
         $result.sessions = $sessions
         $result.restarts = $script:restartCount
+        Write-WatchNotes
+        if ($script:watchNotes.Count) { $result.watch = @($script:watchNotes) }   # the watchdog's notes (absent when none)
         # The ini as this run's games had it: Start-BenchGame has put this run's -FixIni in place by now (Restore-Config
         # runs only after the result is written). .NET read: strings from Get-Content carry provider properties that
         # ConvertTo-Json would serialise.

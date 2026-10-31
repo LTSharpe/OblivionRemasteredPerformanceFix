@@ -380,11 +380,13 @@ static int g_pcDtors = 0;
 static int g_pcNestParent = -1;            // the delegate id whose run completes the nested ones at once
 static void* g_pcNested[4] = {};
 static bool (*g_pcNestHook)(void*) = nullptr;
+static void (*g_pcInUnit)(int id) = nullptr;  // called inside each delegate unit (ClothBuildDefer's questions to pacing)
 static bool FakeDelExec(void* inst)
 {
     const uint8_t* p = static_cast<const uint8_t*>(inst);
     const int id = *reinterpret_cast<const int*>(p + 0x20);
     g_pcDelRan.push_back(id);
+    if (g_pcInUnit) g_pcInUnit(id);
     g_pcSeq.push_back(id);
     g_pcClock += *reinterpret_cast<const uint64_t*>(p + 0x28);
     if (id == g_pcNestParent)
@@ -565,8 +567,11 @@ static uint64_t HashWords(uint64_t seed, const void* data, size_t bytes)
 #include "selftest_pso.h"          // PsoPrecompileFast's sites, trampoline and mode choices with fakes
 #include "selftest_destroybatch.h" // PhysicsDestroyBatch: sites and the wrapper with fakes
 #include "selftest_clothreg.h"    // ClothRegisterLite: sites, lite builds and their completion with fakes
+#include "selftest_clothdefer.h"     // ClothBuildDefer: sites, hooks and the defer rule (after ClothRegisterLite)
 #include "selftest_animpar.h"      // AnimTeardownParallel's shapes and the helper queue with fakes
 #include "selftest_cellbuf.h"      // CellBufferPacedEvict's shapes, the clamp stub and the buffer LRU with and without the fix
+#include "selftest_vramcounter.h"  // VramCounterFix: the Show VRAM counter
+#include "selftest_shaderscreen.h"  // ShaderScreenAfterDriverChange
 #include "selftest_doordiag.h"     // diagnostic DoorDiag: sites (locate only)
 #include "selftest_streamload.h"   // StreamBehindLoadingScreen: sites (locate only)
 #include "selftest_ledger.h"       // diagnostic HitchLedger: sites, record/ring/csv format, cost per frame
@@ -576,6 +581,8 @@ static uint64_t HashWords(uint64_t seed, const void* data, size_t bytes)
 #include "selftest_hdrthumb.h"     // HdrSaveThumbnail: save thumbnails in HDR10
 #include "selftest_objreplace.h"   // ObjectReplaceCrashGuard: the in-place destroy site and the stub with a fake GUObjectArray
 #include "selftest_taskwait.h"     // TaskWaitDeadlockGuard: the task graph's worker wait, the wake-up protocol against fakes
+#include "selftest_display_native.h"  // MonitorNativeFromWindows / FullscreenAllResolutions
+#include "selftest_skinsss.h"      // SeparableSkinAbove4K: the switch logic against a fake variable
 #include "selftest_scan.h"         // FindAll: the fast pattern search against the reference search
 #include "selftest_ticksplit.h"        // diagnostic TickSplit: sites, entries/windows/top rows, cost per call (lab: perception split)
 
@@ -1683,8 +1690,10 @@ int wmain(int argc, wchar_t** argv)
             FakeConfig config{0, {outShared, 2, 2}, {outFacades, 2, 2}};
             ClothConfigTestOriginal(reinterpret_cast<void*>(&FakeInitialize));
             auto hook = reinterpret_cast<void (*)(void*, const void*)>(cloth.hook);
-            // true = skipped; false = the original was called with the same arguments
+            // true = skipped; false = the original was called with the same arguments. Each case is also
+            // decided in verify mode (without and with the comparison's warm-up): they must agree.
             auto skipped = [&]() {
+                ClothConfigTestDecide(&config, &component, 2);
                 g_fakeInitCalls = 0;
                 hook(&config, &component);
                 if (g_fakeInitCalls == 1 && (g_fakeInitArgs[0] != &config || g_fakeInitArgs[1] != &component)) {
@@ -1722,6 +1731,34 @@ int wmain(int argc, wchar_t** argv)
             Check(!skipped(), "cloth: the last LowValue differs -> copied");
             Check(skipped(), "cloth: after the copies -> skipped again");
 
+            // Strings longer than one cache line (the warm-up prefetches every line of them): equal, then the last character differs.
+            static wchar_t kLongA[] = L"AVeryLongPropertyKeyThatSpansSeveralCacheLinesOfSixtyFourBytes_A";
+            static wchar_t kLongB[] = L"AVeryLongPropertyKeyThatSpansSeveralCacheLinesOfSixtyFourBytes_A";
+            static wchar_t kLongC[] = L"AVeryLongPropertyKeyThatSpansSeveralCacheLinesOfSixtyFourBytes_B";
+            const int32_t longLen = static_cast<int32_t>(wcslen(kLongA) + 1);
+            in[1].strings[1] = {kLongA, longLen, longLen};
+            out[1].strings[1] = {kLongB, longLen, longLen};
+            Check(skipped(), "cloth: equal string value of 130 bytes (separate buffers) -> skipped");
+            in[1].strings[1] = {kLongC, longLen, longLen};
+            Check(!skipped(), "cloth: a 130-byte string value differs in its last character -> copied");
+            Check(skipped(), "cloth: after that copy -> skipped again");
+
+            // The warm-up reads every LOD before the comparison does; a bad pointer in a LOD the comparison never
+            // reaches (LOD 0 already differs in size) faults only the warm-up, which is ignored: same decision.
+            {
+                const ClothConfigStats w0 = GetClothConfigStats();
+                void* const saved = outFacades[1];
+                outFacades[1] = reinterpret_cast<void*>(uintptr_t{0x10});
+                in[0].facade.key.num = in[0].facade.low.num = in[0].facade.high.num = in[0].facade.str.num = in[0].facade.flags.num = 2;
+                const int cold = ClothConfigTestDecide(&config, &component, 0);
+                const int warm = ClothConfigTestDecide(&config, &component, 1);
+                const ClothConfigStats w1 = GetClothConfigStats();
+                Check(cold != 0 && warm == cold && w1.warmFaults - w0.warmFaults == 1 && w1.faults == w0.faults,
+                      "cloth: warm-up fault beyond the first difference -> ignored, same decision, fix stays on");
+                in[0].facade.key.num = in[0].facade.low.num = in[0].facade.high.num = in[0].facade.str.num = in[0].facade.flags.num = 3;
+                outFacades[1] = saved;
+            }
+
             config.collections.num = config.properties.num = 1;
             Check(!skipped(), "cloth: config has fewer LODs -> copied");
             out[0].facade.key.num = out[0].facade.low.num = out[0].facade.high.num = out[0].facade.str.num = out[0].facade.flags.num = 2;
@@ -1747,10 +1784,11 @@ int wmain(int argc, wchar_t** argv)
             Check(g_fakeInitCalls == 0, "cloth: no LODs on either side -> skipped");
 
             const ClothConfigStats s1 = GetClothConfigStats();
-            Check(s1.calls - s0.calls == 20 && s1.skipped - s0.skipped == 6 && s1.flags - s0.flags == 1 &&
-                      s1.values - s0.values == 7 && s1.shape - s0.shape == 2 && s1.unverified - s0.unverified == 3 &&
-                      s1.disabled - s0.disabled == 1 && s1.faults == 0 && s1.checked - s0.checked == 10 && s1.checkFailed == 0,
+            Check(s1.calls - s0.calls == 23 && s1.skipped - s0.skipped == 8 && s1.flags - s0.flags == 1 &&
+                      s1.values - s0.values == 8 && s1.shape - s0.shape == 2 && s1.unverified - s0.unverified == 3 &&
+                      s1.disabled - s0.disabled == 1 && s1.faults == 0 && s1.checked - s0.checked == 11 && s1.checkFailed == 0,
                   "cloth: statistics count every outcome");
+            Check(s1.verified - s0.verified == 22 && s1.verifyDiffs == 0, "cloth: every case decided alike without and with the warm-up");
             LogClothConfigStats();
 
             // A "copy" that does not reproduce its input breaks what the skip relies on: the fix must switch off.
@@ -2140,6 +2178,156 @@ int wmain(int argc, wchar_t** argv)
         }
     }
 
+    // BowSneakAttackFix: a player's arrow hits the old engine's hit function once, the old engine's own impact with the
+    // Unreal side's sneak multiplier instead of its fixed 1.0.
+    {
+        Check(ApplyBowSneakAttackFix(), "bow sneak fix installed");
+        BowSneakInfo bi{};
+        Check(BowSneakAttackFixInfo(&bi), "bow sneak fix info");
+        if (Installed(bi.stub != nullptr, "BowSneakAttackFix (bow sneak attacks)")) {
+            Check(bi.queueCall == game.base + 0x65574B0, "the arrow hit handler's call at exe+0x65574B0");
+            Check(bi.impactCall == game.base + 0x6665A43, "the old engine's impact call at exe+0x6665A43");
+            Check(bi.thunk == game.base + 0x65A5200, "the hit thunk at exe+0x65A5200");
+            Check(bi.player == reinterpret_cast<void* const*>(game.base + 0x941F708), "the player pointer at exe+0x941F708");
+            Check(bi.queueCall[0] == 0xE8 && RipTarget(bi.queueCall, 1, 5) == bi.stub, "handler's call goes to the stub");
+            Check(bi.impactCall[0] == 0xE8 && RipTarget(bi.impactCall, 1, 5) == bi.stub + 16 && bi.impactCall[5] == 0x66 &&
+                      bi.impactCall[6] == 0x90,
+                  "impact's call [r10+868h] is now call stub; nop");
+            Check(*reinterpret_cast<void* const*>(bi.stub + 6) == bi.queueHook &&
+                      *reinterpret_cast<void* const*>(bi.stub + 22) == bi.impactHook,
+                  "stubs jump to the two hooks");
+            Check(ApplyBowSneakAttackFix(), "second installation finds the fix in place");
+
+            // The hooks with fakes: a fake player and target (vtables with the hit slot), arrows, a clock.
+            using HitFn = uint64_t (*)(void*, uint64_t, void*, void*, uint64_t, float, uint64_t);
+            static int thunkCalls = 0, slotCalls = 0;
+            static float lastMult = 0;
+            static uint64_t clockMs = 1000;
+            struct Fakes {
+                static uint64_t Thunk(void*, uint64_t, void*, void*, uint64_t, float mult, uint64_t)
+                {
+                    ++thunkCalls;
+                    lastMult = mult;
+                    return 1;
+                }
+                static uint64_t Slot(void*, uint64_t, void*, void*, uint64_t, float mult, uint64_t)
+                {
+                    ++slotCalls;
+                    lastMult = mult;
+                    return 2;
+                }
+                static uint64_t Clock() { return clockMs; }
+            };
+            static void* actorVtable[0x868 / 8 + 1] = {};
+            actorVtable[0x868 / 8] = reinterpret_cast<void*>(&Fakes::Slot);
+            static void* arrowVtable[1] = {};
+            static void* magicVtable[1] = {};
+            struct Obj { void** vtable; };
+            static Obj player{actorVtable}, npc{actorVtable}, target{actorVtable};
+            static Obj arrowA{arrowVtable}, arrowB{arrowVtable}, arrowC{arrowVtable}, magic{magicVtable};
+            static void* playerPtr = &player;
+            BowSneakAttackFixTestSetup(reinterpret_cast<void*>(&Fakes::Thunk), &playerPtr, &Fakes::Clock);
+            const auto queue = reinterpret_cast<HitFn>(bi.queueHook);
+            const auto impact = reinterpret_cast<HitFn>(bi.impactHook);
+            Check(impact(&player, 0, &arrowA, &target, 0, 1.0f, 0) == 2 && slotCalls == 1 && lastMult == 1.0f,
+                  "old engine's hit before any Unreal-side value: made at 1.0 (stock)");
+            clockMs += 1000;
+            Check(queue(&player, 0, &arrowB, &target, 3, 2.0f, 0) == 1 && thunkCalls == 1 && lastMult == 2.0f,
+                  "Unreal side's hit: made with its multiplier");
+            clockMs += 2000;
+            Check(impact(&player, 0, &arrowC, &target, 0, 1.0f, 0) == 2 && slotCalls == 2 && lastMult == 2.0f,
+                  "old engine's hit first: made with the Unreal side's multiplier (2.0, not 1.0)");
+            clockMs += 8;
+            Check(queue(&player, 0, &arrowC, &target, 3, 2.0f, 0) == 0 && thunkCalls == 1,
+                  "the same arrow's Unreal-side hit 8 ms later: not made (one hit per arrow)");
+            clockMs += 2000;
+            Check(queue(&player, 0, &arrowA, &target, 3, 3.0f, 0) == 1 && thunkCalls == 2 && lastMult == 3.0f,
+                  "Unreal side first (multiplier now 3.0): made");
+            Check(impact(&player, 0, &arrowA, &target, 0, 1.0f, 0) == 0 && slotCalls == 2,
+                  "the same arrow's old-engine hit: not made");
+            clockMs += 240;
+            Check(impact(&player, 0, &arrowA, &target, 0, 1.0f, 0) == 0 && slotCalls == 2,
+                  "the same arrow and target 240 ms later: still not made");
+            clockMs += 20;
+            Check(impact(&player, 0, &arrowA, &target, 0, 1.0f, 0) == 2 && slotCalls == 3 && lastMult == 3.0f,
+                  "the same arrow and target after 250 ms: a new hit, with the latest multiplier");
+            Check(impact(&player, 0, &magic, &target, 0, 1.0f, 0) == 2 && slotCalls == 4 && lastMult == 1.0f,
+                  "another projectile class: its 1.0 kept");
+            Check(impact(&npc, 0, &arrowB, &target, 0, 1.0f, 0) == 2 && slotCalls == 5 && lastMult == 1.0f &&
+                      queue(&npc, 0, &arrowB, &target, 3, 2.0f, 0) == 1 && thunkCalls == 3,
+                  "another attacker: both hits made as in the stock game");
+            SetBowSneakAttackFixEnabled(false);
+            Check(impact(&player, 0, &arrowB, &target, 0, 1.0f, 0) == 2 && slotCalls == 6 && lastMult == 1.0f &&
+                      queue(&player, 0, &arrowB, &target, 3, 2.0f, 0) == 1 && thunkCalls == 4,
+                  "switched off: both hits, the old engine's at 1.0, as in the stock game");
+            SetBowSneakAttackFixEnabled(true);
+            BowSneakAttackFixInfo(&bi);
+            Check(bi.skipped == 3 && bi.corrected == 2 && bi.oneOnly == 2, "second hits (one of them 240 ms later), corrected and 1.0 hits counted");
+            LogBowSneakAttackFixStats();
+            BowSneakAttackFixTestSetup(nullptr, nullptr, nullptr);
+        }
+    }
+
+    // AutosaveFollowsMenu: the level-up's and the scripts' autosaves are not made while all four of the menu's autosave
+    // options are off.
+    {
+        Check(ApplyAutosaveFollowsMenu(), "autosave fix installed");
+        AutosaveMenuInfo ai{};
+        Check(AutosaveFollowsMenuInfo(&ai), "autosave fix info");
+        if (Installed(ai.stub != nullptr, "AutosaveFollowsMenu (autosaves with the menu's options off)")) {
+            Check(ai.levelUpCall == game.base + 0x65FF287, "the level-up's autosave call at exe+0x65FF287");
+            Check(ai.scriptedCall == game.base + 0x6A07684, "the scripts' autosave call at exe+0x6A07684");
+            Check(ai.autosave == game.base + 0x6703BC0, "the autosave at exe+0x6703BC0");
+            Check(ai.switches[0] == game.base + 0x941DAD8 && ai.switches[1] == game.base + 0x941DB28 &&
+                      ai.switches[2] == game.base + 0x941DA80 && ai.switches[3] == game.base + 0x941DA68,
+                  "the menu's settings at exe+0x941DAD8 / DB28 / DA80 / DA68 (interior/exterior, travel, rest, wait)");
+            Check(ai.levelUpCall[0] == 0xE8 && RipTarget(ai.levelUpCall, 1, 5) == ai.stub, "level-up's call goes to the stub");
+            Check(ai.scriptedCall[0] == 0xE8 && RipTarget(ai.scriptedCall, 1, 5) == ai.stub + 16,
+                  "scripted autosave's call goes to the stub + 16");
+            Check(*reinterpret_cast<void* const*>(ai.stub + 6) == ai.levelUpHook &&
+                      *reinterpret_cast<void* const*>(ai.stub + 22) == ai.scriptedHook,
+                  "stubs jump to the two hooks");
+            Check(ApplyAutosaveFollowsMenu(), "second installation finds the fix in place");
+
+            // The hooks with a fake autosave and fake switches.
+            using SaveFn = void (*)(void*);
+            static int saves = 0;
+            static void* lastManager = nullptr;
+            struct Fakes {
+                static void Autosave(void* manager)
+                {
+                    ++saves;
+                    lastManager = manager;
+                }
+            };
+            static uint8_t sw[4] = {};
+            static const uint8_t* swp[4] = {&sw[0], &sw[1], &sw[2], &sw[3]};
+            AutosaveFollowsMenuTestSetup(reinterpret_cast<void*>(&Fakes::Autosave), swp);
+            const auto levelUp = reinterpret_cast<SaveFn>(ai.levelUpHook);
+            const auto scripted = reinterpret_cast<SaveFn>(ai.scriptedHook);
+            int manager = 0;
+            levelUp(&manager);
+            scripted(&manager);
+            Check(saves == 0, "all four menu options off: no level-up or scripted autosave");
+            for (int i = 0; i < 4; ++i) {
+                sw[i] = 1;
+                levelUp(&manager);
+                scripted(&manager);
+                sw[i] = 0;
+            }
+            Check(saves == 8 && lastManager == &manager, "any one option on: both autosaves made, with the game's argument");
+            SetAutosaveFollowsMenuEnabled(false);
+            levelUp(&manager);
+            scripted(&manager);
+            Check(saves == 10, "switched off: both autosaves made as in the stock game");
+            SetAutosaveFollowsMenuEnabled(true);
+            AutosaveFollowsMenuInfo(&ai);
+            Check(ai.skippedLevelUp == 1 && ai.skippedScripted == 1 && ai.made == 10, "skipped and made autosaves counted");
+            LogAutosaveFollowsMenuStats();
+            AutosaveFollowsMenuTestSetup(nullptr, nullptr);
+        }
+    }
+
     // HavokPickWarningGuard: the old engine's "Havok picks" warning box (a modal MessageBoxA on the OblivionThread) held back.
     {
         // A changed handler first (the pointer at exe+0x8FB7CC8 aimed at another function): the guard refuses and leaves the
@@ -2385,6 +2573,10 @@ int wmain(int argc, wchar_t** argv)
     sbl::Run(game);
     // Diagnostic TickSplit (selftest_ticksplit.h): rides on the ledger's tick-group hook.
     tsp::Run(game);
+    // MonitorNativeFromWindows / FullscreenAllResolutions (selftest_display_native.h).
+    dnat::Run(game);
+    // SeparableSkinAbove4K (selftest_skinsss.h).
+    skinsss::Run(game);
     // AnimTeardownParallel (lab prototype): dying NPC animation data's interpolators on helper threads (selftest_animpar.h).
     apar::Run(game);
     // CellBufferPacedEvict (lab prototype): spare cell buffer slots, overflow torn down one cell per OT frame (selftest_cellbuf.h); after
@@ -2398,6 +2590,11 @@ int wmain(int argc, wchar_t** argv)
     hmbg::Run(game);
     // HdrSaveThumbnail (selftest_hdrthumb.h).
     hthumb::Run(game);
+
+    // VramCounterFix (selftest_vramcounter.h).
+    vramc::Run(game);
+    // ShaderScreenAfterDriverChange (selftest_shaderscreen.h).
+    shs::Run(game);
 
     // RestoreFsrAfterAltTab: FSR back on when a menu that was up at focus gain closes (the game's own focus-gained branch, run again).
     {
@@ -3613,6 +3810,50 @@ int wmain(int argc, wchar_t** argv)
                 NpcPacingTestFade(reinterpret_cast<const uint8_t* (*)()>(fcls));
             }
         }
+
+        // ClothBuildDefer's owner lookup: three delegates whose owner is like an equipment unit's (the character's body
+        // pairing component: no pointer at the actor's root-component offset), its outer a far actor. Pacing's walk ends at
+        // that owner: the units count as near and all run in their frame, as on main. Asked from inside them,
+        // NpcPacingDistantUnit and NpcPacingStillDistant walk on to the far actor, so a robe built there may wait
+        {
+            static FakeActor owActor{}, owRoot{}, owEquip{};
+            *reinterpret_cast<void**>(owActor.bytes + 0x1A0) = &owRoot;
+            *reinterpret_cast<void**>(owRoot.bytes + 0x20) = &owActor;
+            *reinterpret_cast<double*>(owRoot.bytes + 0x280) = 30000.0;
+            *reinterpret_cast<uintptr_t*>(owEquip.bytes + 0x1A0) = 0x10;  // no pointer: reading its outer faults
+            *reinterpret_cast<void**>(owEquip.bytes + 0x20) = &owActor;
+            static FakeDelInst ow[3]{};
+            for (int k = 0; k < 3; ++k) {
+                ow[k] = FakeDelInst{};
+                ow[k].vtable = reinterpret_cast<void*>(0x1234);
+                ow[k].weak = &owEquip;
+                ow[k].id = 90 + k;
+                ow[k].costUs = 6000;
+            }
+            static int askedFar, askedStill;
+            static uint64_t askedOwner;
+            askedFar = askedStill = 0;
+            askedOwner = 0;
+            g_pcInUnit = [](int) {
+                uint64_t owner = 0, frame = 0;
+                if (NpcPacingDistantUnit(&owner, &frame)) {
+                    ++askedFar;
+                    askedOwner = owner;
+                }
+                if (NpcPacingStillDistant(reinterpret_cast<uint64_t>(&owEquip))) ++askedStill;
+            };
+            g_pcDelRan.clear();
+            PcPost(kFakeEnd, 0, 0);
+            run(fakeMgr, -1);
+            for (int k = 0; k < 3; ++k) del(&ow[k]);
+            const size_t inFrame = g_pcDelRan.size();
+            end(fakeMgr, nullptr, 2, 0);
+            g_pcInUnit = nullptr;
+            Check(inFrame == 3 && g_pcDelRan == std::vector<int>({90, 91, 92}) && NpcPacingTestRead().fifo == 0 && !g_pcDeadlock,
+                  "pacing: an owner that faults at the root-component offset ends pacing's walk: near, all run at once (as on main)");
+            Check(askedFar == 3 && askedOwner == reinterpret_cast<uint64_t>(&owEquip) && askedStill == 3,
+                  "pacing (ClothBuildDefer): asked inside those units, the guarded walk reaches the far actor (a robe built there may wait)");
+        }
         SetNpcPacing(false, 4, 4096, 15, false);
         LogNpcPacingStats();
     }
@@ -3928,6 +4169,7 @@ int wmain(int argc, wchar_t** argv)
     }
 
     clr::ClothRegSelfTest(game);  // ClothRegisterLite (lab: also ClothRegisterSkip, ClothRegisterVerify)
+    cdf::ClothDeferSelfTest(game);  // ClothBuildDefer (its hooks run inside ClothRegisterLite's, as in the game)
 
     // ParallelStaticBodies: InitStaticBodies' call of CreateShapesAndActors (build 19115871), then the split against a fake.
     if (Installed(FindParallelStaticBodies(), "static bodies: InitStaticBodies' call found")) {
@@ -4733,6 +4975,122 @@ int wmain(int argc, wchar_t** argv)
         }
         if (warp) warp->Release();
         if (factory) factory->Release();
+    }
+
+    printf("\nSharedMemoryGpu: the GPU's memory kind from fake D3D12 answers, and what it turns to the game's way\n");
+    {
+        // A fake ID3D12Device: only CheckFeatureSupport (vtable slot 13) answers; every other slot is never called.
+        struct FakeArch {
+            void** vtbl;
+            HRESULT arch1, arch0;  // the answers for D3D12_FEATURE_ARCHITECTURE1 / _ARCHITECTURE
+            BOOL uma, coherent;
+            int calls;
+        };
+        struct Fns {
+            static HRESULT STDMETHODCALLTYPE Check(FakeArch* self, D3D12_FEATURE f, void* data, UINT size)
+            {
+                ++self->calls;
+                if (f == D3D12_FEATURE_ARCHITECTURE1 && size == sizeof(D3D12_FEATURE_DATA_ARCHITECTURE1)) {
+                    if (FAILED(self->arch1)) return self->arch1;
+                    auto* a = static_cast<D3D12_FEATURE_DATA_ARCHITECTURE1*>(data);
+                    a->TileBasedRenderer = FALSE;
+                    a->UMA = self->uma;
+                    a->CacheCoherentUMA = self->coherent;
+                    a->IsolatedMMU = TRUE;
+                    return S_OK;
+                }
+                if (f == D3D12_FEATURE_ARCHITECTURE && size == sizeof(D3D12_FEATURE_DATA_ARCHITECTURE)) {
+                    if (FAILED(self->arch0)) return self->arch0;
+                    auto* a = static_cast<D3D12_FEATURE_DATA_ARCHITECTURE*>(data);
+                    a->TileBasedRenderer = FALSE;
+                    a->UMA = self->uma;
+                    a->CacheCoherentUMA = self->coherent;
+                    return S_OK;
+                }
+                return E_INVALIDARG;
+            }
+            static void Trap() { __debugbreak(); }
+        };
+        void* vtbl[14];
+        for (auto& v : vtbl) v = reinterpret_cast<void*>(&Fns::Trap);
+        vtbl[13] = reinterpret_cast<void*>(&Fns::Check);
+        auto kind = [&](HRESULT a1, HRESULT a0, BOOL uma, BOOL coherent, bool* coh, int* calls) {
+            FakeArch f{vtbl, a1, a0, uma, coherent, 0};
+            const GpuMemoryKind k = QueryGpuMemoryKind(&f, coh);
+            *calls = f.calls;
+            return k;
+        };
+        bool coh = true;
+        int calls = 0;
+        Check(kind(S_OK, S_OK, TRUE, TRUE, &coh, &calls) == GpuMemoryKind::Shared && coh && calls == 1,
+              "SharedMemoryGpu: ARCHITECTURE1 UMA + cache-coherent -> shared (one query)");
+        Check(kind(S_OK, S_OK, FALSE, FALSE, &coh, &calls) == GpuMemoryKind::Dedicated && !coh && calls == 1,
+              "SharedMemoryGpu: ARCHITECTURE1 not UMA -> dedicated");
+        Check(kind(E_INVALIDARG, S_OK, TRUE, FALSE, &coh, &calls) == GpuMemoryKind::Shared && !coh && calls == 2,
+              "SharedMemoryGpu: an older runtime (no ARCHITECTURE1) -> ARCHITECTURE answers UMA -> shared");
+        Check(kind(E_INVALIDARG, S_OK, FALSE, FALSE, &coh, &calls) == GpuMemoryKind::Dedicated && calls == 2,
+              "SharedMemoryGpu: ARCHITECTURE alone, not UMA -> dedicated");
+        Check(kind(E_FAIL, E_FAIL, TRUE, TRUE, &coh, &calls) == GpuMemoryKind::Unknown && !coh,
+              "SharedMemoryGpu: no answer -> unknown (treated as a GPU with its own memory)");
+        Check(QueryGpuMemoryKind(nullptr, &coh) == GpuMemoryKind::Unknown, "SharedMemoryGpu: no device -> unknown");
+        Check(GameGpuMemoryKind() == GpuMemoryKind::Pending, "SharedMemoryGpu: nothing asked in the self-test -> pending");
+
+        // The rule: 0 never, 1 always, 2 (default) only on a UMA GPU, on Windows itself, with under 20 GB of RAM.
+        const GpuMemoryKind kinds[] = {GpuMemoryKind::Pending, GpuMemoryKind::Unknown, GpuMemoryKind::Dedicated, GpuMemoryKind::Shared};
+        const uint64_t rams[] = {0, 11 * 1024 + 700, 16 * 1024, 20 * 1024 - 1, 20 * 1024, 24 * 1024, 32 * 1024, 128 * 1024};
+        bool rule = Config().sharedMemoryGpu == 2 && kSharedGpuMaxRamMB == 20 * 1024;
+        for (GpuMemoryKind k : kinds)
+            for (bool wine : {false, true})
+                for (uint64_t ram : rams) {
+                    const bool lowRam = ram && ram < 20 * 1024;
+                    rule = rule && !SharedMemoryGpuWanted(0, k, wine, ram) && SharedMemoryGpuWanted(1, k, wine, ram) &&
+                           SharedMemoryGpuWanted(2, k, wine, ram) == (k == GpuMemoryKind::Shared && !wine && lowRam) &&
+                           SharedMemoryGpuPossible(2, wine, ram) == (!wine && lowRam) && !SharedMemoryGpuPossible(0, wine, ram) &&
+                           SharedMemoryGpuPossible(1, wine, ram);
+                }
+        Check(rule, "SharedMemoryGpu: default 2; 0 never, 1 always, 2 only UMA + not Wine + RAM known and under 20 GB");
+        Check(SharedMemoryGpuWanted(2, GpuMemoryKind::Shared, false, 16 * 1024) &&
+                  !SharedMemoryGpuWanted(2, GpuMemoryKind::Shared, false, 24 * 1024) &&
+                  !SharedMemoryGpuWanted(2, GpuMemoryKind::Shared, false, 32 * 1024) &&
+                  !SharedMemoryGpuWanted(2, GpuMemoryKind::Shared, true, 16 * 1024) &&
+                  !SharedMemoryGpuWanted(2, GpuMemoryKind::Dedicated, false, 16 * 1024),
+              "SharedMemoryGpu=2: a 16 GB Windows handheld yes; a 24 GB Ally X, a 32 GB APU, Proton/CrossOver (Wine), a graphics card no");
+        const SharedGpuHost host = SharedGpuHostFacts();
+        Check(!host.wine && host.ramMB >= 1024, "SharedMemoryGpu: this PC is Windows itself (no wine_get_version) and its RAM is known");
+        Check(!SharedMemoryGpuWaitForAnswer(0) && !SharedMemoryGpuWaitForAnswer(1) &&
+                  SharedMemoryGpuWaitForAnswer(2) == (host.ramMB < kSharedGpuMaxRamMB),
+              "RdgParallelTranslate=2 waits for the GPU's answer only where SharedMemoryGpu could apply (not on a 20 GB+ PC)");
+
+        // What it turns off (with Windows roomy, nothing else asks for relief).
+        MemoryRelief r;
+        MemoryReliefTestSharedGpu(GpuMemoryKind::Shared, 2, false, 16 * 1024, &r);
+        Check(r.shared && r.upload && r.lumen && !r.translate && !r.osCache,
+              "SharedMemoryGpu=2 on a 16 GB UMA Windows PC: UploadMemoryKeep and LumenKeepArrayCapacity as stock, relief.shared set");
+        MemoryReliefTestSharedGpu(GpuMemoryKind::Shared, 2, true, 16 * 1024, &r);
+        Check(!r.shared && !r.upload && !r.lumen, "SharedMemoryGpu=2 under Wine (Steam Deck, CrossOver): nothing changes");
+        MemoryReliefTestSharedGpu(GpuMemoryKind::Shared, 2, false, 64 * 1024, &r);
+        Check(!r.shared && !r.upload && !r.lumen, "SharedMemoryGpu=2 on a 64 GB UMA PC: nothing changes");
+        MemoryReliefTestSharedGpu(GpuMemoryKind::Dedicated, 2, false, 16 * 1024, &r);
+        Check(!r.shared && !r.upload && !r.lumen, "SharedMemoryGpu=2 on a GPU with its own memory: nothing changes");
+        MemoryReliefTestSharedGpu(GpuMemoryKind::Unknown, 2, false, 16 * 1024, &r);
+        Check(!r.shared && !r.upload && !r.lumen, "SharedMemoryGpu=2, kind not known: nothing changes");
+        MemoryReliefTestSharedGpu(GpuMemoryKind::Dedicated, 1, true, 64 * 1024, &r);
+        Check(r.shared && r.upload && r.lumen, "SharedMemoryGpu=1 (the desktop test switch): the shared-memory path anywhere");
+        MemoryReliefTestSharedGpu(GpuMemoryKind::Shared, 0, false, 16 * 1024, &r);
+        Check(!r.shared && !r.upload && !r.lumen, "SharedMemoryGpu=0 on a UMA GPU: the fixes as configured");
+        Check(GameGpuMemoryKind() == GpuMemoryKind::Pending, "SharedMemoryGpu: the test put the live kind back");
+
+        // CommandAllocatorTrim's tight level: the old rule unchanged without a shared GPU, always tight with one.
+        const uint64_t G = 1ull << 30, H = 2 * G;
+        bool tightRule = !AllocatorTrimTightStep(false, 4 * G, 16 * G, H, false) &&    // roomy
+                         AllocatorTrimTightStep(false, 15 * G, 16 * G, H, false) &&    // within 2 GB
+                         AllocatorTrimTightStep(true, 14 * G - (256ull << 20), 16 * G, H, false) &&  // hysteresis: stays tight
+                         !AllocatorTrimTightStep(true, 13 * G, 16 * G, H, false) &&    // 512 MB below the line: not tight
+                         !AllocatorTrimTightStep(false, 4 * G, 0, H, false) &&         // unknown budget: as before
+                         AllocatorTrimTightStep(false, 4 * G, 16 * G, 0, false) &&     // headroom 0: always
+                         AllocatorTrimTightStep(false, 1 * G, 16 * G, H, true) &&      // shared GPU: always
+                         AllocatorTrimTightStep(false, 1 * G, 0, H, true);
+        Check(tightRule, "CommandAllocatorTrim: tight as before on a GPU with its own memory, always on a shared-memory GPU");
     }
 
     printf("\nfix 16 video-memory relief without the translate stage (0.17.0 default)\n");

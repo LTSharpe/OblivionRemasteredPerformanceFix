@@ -619,7 +619,8 @@ function Start-Game {
         Assert-GameOk
         $p.Refresh()
         if ([OblvBench.GameWatch]::FindGameWindow($p.Id) -ne [IntPtr]::Zero -and (Read-BenchLogFrom 0) -match 'LOADED bench\.lua') { break }   # not MainWindowHandle: it skips owned windows (-Record)
-        if ($sw.Elapsed.TotalSeconds -gt $TimeoutSec) { throw "No window / OblvBench mod within $TimeoutSec s. Is UE4SS installed (tools\Install-UE4SS.ps1)?" }
+        # (not while the game's first-launch shader screen is up: GameWatch.InShaderScreenGrace, bounded)
+        if ($sw.Elapsed.TotalSeconds -gt $TimeoutSec -and -not [OblvBench.GameWatch]::InShaderScreenGrace) { throw "No window / OblvBench mod within $TimeoutSec s. Is UE4SS installed (tools\Install-UE4SS.ps1)?" }
         Start-Sleep -Milliseconds 500
     }
     $p

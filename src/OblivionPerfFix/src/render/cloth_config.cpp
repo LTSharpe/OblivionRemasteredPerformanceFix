@@ -25,6 +25,13 @@
 // input (that is what a skip relies on); if it ever does not, the fix switches itself off. Any
 // access fault while comparing also switches it off. Switched live from the ini.
 //
+// The comparison's time is almost all cache misses: every key and string value is its own small heap
+// block, and a plain compare waits for one miss after another. So before comparing, a warm-up pass
+// reads the same pointers level by level over all LODs of both sides (facades, then their arrays,
+// then the strings) and prefetches each level before reading the next, so the misses overlap. It only
+// prefetches; the decision is the unchanged comparison below, so what is skipped is exactly what was
+// skipped before. A fault in the warm-up is ignored (the comparison then runs as it always did).
+//
 // Layout, verified from the game's code at start-up (and the pointers again on every call):
 //   component: PropertyCollections TArray<TSharedPtr<FManagedArrayCollection>> (the call's second
 //              argument), CollectionPropertyFacades TArray<TUniquePtr<FCollectionPropertyFacade>>
@@ -35,6 +42,7 @@
 #include "common.h"
 
 #include <emmintrin.h>
+#include <intrin.h>
 
 #include <algorithm>
 #include <atomic>
@@ -133,6 +141,11 @@ std::atomic<uint64_t> g_calls{0};
 std::atomic<uint64_t> g_results[kNumResults] = {};
 std::atomic<uint64_t> g_checked{0}, g_checkFailed{0};
 std::atomic<int32_t> g_maxLods{0}, g_maxProperties{0};  // largest config seen after a copy (for the log)
+// Warm-up before the comparison: 1 on (the shipped behaviour); lab: 0 = compare without it, 2 = verify
+// (compare without, then warm up and compare again, count disagreements; the first result decides).
+std::atomic<int> g_warm{1};
+std::atomic<uint64_t> g_warmFaults{0}, g_verified{0}, g_verifyDiffs{0};
+std::atomic<uint64_t> g_decideTicks{0}, g_decideCount{0};  // lab: TSC ticks spent deciding (warm-up + comparison)
 
 uint32_t ReadU32(const uint8_t* p) { uint32_t v; memcpy(&v, p, sizeof v); return v; }
 
@@ -240,13 +253,92 @@ int CompareGuarded(const uint8_t* config, const UeArray* in)
     }
 }
 
+// ---- warm-up: prefetches what Compare will read; decides nothing ----
+
+inline void PrefetchBytes(const void* p, size_t bytes)
+{
+    const uintptr_t end = reinterpret_cast<uintptr_t>(p) + bytes;
+    for (uintptr_t a = reinterpret_cast<uintptr_t>(p) & ~uintptr_t{63}; a < end; a += 64)
+        _mm_prefetch(reinterpret_cast<const char*>(a), _MM_HINT_T0);
+}
+
+// Follows the same pointers as Compare, within the same bounds, but level by level over every LOD of
+// both sides, so each level's cache misses are in flight together instead of one after another.
+void Warm(const uint8_t* config, const UeArray* in)
+{
+    const auto* inFacades = reinterpret_cast<const UeArray*>(reinterpret_cast<const uint8_t*>(in) + g.facadesFromInput);
+    const auto* outFacades = reinterpret_cast<const UeArray*>(config + g.configProperties);
+    const int32_t lods = in->num;
+    if (lods <= 0 || lods > kMaxLods || inFacades->num != lods || outFacades->num != lods) return;  // Compare decides at once
+    const uint8_t* facades[2 * kMaxLods];
+    int32_t n = 0;
+    for (int32_t i = 0; i < lods; ++i) {  // 1: the facades (views at +0x08..+0x57, collection pointer at +0xA8)
+        const uint8_t* a = reinterpret_cast<uint8_t* const*>(inFacades->data)[i];
+        const uint8_t* b = reinterpret_cast<uint8_t* const*>(outFacades->data)[i];
+        if (!a || !b) break;
+        PrefetchBytes(a, kFacadeCollection + 8);
+        PrefetchBytes(b, kFacadeCollection + 8);
+        facades[n++] = a;
+        facades[n++] = b;
+    }
+    static constexpr size_t kViews[5] = {kViewKey, kViewLow, kViewHigh, kViewString, kViewFlags};
+    static constexpr size_t kElement[5] = {sizeof(UeString), 12, 12, sizeof(UeString), 1};
+    for (int32_t k = 0; k < n; ++k) {  // 2: the five arrays
+        const int32_t num = ViewAt(facades[k], kViewKey).num;
+        if (num <= 0 || num > kMaxProperties) continue;
+        for (int v = 0; v < 5; ++v) {
+            const UeView& view = ViewAt(facades[k], kViews[v]);
+            if (view.num == num && view.data) PrefetchBytes(view.data, static_cast<size_t>(num) * kElement[v]);
+        }
+    }
+    for (int32_t k = 0; k < n; ++k) {  // 3: the keys' and string values' characters
+        const int32_t num = ViewAt(facades[k], kViewKey).num;
+        if (num <= 0 || num > kMaxProperties) continue;
+        static constexpr size_t kStringViews[2] = {kViewKey, kViewString};
+        for (size_t v : kStringViews) {
+            const UeView& view = ViewAt(facades[k], v);
+            if (view.num != num || !view.data) continue;
+            const auto* s = reinterpret_cast<const UeString*>(view.data);
+            for (int32_t i = 0; i < num; ++i)
+                if (s[i].num > 0 && s[i].num <= kMaxStringLength && s[i].data)
+                    PrefetchBytes(s[i].data, static_cast<size_t>(s[i].num) * sizeof(wchar_t));
+        }
+    }
+}
+
+// A fault here only means no warm-up: the guarded comparison then decides as it always did.
+bool WarmGuarded(const uint8_t* config, const UeArray* in)
+{
+    __try {
+        Warm(config, in);
+        return true;
+    } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+        return false;
+    }
+}
+
+// The skip decision: warm-up (mode 1), then the comparison. Lab mode 2 also compares without the
+// warm-up first and counts any disagreement (the result without it decides).
+int Decide(const uint8_t* config, const UeArray* in, int warm)
+{
+    int verify = -1;
+    if (warm == 2) verify = CompareGuarded(config, in);
+    if (warm && !WarmGuarded(config, in)) g_warmFaults.fetch_add(1, std::memory_order_relaxed);
+    const int result = CompareGuarded(config, in);
+    if (verify < 0) return result;
+    g_verified.fetch_add(1, std::memory_order_relaxed);
+    if (verify != result) g_verifyDiffs.fetch_add(1, std::memory_order_relaxed);
+    return verify;
+}
+
 // Called instead of FClothingSimulationConfig::Initialize from the InitializeConfigs loop.
 void InitializeHook(void* config, const void* propertyCollections)
 {
     g_calls.fetch_add(1, std::memory_order_relaxed);
     int result = kDisabled;
     if (g_enabled.load(std::memory_order_relaxed) && !g_broken.load(std::memory_order_relaxed)) {
-        result = CompareGuarded(static_cast<const uint8_t*>(config), static_cast<const UeArray*>(propertyCollections));
+        result = Decide(static_cast<const uint8_t*>(config), static_cast<const UeArray*>(propertyCollections),
+                        g_warm.load(std::memory_order_relaxed));
         if (result == kEqual) {
             g_results[kEqual].fetch_add(1, std::memory_order_relaxed);
             return;
@@ -501,6 +593,22 @@ void LogClothConfigStats()
     lastCalls = calls;
     lastChecked = checked;
     lastCheckFailed = checkFailed;
+    static uint64_t lastWarmFaults = 0;
+    const uint64_t warmFaults = g_warmFaults.load();
+    if (warmFaults != lastWarmFaults)
+        Log("[cloth] %llu warm-up faults since last report (ignored: the comparison decided as before)", warmFaults - lastWarmFaults);
+    lastWarmFaults = warmFaults;
+}
+
+void SetClothConfigWarm(int mode)
+{
+    mode = mode < 0 ? 0 : mode > 2 ? 2 : mode;
+    if (g_warm.exchange(mode) != mode && g.installed) Log("[cloth] comparison warm-up mode %d", mode);
+}
+
+int ClothConfigTestDecide(void* config, const void* propertyCollections, int warm)
+{
+    return Decide(static_cast<const uint8_t*>(config), static_cast<const UeArray*>(propertyCollections), warm);
 }
 
 bool ClothConfigFixInfo(ClothConfigInfo* out)
@@ -530,6 +638,9 @@ ClothConfigStats GetClothConfigStats()
     s.faults = g_results[kFault].load();
     s.checked = g_checked.load();
     s.checkFailed = g_checkFailed.load();
+    s.warmFaults = g_warmFaults.load();
+    s.verified = g_verified.load();
+    s.verifyDiffs = g_verifyDiffs.load();
     return s;
 }
 

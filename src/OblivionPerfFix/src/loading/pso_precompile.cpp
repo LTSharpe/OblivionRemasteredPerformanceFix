@@ -330,6 +330,11 @@ void Look(ULONGLONG now)
         Event("[pso] +%.1f s: shader precompile finished (seen from +%.1f s; %.1f s at the Fast pace, %.1f s at the game's)",
               now / 1000.0, g_firstSeenMs.load() / 1000.0, g_fastMs.load() / 1000.0, g_gameModeMs.load() / 1000.0);
         ShaderScreenPrecompileFinished();  // ShaderScreenAfterDriverChange: no-op unless it took the first-launch path
+    } else if (!running && g_menuSeen) {
+        // ShaderScreenAfterDriverChange (no-op unless a record is pending): the main menu with no precompile running also
+        // means it is done (a precompile that ended before this thread's first look is never seen finishing; without this
+        // the screen would come back at every start-up)
+        ShaderScreenPrecompileFinished();
     }
     g_running = running;
     g_lastCheck = now;

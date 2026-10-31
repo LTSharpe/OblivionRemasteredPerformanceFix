@@ -1,4 +1,4 @@
-// HdrGamma22 (TRADE-OFF, on by default; nothing changes in SDR): the HDR picture's shadows as an SDR monitor
+// HdrGamma22 (TRADE-OFF, off by default; nothing changes in SDR): the HDR picture's shadows as an SDR monitor
 // shows the game (gamma 2.2) instead of the lifted shadows of the game's HDR curve.
 //
 // Measured (docs/research.md, HdrGamma22): the game's HDR output reproduces its SDR picture decoded with the sRGB curve;
@@ -18,7 +18,7 @@
 // game's own writes) and puts the game's values back when switched off. The game's exposure shift is solved before our
 // change and stays the game's.
 //
-// What changes: the HDR picture's darks and mid-tones (below W), on purpose: a trade-off (CLAUDE.md), default 0.
+// What changes: the HDR picture's darks and mid-tones (below W), on purpose: a trade-off, default 0.
 // Highlights, the peak, the black floor and the UI's own levels stay the game's. Frame generation sees the corrected
 // scene (the correction is in the tone curve, before the UI and before DLSS / FSR frame generation). Live (ini).
 #include "common.h"

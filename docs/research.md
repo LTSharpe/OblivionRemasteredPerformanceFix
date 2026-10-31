@@ -380,23 +380,48 @@ loading itself is unchanged (arrival 2.7-3.1 s after the door is used, both).
   Lumen's hardware ray tracing off (profile `cpu-nort`) the game still builds these structures; the switch batches them
   (1,841 builds in the first minute, 13 batches, longest call 5.4 ms) without errors.
 
+<a id="separableskinabove4k"></a>
+
+### Magenta skin specks on wide renders (`SeparableSkinAbove4K`, game bug)
+
+[Explanation](how-it-works.md#separableskinabove4k). It changes how skin is shaded on renders wider than 3840; on by
+default since 1.2.4 (a game bug fix, user decision 2026-10-31).
+
+- **The bug:** the contributor's clips of play (DLSS DLAA on a 5120-wide ultrawide): glowing magenta points with a bloom halo
+  on a skirt's studs and a hand, in short bursts while the character moves in sneak, in sunlight; none in 20 DLSS
+  Quality frames. Steam reports from April 2025 (the game's own DLSS 3.7) describe the same with DLAA, gone in Quality,
+  "with a lower resolution" or "Effects below Ultra" (unmeasured claims).
+- **Bisect** (in play at the spot, one change per restart, Engine.ini [SystemSettings]; checked in probe games
+  that these lines beat the Effects group): Effects High, clean. Effects Ultra vs High differ
+  in 16 variables. r.MaterialQualityLevel 1, purple. r.SSS.Quality -1 + r.SSS.HalfRes 1 + r.SSS.SampleSet 1, clean
+  (flicker); without HalfRes, purple. r.SSS.Checkerboard.NeighborSSSValidation 1, purple; r.SSS.Checkerboard 1,
+  purple. FSR Native AA instead of DLAA, purple (not DLSS). The stock game (no DLL), purple.
+  r.SSS.Burley.Quality 0, **clean**. r.SSS.Burley.MinGenerateMipsTileCount 1000000, purple. NumSamplesOverride 64 +
+  BilateralFilterKernelFunctionType 0 + EnableProfileIdCache 0 + r.SSS.Filter 0, purple. So Burley's own full-resolution
+  sampling makes the specks; only half resolution or the separable method avoid them.
+- **A GPU capture** (PIX) was tried to find the pass; the three frames caught
+  had no specks (the weather had turned overcast), and a shader-level fix is out of reach anyway.
+- **Cost and picture:** measured by the contributor (pull request #35); we have no display that wide.
+- **100 % or width?** Every render with specks was 5120 wide (the contributor's ultrawide, and 5120x1440 in the Steam report); the
+  clean ones 3413 (DLSS Quality) and 2560 (half-resolution skin scattering). That fits "100 %" and a width limit alike;
+  not measured. A first build switched at r.ScreenPercentage 100; the width rule (wider than 3840) replaced it.
+  Then a play session at 4K 16:9 with DLAA (3840x2160, a 100 % render): no specks (one session, by eye). So it is not
+  "100 %"; something in the render's size. 3840x2160 has more pixels (8.3 MP) than the 5120x1440 of the Steam report
+  (7.4 MP, specks), so the width rather than the pixel count fits, if that report is right; the cause inside Burley was
+  not found (the PIX frames missed the specks). A 5120x1440 window on this PC would separate width from pixel count.
+- **The option:** r.SSS.Burley.Quality set to 0 while the render width (the game window's client width x
+  r.ScreenPercentage / 100) is over 3840, the replaced value back at or below it; read and written through the game's
+  console manager (both copies of the int), once per second; the window found as the process's visible UnrealWindow.
+  The 100 % build followed DLSS DLAA / Quality / Balanced / DLAA (0 / 1 / 1 / 0) in a probe game. Self-test: the switch
+  logic against a fake variable, percentage and window width (8 checks).
 <a id="hdrgamma22"></a>
 
 ### HDR shadows re-decoded as gamma 2.2 (`HdrGamma22`, trade-off, on)
 
-[Explanation](how-it-works.md#hdrgamma22). On by default, HDR only: it changes the HDR picture on purpose.
+[Explanation](how-it-works.md#hdrgamma22). Off by default (an optional tweak), HDR only: it changes the HDR picture on purpose.
 
-- **The cause, measured** (Windows Graphics Capture of the game window in FP16 scRGB; fixed camera
-  in an interior, HUD off; pixels binned by their SDR brightness; RTX 5090, AW3926QW, SDR white 204 nits):
-  - At Mid-Tone 20, the HDR / SDR ratio against SDR as Windows decodes it (sRGB) is flat, x0.93-0.97 from 0.2 % to
-    40 % of SDR white.
-  - Against the same SDR frame re-decoded with gamma 2.2 (an SDR monitor), the ratio is x2.61, x1.68, x1.31 and
-    x1.13 in the darks, then x0.92-1.05 in the mid-tones.
-  - Not changed by: Mid-Tone (it scales every band); Black Floor -2..-4; OutputDevice 3 vs 4; the camera's FilmToe /
-    BlackClip / Slope; r.HDR.Aces.SceneColorMultiplier (exposure only).
-  - A colour-grading LUT changes SDR (identity LUT: p50 2.99 -> 0.24 nits) but not HDR. Positive control: the same
-    camera override with +1 EV doubles the frame.
-  - Saturation is not the cause: 0.66-0.68 HDR vs 0.64 SDR.
+- **The cause and the result, measured** by the contributor (window captures in FP16 scRGB, HDR vs SDR, before and
+  after): pull request #36. We cannot switch HDR on in our hidden benchmark game, so we have not measured it.
 - **Where the curve is.** An ACES-style tone scale:
   - Built at exe+0x26C03D0 on any HDR setting change, detected per frame at exe+0x37E52F0.
   - Kept in a 20-float block at exe+0x8DD9340: min point; mid point (4.8 nits, slope 1.55); max point;
@@ -412,15 +437,6 @@ loading itself is unchanged (arrival 2.7-3.1 s after the door is used, both).
   - Worst error from 0.1 % of W up: 5.8 % at Mid-Tone 15, 5.3 % at 20, 5.7 % at 10 with black floor -2. Under
     2.5 % from 0.5 % of W.
   - Monotonic. 68 ms per fit, on the monitor thread.
-- **Live result** (probe game, 2026-10-27 18:00):
-  - On within ~2 s of the ini switch; off puts the game's block back byte for byte.
-  - A Mid-Tone change refits (15 -> 20 logged).
-  - Against SDR re-decoded with 2.2: x0.62-0.72 flat from 0.2 % to 40 % of SDR white (stock x1.83 -> x0.68).
-    The offline preview gives x0.62-0.71; highlights x1.71 vs x1.69 stock. Mid-Tone 20 gives
-    x0.88-0.97.
-  - HUD pixels identical, on / off ratio 1.000 over 1984 pixels.
-  - DLSS frame generation on (Altar.DLSS.FG.Enabled 1, r.Streamline.DLSSG.Enable 1 read back): six captures in a
-    row, all corrected (p50 1.51-1.57 vs 2.06 stock). That generated frames were among them is likely, not proven.
 - **Cost:** an 80-byte compare per frame on the game thread; the fit only after a settings change. Not benchmarked.
 - **Trade-off:** it changes the picture by design. On by default, since the stock HDR shadows sit 1.7-2.7x above SDR on
   a monitor; `HdrGamma22=0` gives the game's curve. SDR is never touched.
@@ -736,6 +752,27 @@ Memory: the game's private bytes and working set rose by about the cap (0-60 MB)
 [Explanation](how-it-works.md#busywaitflagcheck).
 
 **Measured:** Imperial City flight, small profile: tiles built inside a wait 6 in 10 flights without the fix (frame stalls of 82 ms to 2.6 s), 0 in 7 with it (largest tick-group-0 wait 29 ms); 4K FG test completed without a crash.
+
+<a id="vtstreaminguploads"></a>
+
+### Streamed virtual texture pages per frame (`VtStreamingUploads`, trade-off, off)
+
+[Explanation](how-it-works.md#vtstreaminguploads). Off by default: detail arrives sooner, so the picture differs
+during the first seconds after a door.
+
+- **Found:** after the Imperial City Waterfront lighthouse exit (the contributor's save at the lighthouse door) the stair
+  walls ~40 m away come in blotchy without mortar lines; their 1-px detail at full resolution rises 0.052 -> 0.060 from
+  ~5 to ~10 s after the fade-in starts, contrast 0.46 -> 0.39 (patchy tint evening out), 4-px detail flat. Not Lumen
+  (reflections or diffuse indirect off: the same). The console variable `r.VT.MaxUploadsPerFrame.Streaming` set to 64
+  from the console: final look as the fade completes (~2.4 s), 1-px detail 0.060 by ~4.5 s (2 + 2 runs, with and
+  without `r.VT.MaxUploadsPerFrame` 64, vs 2 default runs).
+- **Why no ini works:** the variable is registered in code with default 0 and flags render-thread-safe | scalability
+  (registration exe+0xA69B5B); the game's scalability settings set 4 after the ini layers. Engine.ini [SystemSettings],
+  [ConsoleVariables] and a user DeviceProfiles.ini all left it at 4.
+- **The change:** the registration found by name and shape (as `GpuSceneParallelUpload`); both copies of the value
+  written from the monitor once a second whenever the value is not N; N wins while the key is on; 0 puts back the
+  game's value if it is still N. In play the game writes its 4 once, ~5 s after start-up; the fix writes N again.
+- **Measured** by the contributor (a door and flights, 0 vs 64): pull request #34; not measured by us (optional key).
 
 <a id="navlinkfast"></a>
 
@@ -1106,6 +1143,68 @@ more 149 -> 134 (within the run-to-run noise: one block showed the gain, the oth
   no numbers are quoted here. Self-test: every site, the install, and lite builds and completions against fakes (key
   switched off mid-call, 12 LODs, spoiled constraints, unregistration).
 
+<a id="clothbuilddefer"></a>
+
+### A far-away robe's cloth built a few frames later (`ClothBuildDefer`)
+
+[Explanation](how-it-works.md#clothbuilddefer).
+
+- **Found (2026-10-19/20, stack samples and a build log at Peryite's Shrine, `npcburst`):** most of a robed NPC's creation
+  unit is `UChaosClothComponent::RecreateClothSimulationProxy` (exe+0x53CD090) building a whole `FClothSimulationProxy`,
+  a few ms per robe; per robe an `OnRegister` build, a script rebuild ~5 ms later and another 40-90 ms later after the
+  proxy ran 1-3 ticks, each inside the NPC's creation unit. Every rebuild starts from nothing, so only the last build's
+  proxy survives.
+- **The change:** `RecreateClothSimulationProxy`'s entry is detoured. A request on the game thread inside a
+  `NpcCreationPacing` unit whose actor may wait (far, not rendered recently, a frame that defers; the unit's owner is
+  passed from `TimeUnit`), for a registered component with no proxy yet, is held. A robe is built in an equipment unit,
+  whose owner is the character's `VCharacterBodyPairingComponent`: its word at the actor's root-component offset holds
+  data, not a pointer, so pacing's owner walk faults there and runs the unit as near. This question walks on past such
+  an object to the character (`ActorLocationGuarded`; pacing's own walk is unchanged): without it almost no robe build
+  is held. Later requests from such units merge into it; a request from anywhere else builds at
+  once (dropping the held one). Held builds run at pacing's frame start with the game's function and the component's
+  state then: when quiet for `ClothDeferQuietFrames` frames (6) or 30
+  frames after the first request, inside the frame's pacing budget (which grows with the wait as pacing's does), and
+  counted as a unit; at once when the actor is near or rendered, the frame does not defer, or 60 frames after the first
+  request. `execIsSimulationSuspended`'s call and `execIsSimulationEnabled` (both answer from the proxy) build a held
+  build first, so Blueprint logic sees the stock answer. `OnUnregister`'s vtable slot (exe+0x803EF20; in front of
+  ClothRegisterLite's hook there, found through `ClothRegisterUnregisterSlot`) drops a held build. A held build runs only
+  if the component is still the same registered object (vtable, object index) with no proxy.
+- **Why the result is the same:** the same component state is built by the game's own function, a few frames later and
+  only off-screen. Until then the component has no proxy: `TickComponent` skips the proxy tick (null check), the render
+  data falls back to plain skinning, `OnUnregister` resets nothing. With ClothRegisterLite a held build leaves no proxy,
+  so its completion at the `EquipBodyPart` call's end has nothing to complete, and the later build is a full one.
+- **Bounds (added by OblivionPerfFix on merging, 2026-10-30):** the registration's render state creation gives the
+  renderer the component's local bounds (`FScene::AddPrimitive` -> `GetLocalBounds()` = `CalcBounds(Identity)`,
+  exe+0x53C7500), which computes them from the proxy (`FClothSimulationProxy::CalculateBounds_AnyThread`: the solver's
+  particle bounds; right after a build no simulation task exists) and caches them (`a.CacheLocalSpaceBounds`: local
+  +0x800 bit 7, world +0x801 bit 0, the box at +0x840). In stock that is the first build's proxy. With that build held
+  there is no proxy: the cache holds an empty box, the renderer (GPUScene instance bounds, virtual shadow map culling)
+  got it, and `RecreateClothSimulationProxy` invalidates nothing (measured, pr31fix: every held build found the cache
+  flags still set, so the cached box stayed empty after the build; without the refresh it stayed empty until a later
+  game refresh, ~11 s in 4 of 5 tracked builds). So right after a held build is made (at pacing's frame start, before a Blueprint
+  read, or asked for from elsewhere) the fix does what the registration did after its build: clears the two flags
+  (`InvalidateCachedBounds`), calls the game's `CalcBounds` with the identity transform (`GetLocalBounds`: caches the new
+  proxy's box) and then `MarkRenderTransformDirty` (exe+0x2FE7B70): at the frame's end `SendRenderTransform` runs
+  `UpdateBounds` and hands the renderer `GetLocalBounds()` (`FScene::UpdatePrimitiveTransform`), the values
+  `AddPrimitive` took in stock. Same function, same kind of proxy (the start pose of the build, a few frames later than
+  stock's); only for the cloth component class whose vtable and `CalcBounds` were checked. Found in our review of
+  PR #31; mkusm's notes in its discussion match our reading of the exe and the UE 5.3 source.
+- **Checked before writing:** `RecreateClothSimulationProxy`'s prologue and its proxy field, `OnUnregister`'s single
+  vtable slot (or ClothRegisterLite's hook in it), both Blueprint readers' code; anything else: not installed, one log
+  line (the self-test changes one byte of the entry and checks that nothing is written). Installed at start-up on the
+  version.dll route, after ClothRegisterLite; on the OBSE64 route it stays off with one log line. Then live.
+- **Image check** (`npcburst-visual`: the shrine flight, then two frozen views of the five worshippers, near and from
+  above; `tools\Compare-Benchmark.ps1`, visual pass, off and on in fresh games): every robe present, draped and of
+  normal length; the worshippers stand and pose differently, as between any two runs, and the foreground grass moves in
+  the wind.
+- **Measured (2026-10-29/30, our test PC: Ryzen 7 5800X, RX 9070 XT; 4K, FSR Performance, frame generation, capped at
+  60; `npcburst-visual` / `npcburst-shadow`, a fresh game per run, on/off/off/on):** every on run held the same 5 robe
+  builds with 15 merged requests, all built when quiet (29-31 ms of builds, at most 6.8-8.7 ms in one frame). Where the
+  five worshippers are created, the NPC creation units of those ~18 frames: off 183 / 194 / 181 / 181 ms, on 114 / 119 /
+  110 / 110 ms; frames over 25 ms there off 3 / 4 / 1 / 2, on 0 / 1 / 0 / 1. With the bounds refresh every held build
+  left a non-empty cached box (5 of 5 per run, each empty before the refresh). Shadow check at hour 16 (the robes in
+  sunlight, from above and at an angle): every robe and its shadow present, on vs off within the off/off floor.
+
 <a id="rigvmhashmemo"></a>
 
 ### Animation rig set-up remembered (`RigVmHashMemo`, `RigLogicMapCache`)
@@ -1220,6 +1319,129 @@ old engine's ordinary frame work. `CellBufferPacedEvict=1` is on by default.
   | 4K + frame generation, door exits | 123-136 ms | 18-26 ms, no slow frame left in the fade-in |
   | Fast travel, 720p / 4K | 86-147 / 77-129 ms | 36-59 / 19-36 ms |
 
+<a id="streambehindloadingscreen"></a>
+
+### Textures streamed behind the loading screen (`StreamBehindLoadingScreen`)
+
+[Explanation](how-it-works.md#streambehindloadingscreen). Found and measured by the contributor (pull request #34); the exe addresses below were re-checked in our review.
+
+- **Found:** with `PrepareCollisionBehindLoadingScreen` on, the picture after a door still comes back late. A WPR trace
+  (the contributor's) showed the fade-to-game frame (the game thread mostly in short timed waits) inside the
+  game's fade handler (`exe+0x488CA80`), which sets `r.Streaming.PoolSize` back and calls the streaming manager's
+  stream-all-resources (`exe+0x30D6CB0`): the block loop (`exe+0x30ACCF0` -> `exe+0x37709C0`) waits until the new
+  view's textures are created (`RHIAsyncCreateTexture2D`, `exe+0x254A8D0`), with under 3 of 16 cores busy.
+
+- **Cause:** the transition's loading-start handler (`exe+0x488C4C0`) stores the pool size in a TOptional
+  (transition+0x234 / +0x238) and sets the pool to 1 MB, dropping every streamed mip for the loading screen. When the
+  heavy loading is over, `exe+0x4882730` arms the fade gate, a 0.5 s looping timer (`exe+0x4878670`): world partition
+  streaming completed (`exe+0x38B7BF0`), no pending travel (`exe+0x3864220`), no async loading (global query at
+  `exe+0x8DAA2E8`), then fade-to-game on the next tick. Everything the fade-in waits for could have streamed while the
+  loading screen idled.
+
+- **The change:** a detour of the gate-arming function remembers the transition; per frame (NpcCreationPacing's frame
+  hook), once the gate is armed and async loading is idle and no travel is pending, the fix sets the stored pool size
+  back through the same console variable call as the fade handler (cached by the game at `exe+0x9306EA8`, set by code)
+  and runs the streaming manager's non-blocking update (vtable +0x10, `exe+0x30D9650`, the update stream-all runs first)
+  once per frame until fade-to-game clears the gate. A diagnostic, `DoorDiag` (off, not in the shipped ini), times
+  every stream-all, the loading-screen timeline and render-target pool misses.
+
+- **Tried first:** starting when the gate's own three checks pass (evaluated per frame) gave no lead time: during the
+  freeze they only turn true at the gate's tick, whose first call advances level streaming. Starting right at arming
+  removed the wait too, but in 2 of 5 native runs the first exit's loading screen took one more gate tick (+0.45 s):
+  its streaming competed with the level's last loads. Waiting for async loading to be idle does not (2 of 10 runs
+  with one more tick, the fix off 2 of 15: the gate's own phase).
+
+- **Measured** by the contributor (the Cheydinhal inn door, a city gate and fast travel, at two resolutions, 5 + 5 and
+  3 + 3 fresh launches): pull request #34.
+- **Ours** (2026-10-31, the 1.2.4 candidate, our PC, small profile (854x480), Cheydinhal inn door, switched live A B
+  B A A B: the fade-in's texture wait 0.3-1.9 ms with it against 99-710 ms without; the loading screen a little
+  shorter at every transition (arriving outside 6325 -> 5977 ms, entering the inn 89 ms shorter, leaving it 4402 ->
+  3949 ms); hitch time after the exit -29 %; the end pictures within the run-to-run difference of two runs without it;
+  2.1-2.7 ms more main-thread work per loading-screen frame, behind the loading screen (DoorDiag on). The main-thread
+  cost per loading frame at an
+  exterior arrival is above the ~1.2 ms we aimed for; harmless there (the loading screen still ends sooner), worth one
+  look at 4K.
+
+<a id="unfreezebehindloadingscreen"></a>
+
+### Exits settle behind the loading screen (`UnfreezeBehindLoadingScreen`, trade-off, off)
+
+[Explanation](how-it-works.md#unfreezebehindloadingscreen). A trade-off (the world runs ~1 s unseen, the loading
+screen is ~1 s longer), off by default.
+
+- **Found:** on indoor -> outdoor exits the player is seen dropping into place (T-pose at first) and the scene settles
+  during the fade-in, in every state tested (fix on, `StreamBehindLoadingScreen` off, every switch at 0): the game's
+  own behaviour. DoorDiag shows why: on entries the transition's freeze ends 0.7-1.7 s before the fade-in; on exits it
+  lasts until the game's unfreeze timer, armed by fade-to-game (`exe+0x4877E80`) with the delay
+  `VAltarUserInterfaceSettings.FadeInDurationUntilUnfreeze` (default 0.5 s; 0 breaks transitions, the timer is never
+  set). The new level's loaded handler (`exe+0x48354B0`) calls the transition's SetLoadingFreeze(off)
+  (`exe+0x4887110`: the freeze subsystem back to mode 0, flags +0x200 / +0x1F1 cleared; the same two calls as the
+  unfreeze timer body `exe+0x4881640`), which is what unfreezes interiors behind the loading screen.
+- **World hidden behind the loading screen:** the game viewport's `bDisableWorldRendering` (bit 1 of viewport+0x6C;
+  UWorld::GetGameViewport `exe+0x385EE90`, written by UGameplayStatics::SetEnableWorldRendering `exe+0x31D8600`) is set
+  early in the loading screen and cleared ~30-40 ms after fade-to-game.
+- **The change:** once `StreamBehindLoadingScreen` sees the area loaded and the transition still frozen, the bit is
+  cleared (the world drawn under the opaque loading screen) and SetLoadingFreeze(off) is called on the game thread.
+  The fade gate's tick (its delegate's Execute / ExecuteIfSafe .rdata slots, vtable `exe+0x7D7BD78` + 11 / 12 * 8) is
+  skipped until the world has run N ms, counted only over frames on which the freeze subsystem is out of its loading
+  mode, each at most 50 ms; hold cap 3 s.
+- **First version wrong:** counting wall time from the call never held the gate: the old engine stalls the game thread
+  ~1.2 s right after the call and the freeze subsystem leaves its loading mode 1.6-2.1 s after it, so the freeze ended
+  only ~0.27 s before the fade-in.
+- **Result:** measured by the contributor (pull request #34); not measured by us (optional key).
+- **Not measured:** an image A/B (the spectator camera hides the player; the change is deliberately visible), save
+  and load round trips during the hold, combat during the hold.
+- **Fast-travel hold (`UnfreezeBehindLoadingScreenFastTravel`).** A longer hold for fast travel only.
+  - Why fast travel: the grass completes ~2.5-3 s after the world starts running, whatever the hold (a 1500 ms hold
+    filled it ~1 s earlier than 500 ms).
+  - How a fast travel is recognised (probe games, UE4SS hooks and per-frame reads):
+    - `VLevelChangeData.bIsFastTravelling` (+0xB8) stays false through a map fast travel.
+    - `bIsSeamlessTravelling` (+0xB9) is set in the first ~3 s of fast travels, teleports and door entries alike.
+    - `OnFadeToBlackOverBeforeFastTravel` is never called (the binder exe+0x4898750 picks it only under conditions
+      a map fast travel does not meet).
+    - `VMapMenuViewModel.DelayFastTravelRequestUntilFadeEnd(true)` is called once per map fast travel, before the
+      gate arms.
+  - The hook: the fix redirects that function's exec thunk's call (exe+0x468ACF0 +0x6E -> exe+0x4918830) through a
+    stub that notes the time when the argument is true. The next transition armed within 60 s holds
+    UnfreezeBehindLoadingScreenFastTravel ms. The thunk is found by its registered name in the native function table.
+  - Runs (3 teleports + 3 map fast travels; an inn door in and out; 500 / 1000):
+    - every fast travel "fast travel, hold 1000 ms", world ran 1132-1501 ms, unfrozen 3.2-3.8 s before the fade-in;
+    - every teleport and door "door or gate, hold 500 ms", world ran 622-837 ms, 2.6-2.7 s.
+  - Not measured: the grass at the fade-in with 1000.
+  - Bench caveat: a bench map click started indoors, where no "travel to" box was shown, crashed the probe game
+    (old-engine null read at exe+0xEA20E0). This is the bench driving the map, not the fix (a build without the hook).
+- **Save loads get the fast-travel hold.** Loads wait like fast travel; doors and gates keep the shorter value.
+  - Not usable (four rounds in play):
+    - Who arms the fade gate (hook return address, stack walk). Main-menu loads came from the timer manager's tick
+      (return exe+0x37FAFB2), from exe+0xDC0EA5, and through Altar's wrapper from the doors' path (return
+      exe+0x4709190). Pause-menu loads came through the doors' path too.
+    - A menu just before the arming (a named freeze within 2 s): it was seen before doors as well, so every door got
+      the long hold.
+  - Used: the engine save system's `LoadGame`. The settings save's writer gets the save system through
+    IPlatformFeaturesModule::Get and +0x40, then calls SaveGame at +0x28. LoadGame is at +0x38 (vtable exe+0x7770828,
+    exe+0x35876B0). A diagnostic hook logged one LoadGame of the save's slot per load and none for doors or the Load
+    list. The main-menu read came 8 s before the arming; the pause-menu read came between that load's two armings. So
+    the rule is "a non-settings slot read since the previous transition ended", checked when the hold is needed.
+  - In play with the fix (500 / 1000): a main-menu load held 1000 ms, a door 500 ms, a pause-menu Load 1000 ms.
+
+<a id="fadevtflushskip"></a>
+
+### The fade-in's virtual texture flush (`FadeVtFlushSkip`, trade-off, off)
+
+[Explanation](how-it-works.md#fadevtflushskip). Off by default: the picture during the fade differs.
+
+- **Found:** fade-to-game (`exe+0x4877E80`) arms, besides the unfreeze timer, a second timer when the transition asks
+  for it (transition +0xBB): delay `VAltarUserInterfaceSettings.FadeInDuration` (+0x188, 2.5 s) x 0.6 (constant
+  `exe+0x6EC6E80`) = 1.5 s. Its delegate (vtable `exe+0x7D7BCA8`; Execute / ExecuteIfSafe thunks `exe+0x4881630` /
+  `exe+0x48817D0`) calls `exe+0x48774E0`, which looks up and executes the console command `r.VT.Flush`. It runs on every
+  transition type (11 in a run of one inn door in and out, a city gate in and out twice and four fast travels).
+- **Effect in the picture, measured** by the contributor (full-resolution captures through the fade-in at the
+  Imperial City Waterfront lighthouse exit): pull request #34; not measured by us (optional key).
+- **The change:** the delegate's two .rdata slots (`exe+0x7D7BD00` / `+0x7D7BD08`) point to stubs that skip the call
+  while the key is on and pass through to the game's thunks otherwise. Found by the flush function's prologue and its
+  `r.VT.Flush` name (the only one in .rdata), the thunks by pattern and target, the slots by value (one each, adjacent).
+- **Not covered:** a deliberate weather change between departure and arrival, long sessions, why the game flushes.
+
 <a id="psoprecompilefast"></a>
 
 ### Start-up shaders built faster in menus (`PsoPrecompileFast`)
@@ -1240,6 +1462,22 @@ during the first load (3,400 pipelines in 27 s, against ~45 in the 15 s at the g
 the game's pace came back in play, and the precompile ended after ~6 minutes, about as long as a cold start took
 without the fix. Start-up videos before the main menu count as play for the fix (no menu freeze yet), so
 those seconds keep the game's pace.
+
+**Start-up crash in the driver-thread check** (2026-10-29). Two start-up crashes
+(on the contributor's PC, pull request #33) on
+the monitor thread: access violation calling address 0. The 2026-10-29 dump: the crashing frame returns into
+chrome_elf.dll+0x14D7 (CEF 90.6, the game's own Engine\Binaries\ThirdParty\CEF3), which had called a function pointer
+it keeps at +0x11E000; below it chrome_elf+0x1902 (a 10-argument hook, NtMapViewOfSection's shape), kernel32, and our
+call to Thread32Next. Toolhelp's Thread32First/Next map the snapshot with NtMapViewOfSection on every call, one call per
+thread on the PC (thousands per search), and they do it outside the loader lock. Chromium's chrome_elf hooks
+NtMapViewOfSection while it loads, under the loader lock, which normal DLL loads respect; a call between the hook going
+in and the original's address being stored jumps to 0. Reading: our search is the one caller that can land in that
+window, thousands of times per second while it runs. (The window itself is from how chrome_elf installs its hook; the
+pointer's value could not be read, the dump does not hold that page.) The fix lists this process's threads with one
+NtQuerySystemInformation(SystemProcessInformation) call, which copies into our buffer and maps nothing; the game
+thread at install (the first-created thread) comes from the same list. Self-test: the list against a snapshot in the
+test process (same count, same first thread). Not reproducible on demand, so the check is the absence of the crash over
+time.
 
 ## Menus
 
@@ -1272,6 +1510,34 @@ those seconds keep the game's pace.
   - The engine's display data after the page's rebuilds, read from memory with the fix off and on, is identical
     (monitor, native resolution, all 24 resolutions, work area, DPI).
 
+<a id="monitornativefromwindows"></a>
+
+### Display resolutions for wide monitors (`MonitorNativeFromWindows`, `FullscreenAllResolutions`, game bug)
+
+[Explanation](how-it-works.md#monitornativefromwindows).
+
+- **Symptom** (the contributor's AW3926QW, 5120x2160 at 165 Hz): fullscreen lists only 3440x1440. Windows offers 30 resolutions,
+  and the engine's own `GetSupportedFullscreenResolutions` returns 25, including the native mode and the DLDSR 6826x2880 /
+  7680x3240 (live call).
+- **Cause:**
+  - the page's list (exe+0x48EFAC0) comes from exe+0x31AB020, which:
+    - for borderless returns the monitor's native resolution only;
+    - for fullscreen keeps the monitor's modes whose aspect ratio equals native within 1e-8 and that are no wider
+      than native;
+  - native is FMonitorInfo +0x20/+0x24, set by GetMonitorsInfo (exe+0x1172DB0) from the EDID's first detailed timing;
+  - the monitor's registry EDID (three instances) has 3440x1440 there (pixel clock 231 MHz), with CTA and DisplayID
+    extension blocks after it.
+- **Borderless draws at the desktop's size anyway:** the window client in the contributor's probe game had the desktop's size while the page said
+  3440x1440.
+- **The fixes:**
+  - GetMonitorsInfo's one call (exe+0x11840B5) goes to a stub that then sets each monitor's native size to Windows'
+    preferred mode (QueryDisplayConfig + DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_PREFERRED_MODE, matched by desktop
+    position), when that mode is in the monitor's own list;
+  - the fullscreen filter's jnz (exe+0x31AB49E) becomes a jmp to the same end.
+- **Live** (the contributor's AW3926QW): the log names the EDID's 3440x1440 and Windows' preferred mode as the native
+  resolution, and the borderless entry reads the preferred mode.
+- **Not checked:** the fullscreen list on screen, and HDR in exclusive fullscreen (switching a probe game to exclusive
+  fullscreen would take over the display).
 <a id="hdrmenurows"></a>
 
 ### HDR rows in the Graphics menu (`HdrMenuRows`, off)
@@ -1379,7 +1645,7 @@ those seconds keep the game's pace.
   (CommonUI's primary game layout). Its root overlay holds ten VActivatableWidgetStack layers: GameStack (active:
   WBP_ModernHud_PrimaryLayout_C, the HUD), GameMenuStack, MenuStack, ModalStack, FadeWidgetStack, LoadingScreenStack
   and others. Menus live in the other stacks.
-- **The method:** left and right padding on GameStack's OverlaySlot. Live in Lua, 16:9 / 21:9 / 4:3 on 5120x2160
+- **The method:** left and right padding on GameStack's OverlaySlot. Live in Lua, 16:9 / 21:9 / 4:3 on the contributor's ultrawide
   (Slate 2560x1080 at scale 2: padding 320 / 20 / 560) moved the bottom-right HUD icons in, with the compass centred and
   menus untouched.
 - **Prior art:** none found that works at run time; Better HUD (Nexus, Caites) offers 16:9, 16:10 and 21:9 HUD layouts
@@ -1389,7 +1655,7 @@ those seconds keep the game's pace.
   (1, 16), UWidgetLayoutLibrary.GetViewportSize (2, 24, return at 8: FVector2D of doubles), .GetViewportScale (2,
   12/16, return at 8), UUserWidget.GetOwningPlayer (1, 8). The world context must be the owning player: with the
   layout widget or the stack, the library returned its 1x1 / scale 1 fallback (in Lua too, this session's world
-  L_ICMarketDistrict), with the player controller 5120x2160 at 2.0.
+  L_ICMarketDistrict), with the player controller's viewport at the full window size and scale 2.0.
 - **The row:** OPF.HudAspect is an int console variable registered with the console manager's slot +0x18 (checked at
   the game's own registration of r.VT.MaxUploadsPerFrame.Streaming). The row is
   a copy of Show FPS, with five steps from its first step (ModernSettingSingleCommand: Label text +0, Command at +24).
@@ -1425,16 +1691,7 @@ those seconds keep the game's pace.
 - **Result** (probe game, rows read through the widgets): DLSS selected: Ray Reconstruction enabled,
   the FSR rows greyed; FSR selected (the Upscaling row stepped with its own arrows): Ray Reconstruction greyed with the
   DLSS rows, the FSR rows enabled; back to DLSS: as at first. The row's steps set r.NGX.DLSS.DenoiserMode 1 and 0.
-- **Cost and UE's denoisers** (2026-10-29, probe game: 5120x2160, DLSS Ultra Performance, Lumen
-  hardware RT and HW reflections on; fixed camera, weather held; settings switched live, order A B C D D C B A, 12 s
-  each; PresentMon MsGPUBusy medians; GPU-bound throughout): A stock 8.41 / 8.14 ms; B Ray Reconstruction 8.76 / 8.61
-  (+0.42 ms, +5 %, about 119 -> 114 fps); C Ray Reconstruction with r.Lumen.Reflections.BilateralFilter,
-  .ScreenSpaceReconstruction, .Temporal and r.Shadow.Denoiser at 0 (what RR mods add) 8.66 / 8.52 (+0.32 ms); D those
-  four at 0 without RR 8.32 / 8.23 (no change). Pictures (mean absolute difference per screen cell, 0-255; the lower
-  half had moving NPCs): in the static upper half the same-setting pairs differ by 1.1-4.9, A vs B by 2.4-4.0 (RR
-  changes the picture a little); A vs D and B vs C stay at the control level. So in this view the four extra settings
-  change nothing visible, with or without RR, and the row sets only r.NGX.DLSS.DenoiserMode. One view only, and an odd
-  one (the fixed camera looked at a reflected forest edge rather than the market).
+- **Cost:** measured by the contributor on an NVIDIA card (pull request #36); we have none to measure it.
 - **In play** (2026-10-29): a recording with the row switched On and Off shows the change in the same view
   (deeper, more detailed indirect shadows on a shaded rock; slightly sharper water reflections). Applied On, then a
   restart: Save_Settings.sav held "r.NGX.DLSS.DenoiserMode" "1", the log showed the saved option put back and the row
@@ -1546,6 +1803,25 @@ ledger, keys switched live in A-B-B-A order.
   cache listener first, then the save callbacks (the save callback's event lets the save continue, which reads the
   cache). Taken over only when every listener is the save's callback or the cache; others (pause-menu save, rest/wait)
   run the game's way.
+- **HDR route (2026-10-30).**
+  - Found (the contributor's WPR CPU trace of a play session in HDR10, pull request #33): every autosave frame was long,
+    game-thread work late in the frame. On the game thread most samples were in ProcessScreenShots' FLinearColor -> FColor loop
+    (exe+0x3223140), the rest in the save's callback and allocations.
+  - Why the SDR takeover missed it: a DIAG at the takeover logged no call. ProcessScreenShots picks its read by the
+    viewport's HDR flag (FViewport vtable +0x40). The SDR read is GetViewportScreenShot (exe+0x37E4F30, the call the fix
+    redirects). The HDR read is GetViewportScreenShotHDR (exe+0x37E4FB0): ReadLinearColorPixels (exe+0x37F32F0), the same
+    render command shape, lambda exe+0x37D2B50 calling RHIReadSurfaceData's FLinearColor overload (vtable +0x240). With
+    delegate listeners and the delegate cvar on, it then converts per pixel with FLinearColor::ToFColorSRGB
+    (exe+0xEAB6A0), sets alpha 0xFF and broadcasts through the same call.
+  - Identity: the D3D12 read (exe+0x252B510) converts the back buffer's raw rows with exe+0x251C400. Its format-18
+    (A2B10G10R10) case multiplies each 10-bit channel by 1/1023.f (exe+0x709E164 = 0x3A802008). ToFColorSRGB's channels
+    are independent (one sRGB table, per-lane constants). So per channel, table[v] = ToFColorSRGB(v x 1/1023.f), built
+    with the game's function. The self-test calls the mapped exe's converter and quantiser on every 10-bit value per
+    channel plus 8,192 random pixels and compares: 0 differences. Other back-buffer formats: the render thread does the
+    stock linear read into the marker, and the helper applies the game's ToFColorSRGB per pixel.
+  - Measured by the contributor (a play session with eight door autosaves, and a benchmark at the Cheydinhal inn door in
+    HDR10, 5 runs each side): pull request #33. Our benchmark game runs hidden in SDR: we checked the SDR route only.
+
 
 <a id="hdrmenubackground"></a>
 
@@ -1573,14 +1849,7 @@ ledger, keys switched live in A-B-B-A order.
   manager: GConsoleManager exe+0x9007F28, found from the game's own lookup of `r.HDR.UI.Luminance`.
   `FindConsoleVariable` is at vtable+0xB8, `AsVariableInt` at +0x58 and `GetFloat` at +0x98, each as the game's own
   code calls them.
-- **Result** (2026-10-28, probe game, IC Market, System page, UI white 200, switched live in one game):
-  - HDR menu / SDR menu x0.60 in both dark and bright regions, log spread 0.079 (stock 0.30).
-  - Median background 4.1 nits (stock 14.2, SDR 6.1). Visually the HDR menu now looks like the SDR one.
-  - The conversion takes 5.8 ms per 5120x2160 screenshot on the game thread (4 opens). It now runs in bands of
-    4,096 pixels on ScreenshotParallel's helpers (each pixel on its own, so the same bytes; self-test: a random 5120x2160
-    picture against the table applied pixel by pixel): 1.27 ms in play (HDR10, 5120x2160).
-  - Menu-opening frames (HitchLedger, ABBA x2): with the fix 196.6 (the first open), 171.2, 154.4 and 156.4 ms;
-    without 172.9, 147.3, 153.0 and 159.5 ms. The difference is within noise.
+- **Result:** the contributor's captures and timing (pull request #36); not measured by us (optional key, HDR).
 - **Self-test:** the call site, ImageResize and the console manager at their build-19115871 addresses; the table
   (monotonic, about 100 nits at a 250-nit white gives sRGB 170); the wrapper with a fake resize converts for output
   devices 3 and 4 and passes SDR, scRGB and off through unchanged.
@@ -1604,9 +1873,8 @@ ledger, keys switched live in A-B-B-A order.
   cache stays raw, so a menu save's picture is converted once. SaveThumbnailAsync checks that the callback's copy and the
   cache's copy are the same function; it now looks through the stub to the game's copy (`HdrSaveThumbnailResolve`, the
   one line this adds to `saves/save_thumb.cpp`).
-- **Cost:** the same table pass as the menu background (5.8 ms for 5120x2160 on one thread, 1.3 ms in bands on the
-  helpers; 5.6-6.8 ms measured on one thread); on SaveThumbnailAsync's helper for a quicksave or autosave, on the
-  saving thread for a menu save.
+- **Cost:** the same table pass as the menu background, on SaveThumbnailAsync's helper for a quicksave or autosave,
+  on the saving thread for a menu save (the contributor's timing: pull request #36).
 - **Checked by eye in play** (2026-10-30): the new autosaves' thumbnails in the Load menu look right, no longer washed
   out. Not measured.
 - **Self-test:** the call at exe+0x48AF8DA through the stub, SaveThumbnailAsync's view of the copy; the wrapper with a
@@ -1627,6 +1895,36 @@ ledger, keys switched live in A-B-B-A order.
 - **Identity:** the index returns the first position, as the linear search does; self-test over a million random
   lookups with repeats, clears, outside appends and reallocations; the test build compared every lookup in game:
   0 differences in ~300,000.
+
+<a id="autosavefollowsmenu"></a>
+
+### Autosaves with every autosave option off (`AutosaveFollowsMenu`, game bug)
+
+[Explanation](how-it-works.md#autosavefollowsmenu).
+
+- **Reported by players:** autosaves keep happening with every autosave option in the menu off.
+- **Found (2026-10-28, static analysis of build 19115871, Ghidra and dumpbin):** the old engine's autosave is
+  `exe+0x6703BC0` (it skips when a flag of the save manager is set or the player check `exe+0x65FB200` says
+  no, else saves as "autosave"). It has six callers: `exe+0x65D460D`, `exe+0x65F6165` (travel),
+  `exe+0x65FF287`, `exe+0x6731CBB` (an activated door), `exe+0x6793A44` (rest/wait) and `exe+0x6A07684`. The
+  Gameplay menu's handler `VGameplayMenuHandlersATO::SetGameplaySettings` (`exe+0x6571340`) stores its four switches
+  in `bSaveOnInteriorExteriorSwitch` (`exe+0x941DAD8`), `bSaveOnTravel` (`0x941DB28`), `bSaveOnRest` (`0x941DA80`) and
+  `bSaveOnWait` (`0x941DA68`), all `:GamePlay` (names from their static initialisers), and saves each through the
+  settings collection. Two callers check settings the menu never sets: the end of a level-up (`exe+0x65FEF80`)
+  checks `bSaveOnLevelUp:Gameplay` (`exe+0x941DAC8`, default 1) before `exe+0x65FF287`, and the scripts' `Autosave`
+  command (`exe+0x6A07670`) checks `bAllowScriptedAutosave:General` (`exe+0x8FAF520`, initialised to 1) before
+  `exe+0x6A07684`.
+- **Fix (`saves/autosave_menu.cpp`):** those two calls go to a stub and a wrapper that does not call the autosave
+  while all four menu settings are 0 (read at the call), and calls it as before otherwise. Found by three patterns
+  (the menu handler's four stores, each followed by a `lea rdx` of the same setting; the level-up's check and call;
+  the script command), each matching once; checks: the settings in `.data` and distinct, both calls reach the same
+  function in `.text` with the same save manager, `bSaveOnLevelUp` within 0x100 bytes of the menu's settings.
+  Rejected: setting `bSaveOnLevelUp` and `bAllowScriptedAutosave` from the menu's values (writes the player's
+  settings; a quest's save point would also stay off after the player switches an option back on, until a restart);
+  only documenting the two ini keys (players would need to know them, and a key set wrong keeps those
+  autosaves off with the menu's options on). Not changed: the door caller (`exe+0x6731CBB`, inside `exe+0x6731990`: an activated `TESObjectDOOR` with
+  flag 1, in its "Unequip" handler branch) and `exe+0x65D460D` (a flags-word bit check); what they are in play is
+  not known yet. Self-test: sites, patches and the wrapper's decisions with fakes.
 
 ## Frame generation
 
@@ -1739,6 +2037,61 @@ Game bugs (they also happen without OblivionPerfFix). Bugs in our own fixes are 
   only behaviour change is no crash. Not covered: freed memory reused by another actor before the next step.
 
 - **Results:** self-test with the real vtables and the crash's freed header; installed live (Kvatch plane runs).
+
+<a id="bow-sneak-1x"></a>
+
+### Bow sneak attacks at 1x (`BowSneakAttackFix`, game bug)
+
+[Explanation](how-it-works.md#bow-sneak-1x).
+
+- **Reported by players:** sneak attacks with a bow often say "Sneak attack for 1X damage" and do 1x, at random,
+  where Marksman sneak attacks should do 2x-3x (UESP lists it under the remaster's regressions). Reloading a save
+  shows the damage really is 1x.
+- **Found (2026-10-27, static analysis of build 19115871, Ghidra):** the old engine's perk settings
+  (`fPerkSneakAttackMarksman*Mult`, `fDamageSneakAttackMult`) are only registered at start-up, no code reads them. The
+  multiplier comes from the Unreal side, taken when the arrow lands:
+  1. `AVAmmunition:OnBounce` (exec thunk `exe+0x461B290`, body `exe+0x4834230`) and the hit box's handler
+     `exe+0x48092F0` (`UVHitBoxComponent:OnOverlapTriggered`, and called natively from `exe+0x48141B0`) call the
+     arrow-hit function `exe+0x48652E0` with (shooter, target, arrow).
+  2. That calls `AVPairedPawn::GetBaseSneakDamageMultiplierForCurrentWeapon` (`exe+0x4855D60`) on the shooter at that
+     moment: `WeaponsPairingComponent` (+0x7D8) -> `WeaponActor` (+0x168) -> virtual +0x768 (`exe+0x4858EA0`,
+     `AVWeapon.WeaponTypeTag` at +0x358), matched (tag or parent) against the rows of `UVOblivionRuntimeSettings`'
+     `WeaponSneakDamageMultiplierDataTable` (soft path at +0x2D0); the column follows Sneak (actor value 0x1F: <25, <50,
+     <75, <100, else Master). No matching row or the table not resolved: **1.0**. No `WeaponActor` (null or flagged
+     for destruction) does not give 1.0 by itself: `exe+0x48BB6C0` then uses a default tag (global at `exe+0x9306860`),
+     and the probe read 2.0 with `WeaponActor` null.
+  3. The value goes to the old engine in an `Arrow_hit_Reverse_Pairing` command; its handler (`exe+0x65572E0`) passes it
+     to the hit function `exe+0x65A5220` (`Actor.cpp`), which multiplies the arrow's damage by it and shows
+     `LOC_ME_SneakDamageMultiplier` with `round(value)`: the "1X" on screen is the multiplier used.
+- **When `WeaponActor` is empty:** `exe+0x48B7140` (the paired weapon form changes) destroys `WeaponActor` and sets it
+  to null, and `exe+0x48D09B0` makes the new one, at once or after an asynchronous asset load (spawned in
+  `exe+0x48A95A0`); unequipping clears it too. An arrow that lands in that window, or after the shooter switched or
+  put away the weapon while it flew, would get the default tag's value (not 1x, see above).
+- **Measured** by the contributor (probes reading the hits and the target's health, and a play check of 20 sneak
+  shots with the fix): pull request #35.
+- **Found (2026-10-28, a native probe (not included), one session):** the 1.0 comes from the **old
+  engine's own projectile impact**, not from the Unreal side. `exe+0x6665690` (the old engine's projectile impact,
+  reached from `exe+0x6952900`; it checks "Disable_Impact_System" but goes on) calls the shooter's hit-with-projectile
+  slot (+0x868 -> `exe+0x65A5160` -> slot +0x860 `exe+0x65A5220`) with the multiplier hard-coded to 1.0
+  (`movss xmm0,[exe+0x870FDAC]` at `exe+0x6665A20`) when the shooter is the player. All 15 Unreal-side hits queued
+  2.0 and reached `exe+0x65A5220` with 2.0 (shooter = the player pawn, same `WeaponActor` throughout). 9 calls came
+  with 1.0 from `exe+0x6665A4A`: 5 for the same old-engine arrow about 9 ms before the Unreal hit's 2.0 arrived, 4 for
+  arrows the Unreal side never reported a hit for. Which side sees the impact first is a race between the two
+  engines' projectile collision; when the old engine's is first (or the only one), the hit is "Sneak attack for 1X".
+- **Fix (`guards/bow_sneak.cpp`, 2026-10-28):** the handler's call to the hit thunk (`exe+0x65574B0`) and the old
+  engine's impact call through the attacker's vtable (`call [r10+868h]` at `exe+0x6665A43`, rewritten as a call to a
+  stub plus a 2-byte nop) go through wrappers, only for the player as attacker: the first hit of an arrow on a target
+  is made, a second one within 500 ms (either path) is not; the old engine's hit gets the Unreal side's last multiplier
+  for the player's arrow hits instead of 1.0, only for projectiles of the class those hits carried, and only once one
+  exists. Rejected: switching the old engine's impact off for the player (its 9 of 23 hits that the Unreal side never
+  reported would deal nothing); only correcting the multiplier (double hits would become 2x + 2x); only one hit per
+  arrow (the old engine is usually first, so double hits would become 1x); delaying the old engine's hit until the
+  Unreal one could arrive (same result as the fix, more code on the OblivionThread). Self-test: sites, patches and
+  the wrappers' decisions with fakes.
+- **Ruled out:** the table being unloaded (`UVPairedAssetsLoadingSubsystem`'s start-up, `exe+0x48BF870` ->
+  `exe+0x48C4E40`, loads it and adds it to the root set); hit location and headshots (no input to the getter or to
+  the arrow damage); the old engine's detection check at the queued hit (`exe+0x65A5220`), which gives no sneak attack
+  and no message, not 1x.
 
 <a id="objectreplacecrashguard"></a>
 
@@ -2046,6 +2399,58 @@ Game bugs (they also happen without OblivionPerfFix). Bugs in our own fixes are 
   running cloth and the normal simulation tick are untouched. All layouts are checked by pattern at start-up.
 - **Results:** guard 300.0 cm -> 0.0001 cm; grey robe (Ilav's asset) 500 cm -> median 0.24 / max 2.83 cm (its own drape);
   rotation, LOD 2 and the non-adjacent LOD 2 -> 0 also clean; ordinary simulation after resuming unchanged.
+
+<a id="shaderscreenafterdriverchange"></a>
+
+### The first-launch shader screen after a driver change (`ShaderScreenAfterDriverChange`, game bug)
+
+[Explanation](how-it-works.md#shaderscreenafterdriverchange).
+
+- **What decides it** (static, build 19115871): at start-up exe+0x44E1290 sets the start-up movie player's +0x89 to
+  "no Save_Settings save" (UGameplayStatics::DoesSaveGameExist at exe+0x31A4F30, called at exe+0x44E12C4: the platform
+  save system's vtable +0x10). exe+0x44E8350 adds the ShaderLoadingScreenMovie, its timeout and the precompile callbacks
+  (begin: r.ShaderPipelineCache.MaxPrecompileTime saved and set to 0; complete; clean-up: restored, SetBatchMode
+  Background) only while +0x89 is set; only those read it. The screen's widget (exe+0x44E2330) shows "Shaders
+  preloading:" and "Compiling shaders to optimize performance during gameplay." This also explains the PCGamingWiki tip
+  (rename Save_Settings.sav).
+- **The change:** that one call goes through a wrapper. It compares DXGI's vendor, device, subsystem, revision and
+  user-mode driver version of the hardware adapter with the most dedicated memory with `OblivionPerfFix-gpu.txt`; on a
+  difference it answers "no save" to this caller, and tells PsoPrecompileFast to apply UE's Fast values (16 ms, no
+  cold-cache guard) until the main menu: the game itself asks only for Background behind the screen. The record is
+  written when PsoPrecompileFast sees the precompile end.
+- **Measured** by the contributor (warm and cold driver caches, with and without the screen, flights after
+  start-up): pull request #33. Our check of the record and the start-up path: the self-test and our live test.
+- **Self-test:** the call at exe+0x44E12C4 to DoesSaveGameExist at exe+0x31A4F30 and the flag store; the wrapper with a
+  fake save check and a fake card: first record, unchanged, changed (the Fast hold set, the old record kept until the
+  precompile ends), no settings save at all.
+
+<a id="vramcounterfix"></a>
+
+### The "Show VRAM" counter (`VramCounterFix`, game bug)
+
+[Explanation](how-it-works.md#vramcounterfix).
+
+- **Reports:** Steam discussions for the game: the counter reads 0/0 on AMD and NVIDIA cards; one player quotes support
+  calling it a known bug. Reproduced by the contributor (with the fix off): "VRAM: 0/0".
+- **What draws it** (static, build 19115871): the widget class AltarGraphicsSettingsDebugInfo formats VRAMText as
+  "VRAM: {0}/{1}" in its update (exe+0x48C2170), with the two outputs of one query, exe+0x47B6AF0, called at
+  exe+0x48C2511. The Blueprint function GetUsedVRAMMB is a thin exec thunk around the same query (its call at
+  exe+0x46019EB). The query zeroes both outputs, then reads GDynamicRHI (exe+0x9206108, as pinned by RdgSubmitBatch's
+  self-test), calls its vtable+0x30 (the RHI behind any validation layer), takes the first adapter of the array at
+  +0xC8, and scales two 64-bit fields at +0x760 and +0x768 by 2^-20 (MB). The widget passes the +0x768 value as {0}
+  and the +0x760 value as {1}: the order of DXGI's video memory info (budget, then current use), so the counter was
+  meant to read use / budget.
+- **Why 0:** nothing in the shipping build refreshes those two fields; read in a probe game they stay 0 (the counter shows
+  0/0 for the whole session).
+- **The change:** both call sites go through one stub to a wrapper that calls the game's query, then, only if both
+  results are 0, writes the monitor thread's latest local-segment DXGI sample (`QueryVideoMemoryInfo` on the GPU the
+  game uses the most memory on: budget and current use, in MB). The game thread only reads two atomics; the sample is
+  at most a second old. If the game's own numbers are non-zero they are passed through and counted.
+- **Result:** checked in game by the contributor (pull request #33): the use and the budget with the fix, "VRAM: 0/0"
+  switched off live.
+- **Self-test:** the query, both calls and GDynamicRHI at their build-19115871 addresses, both calls going to the stub;
+  the wrapper with a fake query and a fake sample fills 0/0, passes the game's own numbers through, leaves 0/0 before
+  the first sample and while switched off.
 
 ## Memory safety and diagnostics
 

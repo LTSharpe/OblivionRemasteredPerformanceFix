@@ -5,7 +5,7 @@
 // UChaosClothComponent::RecreateClothSimulationProxy building a whole FClothSimulationProxy (Chaos solver, particles,
 // constraints, graph colouring), a few ms per robe, and the character Blueprints ask for it several times: per robe an
 // OnRegister build, a script rebuild ~5 ms later and another 40-90 ms later after the proxy ran 1-3 ticks, each inside
-// the NPC's creation unit (2026-10-20: 15 builds, 78.5 ms on the npcburst-short flight). Every rebuild starts from
+// the NPC's creation unit. Every rebuild starts from
 // nothing (RecreateClothSimulationProxy first resets the proxy), so only the last build's proxy survives.
 //
 // The rule: a request is deferred when it comes on the game thread inside a NpcCreationPacing unit whose actor may wait
@@ -23,11 +23,21 @@
 //   - at once before a Blueprint reads the simulation state (IsSimulationSuspended / IsSimulationEnabled: both answer
 //     from the proxy), so script logic sees the stock answer.
 // Until then the component has no proxy: TickComponent skips the proxy tick (null check), the render data falls back to
-// plain skinning, OnUnregister resets nothing. Its bounds differ from stock: the registration's render state creation
-// runs UpdateBounds -> CalcBounds (exe+0x53C7500), which caches the proxy's particle bounds in local space (stock: the
-// first build's). With that build held there is no proxy, so it caches an empty box, and the build made later does not
-// refresh the cache. OnUnregister (vtable slot) drops a waiting build, so a destroyed component is never built. The
-// cloth starts simulating a few frames later, off-screen.
+// plain skinning, OnUnregister resets nothing. OnUnregister (vtable slot) drops a waiting build, so a destroyed component
+// is never built. The cloth starts simulating a few frames later, off-screen.
+//
+// Bounds (OblivionPerfFix's addition to the PR, 2026-10-30): the registration's render state creation reads the
+// component's local bounds (FScene::AddPrimitive -> GetLocalBounds() = CalcBounds(Identity), exe+0x53C7500), which
+// computes them from the proxy (FClothSimulationProxy::CalculateBounds_AnyThread: the solver's particle bounds; no
+// simulation task exists yet right after a build) and caches them (a.CacheLocalSpaceBounds: local +0x800 bit 7, world
+// +0x801 bit 0, the box at +0x840). In stock that is the first build's proxy. With that build held there is no proxy:
+// the cache holds an empty box and the renderer (GPUScene instance bounds, virtual shadow map culling) got it, and
+// RecreateClothSimulationProxy invalidates nothing. So right after a held build is made (here, or asked for elsewhere),
+// RefreshBounds does what the registration did after its build: InvalidateCachedBounds' two flags cleared, then
+// GetLocalBounds (the game's CalcBounds with the identity transform: fills the cache from the new proxy), then
+// MarkRenderTransformDirty (exe+0x2FE7B70): at the frame's end SendRenderTransform runs UpdateBounds and gives the
+// renderer GetLocalBounds (FScene::UpdatePrimitiveTransform), the same values AddPrimitive took in stock. The box comes
+// from the same function and the same kind of proxy (the start pose of the build, a few frames later than stock's).
 //
 // With ClothRegisterLite (npcs/cloth_register.cpp, installed first; this file's hooks then run inside its own): a build
 // this file holds leaves no proxy, so ClothRegisterLite has nothing to complete at its EquipBodyPart call's end, and the
@@ -42,6 +52,12 @@
 //     [rbx+918h],8; jne; cmp qword [rbx+940h],0; je ...: suspended or no proxy); that call is redirected.
 //   execIsSimulationEnabled exe+0x53CFFC0: P_FINISH; ... test byte [rbx+918h],4; cmp qword [rbx+940h],0 (inline).
 //     Entry detour (5 prologue bytes).
+//   CalcBounds exe+0x53C7500 (the class vtable's slot +0x568, OnUnregister's +0x350; ClothRegisterLite's hook may hold
+//     it, then its original): test byte [rcx+801h],1; jne; cmp byte [rcx+800h],r15b; jl; ... mov rcx,[rbx+940h];
+//     movups [rbx+840h],xmm0. Called, not patched.
+//   MarkRenderTransformDirty exe+0x2FE7B70: bRegistered and bRenderStateCreated (+0x8C & 3); or byte [rcx+8Dh],1
+//     (bRenderTransformDirty); jmp MarkForNeededEndOfFrameUpdate (exe+0x2FE78A0: bNeverNeedsRenderUpdate test first).
+//     Called, not patched.
 #include "common.h"
 
 #include <algorithm>
@@ -74,8 +90,24 @@ constexpr size_t kRegisteredByte = 0x8C;   // bRegistered (bit 0), RecreateCloth
 constexpr uint64_t kForceFrames = 30;      // a waiting build is due this many frames after its first request (budget
                                            // permitting), and runs whatever the budget after twice as many
 constexpr uint64_t kScaleFrom = 8;         // from this wait on the budget grows (x2 at 12 frames, x3 at 16, ...)
+// the bounds refresh after a held build (CalcBounds: the function in the class vtable's slot is checked against these, the
+// short ones searched only inside it; MarkRenderTransformDirty: searched, its tail jump checked)
+constexpr char kCalcBoundsStart[] = "48 8B C4 48 89 58 20 55 56 57 41 56 41 57";
+constexpr char kCalcBoundsCache[] = "F6 81 01 08 00 00 01 0F 85 ?? ?? ?? ?? 44 38 B9 00 08 00 00 0F 8C";
+constexpr char kCalcBoundsProxy[] = "48 8B 8B 40 09 00 00";
+constexpr char kCalcBoundsStore[] = "0F 11 83 40 08 00 00";
+constexpr size_t kCalcBoundsSearch = 0x200;
+constexpr char kMarkTransformDirty[] = "0F B6 81 8C 00 00 00 24 03 3C 03 75 ?? 80 89 8D 00 00 00 01 E9 ?? ?? ?? ?? C3";
+constexpr char kMarkEndOfFrame[] = "40 53 48 83 EC 20 80 B9 8D 00 00 00 00 48 8B D9 7C";
+constexpr size_t kMarkJmp = 20;                          // the tail jump to MarkForNeededEndOfFrameUpdate
+constexpr ptrdiff_t kVtableUnregister = 0x350 / 8;       // the class vtable: OnUnregister's slot
+constexpr ptrdiff_t kVtableCalcBounds = 0x568 / 8;       // and CalcBounds'
+constexpr size_t kCacheLocalByte = 0x800, kCacheWorldByte = 0x801, kCacheBox = 0x840;
+alignas(16) constexpr double kIdentity[12] = {0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 0};   // FTransform::Identity (rotation, translation, scale)
 
 using RecreateFn = void (*)(uint8_t* component);
+using CalcBoundsFn = void* (*)(uint8_t* component, void* out, const void* localToWorld);
+using MarkFn = void (*)(uint8_t* component);
 using UnregisterFn = void (*)(uint8_t* component);
 using SuspendedFn = bool (*)(uint8_t* component);
 using ThunkFn = void (*)(uint8_t* context, void* stack, void* result);
@@ -96,6 +128,11 @@ uint64_t g_freq = 0;
 DWORD g_gtId = 0;
 int g_testDistant = -1;   // self-test: -1 = NpcCreationPacing decides, 0/1 forced
 uint64_t g_testFrame = 0;
+CalcBoundsFn g_calcBounds = nullptr;   // the game's CalcBounds (not ClothRegisterLite's hook of it)
+MarkFn g_markTransform = nullptr;
+void* g_clothVtable = nullptr;         // the cloth component class's vtable (the one holding OnUnregister's slot)
+std::atomic<bool> g_boundsOn{true};    // lab ClothDeferBounds=0: left out (as PR #31's f0e7fdb), to show what it fixes
+std::atomic<uint64_t> g_boundsSet{0}, g_boundsOther{0};
 
 // The builds that wait (game thread; OnUnregister may come from elsewhere, hence the lock)
 struct Pend {
@@ -222,11 +259,32 @@ bool StillAsDeferred(const uint8_t* component, const Pend& p)
     return true;
 }
 
-// The game's build of a taken waiting build; returns its time in us.
+
+// After a held build was made (by BuildTaken, or asked for from elsewhere): the bounds as the registration leaves them in
+// stock after its build (see "Bounds" at the top). Game thread, right after the build: the new proxy has no simulation
+// task yet, so CalcBounds reads the solver's particle bounds, as the registration's read does in stock.
+void RefreshBounds(uint8_t* c)
+{
+    if (!g_boundsOn.load(std::memory_order_relaxed) || !g_calcBounds || !ReadProxy(c)) return;   // no proxy: as at registration
+    void* vt = nullptr;
+    if (!Copy(c, reinterpret_cast<uint8_t*>(&vt), sizeof vt) || vt != g_clothVtable) {
+        ++g_boundsOther;   // not the cloth component class whose CalcBounds and cache layout were checked: left as it is
+        return;
+    }
+    c[kCacheLocalByte] &= 0x7F;   // USkinnedMeshComponent::InvalidateCachedBounds: bCachedLocalBoundsUpToDate
+    c[kCacheWorldByte] &= 0xFE;   // and bCachedWorldSpaceBoundsUpToDate
+    alignas(16) uint8_t out[64];
+    g_calcBounds(c, out, kIdentity);   // GetLocalBounds(): caches the new proxy's bounds
+    g_markTransform(c);                // the renderer takes them at the frame's end (UpdateBounds, UpdatePrimitiveTransform)
+    ++g_boundsSet;
+}
+
+// The game's build of a taken waiting build, then its bounds; returns its time in us.
 uint64_t BuildTaken(uint8_t* component, int why)
 {
     const uint64_t t0 = NowUs();
     g_recreateOrig(component);
+    RefreshBounds(component);
     const uint64_t us = NowUs() - t0;
     ++g_by[why];
     g_builtUs += us;
@@ -275,6 +333,9 @@ void RecreateHook(uint8_t* component)
         }
         Take(component, nullptr);   // asked for from anywhere else: built now, as the game would
         ++g_asked;
+        g_recreateOrig(component);
+        RefreshBounds(component);   // the first build of this component: its bounds as stock's registration leaves them
+        return;
     } else if (farUnit && Registered(component) && !ReadProxy(component)) {
         Defer(component, owner, frame);
         ++g_deferred;
@@ -337,6 +398,28 @@ bool InstallClothBuildDefer(bool beforeGameCode)
     if (en.size() != 1 || memcmp(en[0], kEnabledPrologue, sizeof kEnabledPrologue) != 0)
         return Fail("execIsSimulationEnabled not found exactly once");
     g_enabledThunk = en[0];
+    // The bounds refresh: the class vtable around OnUnregister's slot, its CalcBounds (or the original behind
+    // ClothRegisterLite's hook), MarkRenderTransformDirty. Without them the deferral would leave empty bounds: not installed.
+    void** const vtable = g_unregSlot - kVtableUnregister;
+    void* calc = vtable[kVtableCalcBounds];
+    ClothRegisterInfoOut cri{};
+    if (!game.text.Contains(calc) && ClothRegisterInfo(&cri) && cri.calcBoundsSlot == vtable + kVtableCalcBounds &&
+        calc == cri.calcBoundsHook)
+        calc = cri.calcBoundsOrig;
+    auto* const cb = static_cast<uint8_t*>(calc);
+    if (!game.text.Contains(cb) || !MatchesAt(cb, ParsePattern(kCalcBoundsStart)) ||
+        FindAll({cb, cb + kCalcBoundsSearch}, ParsePattern(kCalcBoundsCache)).size() != 1 ||
+        FindAll({cb, cb + kCalcBoundsSearch}, ParsePattern(kCalcBoundsProxy)).size() != 1 ||
+        FindAll({cb, cb + kCalcBoundsSearch}, ParsePattern(kCalcBoundsStore)).size() != 1)
+        return Fail("CalcBounds (vtable slot +0x568) not as expected");
+    const auto mark = FindAll(game.text, ParsePattern(kMarkTransformDirty));
+    if (mark.size() != 1) return Fail("MarkRenderTransformDirty not found exactly once");
+    uint8_t* const endOfFrame = RipTarget(mark[0] + kMarkJmp, 1, 5);
+    if (!game.text.Contains(endOfFrame) || !MatchesAt(endOfFrame, ParsePattern(kMarkEndOfFrame)))
+        return Fail("MarkRenderTransformDirty's MarkForNeededEndOfFrameUpdate not as expected");
+    g_calcBounds = reinterpret_cast<CalcBoundsFn>(cb);
+    g_markTransform = reinterpret_cast<MarkFn>(mark[0]);
+    g_clothVtable = vtable;
 
     g_region = AllocNearGame(256);
     if (!g_region) return Fail("no memory near the game for the trampolines");
@@ -401,10 +484,12 @@ bool InstallClothBuildDefer(bool beforeGameCode)
     g_recreateSite = recreate;
     g_installed = true;
     Log("[clothdefer] RecreateClothSimulationProxy exe+0x%X, OnUnregister slot exe+0x%X%s, execIsSimulationSuspended's call "
-        "exe+0x%X, execIsSimulationEnabled exe+0x%X: installed",
+        "exe+0x%X, execIsSimulationEnabled exe+0x%X; bounds after a held build: CalcBounds exe+0x%X, MarkRenderTransformDirty "
+        "exe+0x%X: installed",
         static_cast<unsigned>(recreate - game.base), static_cast<unsigned>(reinterpret_cast<uint8_t*>(g_unregSlot) - game.base),
         g_unregOrig == reinterpret_cast<UnregisterFn>(unreg[0]) ? "" : " (in front of ClothRegisterLite's hook)",
-        static_cast<unsigned>(g_suspendedCall - game.base), static_cast<unsigned>(g_enabledThunk - game.base));
+        static_cast<unsigned>(g_suspendedCall - game.base), static_cast<unsigned>(g_enabledThunk - game.base),
+        static_cast<unsigned>(cb - game.base), static_cast<unsigned>(mark[0] - game.base));
     return true;
 }
 
@@ -492,23 +577,40 @@ void ClothDeferTestCallRecreate(uint8_t* component) { RecreateHook(component); }
 void ClothDeferTestCallUnregister(uint8_t* component) { UnregisterHook(component); }
 bool ClothDeferTestCallSuspended(uint8_t* component) { return SuspendedHook(component); }
 size_t ClothDeferTestPending() { return g_pendCount.load(); }
+bool ClothDeferTestBoundsSites(void** calcBounds, void** markTransform, void** clothVtable)
+{
+    *calcBounds = reinterpret_cast<void*>(g_calcBounds);
+    *markTransform = reinterpret_cast<void*>(g_markTransform);
+    *clothVtable = g_clothVtable;
+    return g_installed;
+}
+void ClothDeferTestSetBoundsFakes(void* calcBounds, void* markTransform)
+{
+    g_calcBounds = reinterpret_cast<CalcBoundsFn>(calcBounds);
+    g_markTransform = reinterpret_cast<MarkFn>(markTransform);
+}
+void SetClothDeferBoundsLab(bool on)
+{
+    if (g_boundsOn.exchange(on) != on) Log("[clothdefer] bounds refresh after a held build %s (lab ClothDeferBounds)", on ? "on" : "OFF");
+}
 
 void LogClothBuildDeferStats()
 {
     const uint64_t d = g_deferred.exchange(0), m = g_merged.exchange(0), c = g_cancelled.exchange(0), a = g_asked.exchange(0),
-                   o = g_odd.exchange(0), us = g_builtUs.exchange(0), mx = g_maxFrameUs.exchange(0);
+                   o = g_odd.exchange(0), us = g_builtUs.exchange(0), mx = g_maxFrameUs.exchange(0),
+                   bs = g_boundsSet.exchange(0), bo = g_boundsOther.exchange(0);
     uint64_t by[kNumWhy];
     for (int i = 0; i < kNumWhy; ++i) by[i] = g_by[i].exchange(0);
-    if (d || m || c || a || o || by[kQuiet] || by[kSeen] || by[kLag] || by[kFlush] || by[kReader])
+    if (d || m || c || a || o || by[kQuiet] || by[kSeen] || by[kLag] || by[kFlush] || by[kReader] || bs || bo)
         Log("[clothdefer] %llu builds deferred, %llu requests merged into them, %llu dropped at unregister, %llu asked for "
             "again outside a far unit (built then), %llu changed while waiting (left to the game); built later: %llu quiet, "
             "%llu near/seen, %llu lag bound, %llu not deferring, %llu before a Blueprint read, %.1f ms (most in one frame "
-            "%.1f ms); %zu waiting",
+            "%.1f ms); %zu waiting; bounds refreshed %llu (%llu of another class left)",
             static_cast<unsigned long long>(d), static_cast<unsigned long long>(m), static_cast<unsigned long long>(c),
             static_cast<unsigned long long>(a), static_cast<unsigned long long>(o), static_cast<unsigned long long>(by[kQuiet]),
             static_cast<unsigned long long>(by[kSeen]), static_cast<unsigned long long>(by[kLag]),
             static_cast<unsigned long long>(by[kFlush]), static_cast<unsigned long long>(by[kReader]), us / 1000.0, mx / 1000.0,
-            g_pendCount.load());
+            g_pendCount.load(), static_cast<unsigned long long>(bs), static_cast<unsigned long long>(bo));
 }
 
 }  // namespace opf

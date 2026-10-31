@@ -63,6 +63,29 @@ inline void Run(const opf::GameModule& game)
     Check(ReadAll(record).find("32.0.15.8215") != std::string::npos, "shader screen: the new driver recorded once it has finished");
     ShaderScreenTestSetup(reinterpret_cast<void*>(&FakeExists), &FakeGpu, record.c_str());
     Check(wrap(nullptr, 0), "shader screen: the next start-up with that driver: the game's answer");
+    // Never a loop (review rev124): at most two shows for one driver without the record catching up.
+    if (PsoPrecompileInfo(&pso)) {
+        g_gpu = "10DE 2B85 00000000 A1 32.0.15.9000";
+        bool loop = true;
+        for (int start = 1; start <= 2; ++start) {
+            ShaderScreenTestSetup(reinterpret_cast<void*>(&FakeExists), &FakeGpu, record.c_str());
+            loop = loop && !wrap(nullptr, 0) && ShaderScreenShownUnrecorded() == start &&
+                   ReadAll(record).find("shown " + std::to_string(start) + " 10DE 2B85 00000000 A1 32.0.15.9000") != std::string::npos;
+        }
+        ShaderScreenTestSetup(reinterpret_cast<void*>(&FakeExists), &FakeGpu, record.c_str());
+        loop = loop && wrap(nullptr, 0) && ReadAll(record).rfind("10DE 2B85 00000000 A1 32.0.15.9000\r\n", 0) == 0 &&
+               ReadAll(record).find("shown") == std::string::npos;
+        ShaderScreenTestSetup(reinterpret_cast<void*>(&FakeExists), &FakeGpu, record.c_str());
+        loop = loop && wrap(nullptr, 0);
+        Check(loop, "shader screen: shown twice for a driver without being recorded: the third start-up is the game's and records it");
+    }
+    // A record that cannot be written: no screen (it would come back at every start).
+    g_gpu = "10DE 2B85 00000000 A1 32.0.15.9100";
+    SetFileAttributesW(record.c_str(), FILE_ATTRIBUTE_READONLY);
+    ShaderScreenTestSetup(reinterpret_cast<void*>(&FakeExists), &FakeGpu, record.c_str());
+    Check(wrap(nullptr, 0) && ShaderScreenShownUnrecorded() == -1 && ReadAll(record).find("32.0.15.9100") == std::string::npos,
+          "shader screen: driver changed but the record is read-only: the game's answer, nothing written");
+    SetFileAttributesW(record.c_str(), FILE_ATTRIBUTE_NORMAL);
     g_exists = false;
     ShaderScreenTestSetup(reinterpret_cast<void*>(&FakeExists), &FakeGpu, record.c_str());
     Check(!wrap(nullptr, 0), "shader screen: no settings save at all: the game's answer (its own first launch)");

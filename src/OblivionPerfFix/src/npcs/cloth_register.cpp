@@ -217,6 +217,7 @@ ExecFn g_execRecreate = nullptr, g_execSuspended = nullptr, g_execEnabled = null
 BoolFn g_requiresSync = nullptr;
 RecreateFn g_onUnregister = nullptr;
 CalcBoundsFn g_calcBounds = nullptr;
+void* g_calcBoundsGame = nullptr;   // the game's CalcBounds as found at installation (for ClothBuildDefer; test set-ups leave it)
 EquipFn g_equip = nullptr;
 AddRulesFn g_addRules = nullptr;
 CcEnableFn g_ccEnable = nullptr;
@@ -1345,6 +1346,7 @@ bool InstallClothRegisterSkip(bool beforeGameCode)
     g_execEnabled = reinterpret_cast<ExecFn>(*g.execEnabledSlot);
     g_requiresSync = reinterpret_cast<BoolFn>(*g.requiresSyncSlot);
     g_calcBounds = reinterpret_cast<CalcBoundsFn>(*g.calcBoundsSlot);
+    g_calcBoundsGame = *g.calcBoundsSlot;
     g_equip = reinterpret_cast<EquipFn>(g.equip);
     bool ok = RedirectCall(g.onRegisterCall, reinterpret_cast<void*>(&OnRegisterRecreateHook));
     ok = ok && RedirectCall(g.setAssetCall, reinterpret_cast<void*>(&SetAssetRecreateHook));
@@ -1486,6 +1488,7 @@ bool ClothRegisterInfo(ClothRegisterInfoOut* out)
     out->execEnabledHook = reinterpret_cast<void*>(&ExecEnabledHook);
     out->requiresSyncHook = reinterpret_cast<void*>(&RequiresSyncHook);
     out->calcBoundsHook = reinterpret_cast<void*>(&CalcBoundsHook);
+    out->calcBoundsOrig = g_calcBoundsGame;
     out->equipHook = reinterpret_cast<void*>(&EquipHook);
     out->addRulesCall = g.addRulesCall;
     out->addRulesHook = reinterpret_cast<void*>(&AddRulesHook);

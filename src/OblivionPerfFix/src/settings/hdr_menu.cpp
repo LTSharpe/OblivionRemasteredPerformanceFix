@@ -304,6 +304,15 @@ struct State {
     int patches = 0;
     std::string save;             // Save_Settings.sav as it was soon after the DLL loaded (before the game writes it back)
     std::atomic<bool> saveRead{false};  // set by the monitor thread once `save` is filled (read by the game thread after)
+    std::wstring savePath;        // the file read (monitor thread, before saveRead)
+    uint64_t saveTime = 0;        // its last-write time then (FILETIME)
+    std::atomic<bool> keepWaiting{false};  // game thread: options wait for the game's own write of the file
+    std::atomic<bool> gameWrote{false};    // monitor thread: the file's last-write time changed since it was read
+    uint8_t* keepGus = nullptr;   // the settings object the waiting options go to (game thread)
+    struct KeepItem { const char* const* keys; size_t count; const char* what; };
+    KeepItem keepItems[3] = {};   // the waiting option groups (HDR, Ray Reconstruction, HUD aspect)
+    int keepCount = 0;
+    uint64_t keepSinceMs = 0;
     uint32_t syncAt = 0;          // the frame of SyncCvars' second step (0 = none)
     int32_t syncNits = 0;         // ... the WhitePoint it sets (0 = none)
     bool syncOff = false;         // ... and whether it sets HDR 0
@@ -704,15 +713,15 @@ constexpr const char* kSavedKeys[] = {"Altar.GraphicsOptions.HDR", "Altar.Graphi
                                       "r.HDR.Display.MinLuminanceLog10", "r.HDR.Display.MidLuminance"};
 constexpr const char* kRrKey = "r.NGX.DLSS.DenoiserMode";
 
-void KeepSavedOptions(uint8_t* gus, const char* const* keys, size_t count, const char* what)
+// Review fix (mishu-b, 2026-10-31): the options are added and the file written only after the game has written the file
+// itself in this session (its last-write time changed since the monitor thread read it). The writer serialises the whole
+// settings object; written before the game had loaded the player's saved options into it, it would replace them with
+// the object's defaults. Until then the options wait (KeepPendingTick, from the frame hook); if the game has not written
+// the file within kKeepGiveUpMs, nothing is written (the HDR options then last one more launch, as without the rows).
+constexpr uint64_t kKeepGiveUpMs = 600000;
+
+int AddSavedOptions(uint8_t* gus, const char* const* keys, size_t count)
 {
-    if (!s.saveRead.load(std::memory_order_acquire) || s.save.empty() || !s.addOrUpdate || !s.saveWriter) return;
-    // the slot name as the writer will use it (initialised by the exe's static constructors long before this)
-    const FStr* const slot = s.saveSlot;
-    if (!slot->data || slot->num != 14 || wcscmp(slot->data, L"Save_Settings") != 0) {
-        Log("[hdrmenu] the settings save's slot name is not \"Save_Settings\": saved %s options not kept", what);
-        return;
-    }
     int kept = 0;
     wchar_t line[96];
     for (size_t k = 0; k < count; ++k) {
@@ -725,10 +734,68 @@ void KeepSavedOptions(uint8_t* gus, const char* const* keys, size_t count, const
         s.addOrUpdate(gus, &cmd);
         ++kept;
     }
+    return kept;
+}
+
+// the slot name as the writer will use it (initialised by the exe's static constructors long before this)
+bool SlotIsSettings()
+{
+    const FStr* const slot = s.saveSlot;
+    return slot && slot->data && slot->num == 14 && wcscmp(slot->data, L"Save_Settings") == 0;
+}
+
+// Game thread: the waiting options added and the file written once, as soon as the game has written it itself.
+void KeepPendingTick()
+{
+    if (!s.keepCount) return;
+    if (!s.gameWrote.load(std::memory_order_acquire)) {
+        if (GetTickCount64() - s.keepSinceMs < kKeepGiveUpMs) return;
+        Log("[hdrmenu] the game did not write its settings save within %llu s: saved menu options not kept (nothing written)",
+            static_cast<unsigned long long>(kKeepGiveUpMs / 1000));
+        s.keepCount = 0;
+        s.keepWaiting.store(false, std::memory_order_relaxed);
+        return;
+    }
+    int kept = 0;
+    char what[96] = "";
+    for (int i = 0; i < s.keepCount; ++i) {
+        const int n = AddSavedOptions(s.keepGus, s.keepItems[i].keys, s.keepItems[i].count);
+        if (n && strlen(what) + strlen(s.keepItems[i].what) + 4 < sizeof what) {
+            if (*what) strcat_s(what, " + ");
+            strcat_s(what, s.keepItems[i].what);
+        }
+        kept += n;
+    }
+    s.keepCount = 0;
+    s.keepWaiting.store(false, std::memory_order_relaxed);
     if (!kept) return;
-    s.saveWriter(gus);
-    Log("[hdrmenu] %d saved %s option(s) put back into the saved options and the settings save written (the game drops "
-        "options of rows it does not have yet when it loads the file)", kept, what);
+    s.saveWriter(s.keepGus);
+    Log("[hdrmenu] %d saved %s option(s) put back into the saved options and the settings save written, after the game's own "
+        "write (the game drops options of rows it does not have yet when it loads the file)", kept, what);
+}
+
+void KeepSavedOptions(uint8_t* gus, const char* const* keys, size_t count, const char* what)
+{
+    if (!s.saveRead.load(std::memory_order_acquire) || s.save.empty() || !s.addOrUpdate || !s.saveWriter) return;
+    if (!SlotIsSettings()) {
+        Log("[hdrmenu] the settings save's slot name is not \"Save_Settings\": saved %s options not kept", what);
+        return;
+    }
+    bool any = false;
+    double d = 0;
+    for (size_t k = 0; k < count && !any; ++k) any = Saved(s.save, keys[k], &d);
+    if (!any) return;  // nothing to keep: nothing written
+    if (s.keepCount >= static_cast<int>(sizeof s.keepItems / sizeof *s.keepItems)) return;
+    if (s.keepGus && s.keepGus != gus) {
+        Log("[hdrmenu] another settings object than the waiting options': saved %s options not kept", what);
+        return;
+    }
+    s.keepGus = gus;
+    s.keepItems[s.keepCount++] = {keys, count, what};
+    if (!s.keepWaiting.exchange(true, std::memory_order_relaxed)) s.keepSinceMs = GetTickCount64();
+    if (!s.gameWrote.load(std::memory_order_acquire))
+        Log("[hdrmenu] saved %s options wait until the game has written its settings save itself", what);
+    KeepPendingTick();
 }
 
 // "<name> <value>" through Altar's command setter, as the menu's rows and the saved settings run them (the sinks follow)
@@ -791,20 +858,27 @@ std::string ReadSettingsSave()
 {
     using GetFolderFn = HRESULT(WINAPI*)(const GUID&, DWORD, HANDLE, PWSTR*);
     using FreeFn = void(WINAPI*)(void*);
-    static const GUID kDocuments = {0xFDD39AD0, 0x238F, 0x46AF, {0xAD, 0xB4, 0x6C, 0x85, 0x48, 0x03, 0x69, 0xC7}};  // FOLDERID_Documents
+    // The game's folder is not FOLDERID_Documents (often redirected, e.g. to OneDrive) but its UserSettingsDir, the local
+    // AppData folder (exe+0xF5FA20 in build 19115871: SHGetKnownFolderPath(FOLDERID_LocalAppData)), followed by
+    // "../../Documents/My Games/Oblivion Remastered/" (exe+0x6E3A7E0, used at exe+0xF143D2). Review fix, mishu-b 2026-10-31.
+    static const GUID kLocalAppData = {0xF1B32785, 0x6FBA, 0x4FCF, {0x9D, 0x55, 0x7B, 0x8E, 0x7F, 0x15, 0x70, 0x91}};  // FOLDERID_LocalAppData
     HMODULE shell = LoadLibraryW(L"shell32.dll");
     HMODULE ole = LoadLibraryW(L"ole32.dll");
     const auto getFolder = shell ? reinterpret_cast<GetFolderFn>(GetProcAddress(shell, "SHGetKnownFolderPath")) : nullptr;
     const auto taskFree = ole ? reinterpret_cast<FreeFn>(GetProcAddress(ole, "CoTaskMemFree")) : nullptr;
     std::wstring path;
     PWSTR docs = nullptr;
-    if (getFolder && taskFree && SUCCEEDED(getFolder(kDocuments, 0, nullptr, &docs)) && docs)
-        path = std::wstring(docs) + L"\\My Games\\Oblivion Remastered\\Saved\\SaveGames\\Save_Settings.sav";
+    if (getFolder && taskFree && SUCCEEDED(getFolder(kLocalAppData, 0, nullptr, &docs)) && docs)
+        path = std::wstring(docs) + L"\\..\\..\\Documents\\My Games\\Oblivion Remastered\\Saved\\SaveGames\\Save_Settings.sav";
     if (docs && taskFree) taskFree(docs);
     std::string data;
     if (path.empty()) return data;
+    s.savePath = path;
     const HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
     if (f == INVALID_HANDLE_VALUE) return data;
+    FILETIME written{};
+    if (GetFileTime(f, nullptr, nullptr, &written))
+        s.saveTime = (static_cast<uint64_t>(written.dwHighDateTime) << 32) | written.dwLowDateTime;
     LARGE_INTEGER size{};
     if (GetFileSizeEx(f, &size) && size.QuadPart > 0 && size.QuadPart < (4 << 20)) {
         data.resize(static_cast<size_t>(size.QuadPart));
@@ -1755,12 +1829,27 @@ bool FindHdrMenu(HdrMenuInfoOut* out)
 
 void HdrMenuMonitorTick()
 {
-    if (!s.installed || s.saveRead.load(std::memory_order_relaxed)) return;
+    if (!s.installed) return;
+    if (s.saveRead.load(std::memory_order_acquire)) {
+        // options wait for the game's own write: compare the file's last-write time with the one read (review fix)
+        if (s.keepWaiting.load(std::memory_order_relaxed) && !s.gameWrote.load(std::memory_order_relaxed) && s.saveTime) {
+            WIN32_FILE_ATTRIBUTE_DATA a{};
+            if (GetFileAttributesExW(s.savePath.c_str(), GetFileExInfoStandard, &a)) {
+                const uint64_t t = (static_cast<uint64_t>(a.ftLastWriteTime.dwHighDateTime) << 32) | a.ftLastWriteTime.dwLowDateTime;
+                if (t != s.saveTime) {
+                    s.gameWrote.store(true, std::memory_order_release);
+                    Log("[hdrmenu] the game has written its settings save: the waiting saved options are kept now");
+                }
+            }
+        }
+        return;
+    }
     // the monitor's first tick, about a second after the DLL loaded; the game loads its saved options and writes them
     // back about 20 s after the DLL loaded (probe games). Not in DllMain: shell32 under the loader lock.
     s.save = ReadSettingsSave();
     s.saveRead.store(true, std::memory_order_release);
-    Log("[hdrmenu] saved options: Save_Settings.sav %s (%zu bytes)", s.save.empty() ? "not read" : "read", s.save.size());
+    Log("[hdrmenu] saved options: Save_Settings.sav %s (%zu bytes): %ls", s.save.empty() ? "not read" : "read", s.save.size(),
+        s.savePath.empty() ? L"(no path)" : s.savePath.c_str());
 }
 
 namespace {
@@ -1864,6 +1953,7 @@ void HdrMenuFrameEnd()
     if (s.hudWanted) HudTick();
     if (s.failed) return;
     if (s.syncAt && s.frames >= s.syncAt) FinishSync();
+    if (s.keepCount) KeepPendingTick();
     const bool hdrDone = !s.hdrWanted || s.patched, rrDone = !s.rrWanted || s.rrFailed || s.rrPatched;
     const bool hudDone = !s.hudWanted || s.hudFailed || s.hudPatched;
     if (hdrDone && rrDone && hudDone) {

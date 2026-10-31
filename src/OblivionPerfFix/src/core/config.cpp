@@ -154,6 +154,7 @@ Config LoadConfig(const wchar_t* iniPath)
     c.memoryRelief = get(L"Fixes", L"MemoryRelief", c.memoryRelief) != 0;
     c.memoryReliefRamMB = get(L"Fixes", L"MemoryReliefRamMB", c.memoryReliefRamMB);
     c.memoryReliefCommitMB = get(L"Fixes", L"MemoryReliefCommitMB", c.memoryReliefCommitMB);
+    c.sharedMemoryGpu = get(L"Fixes", L"SharedMemoryGpu", c.sharedMemoryGpu);
     c.vramRelief = get(L"Fixes", L"VramRelief", c.vramRelief) != 0;
     c.vramReliefPauseTranslate = get(L"Fixes", L"VramReliefPauseTranslate", c.vramReliefPauseTranslate) != 0;
     c.navmeshBuildNoBusyWait = get(L"Fixes", L"NavmeshBuildNoBusyWait", c.navmeshBuildNoBusyWait) != 0;

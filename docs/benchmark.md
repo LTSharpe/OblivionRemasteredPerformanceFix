@@ -173,6 +173,10 @@ next run starts in seconds; it closes by itself after 20 idle minutes.
   attacks it; characters among themselves behave as usual).
 - Unless you watch, it changes the game's display settings for the run and **puts your settings, config files,
   `OblivionPerfFix.ini` and autosaves back** when the game closes.
+- **After a graphics driver update** the fix shows the game's own shader screen once at the first start (`ShaderScreenAfterDriverChange`):
+  the runner waits for it (at most 6 minutes from the launch) instead of treating the still start-up as a hang, and the in-game mod
+  starts its per-frame driver once the screen is gone. The pause shows as `watch: ...` lines in the run output and under
+  "Watchdog:" in `report.md`
 - If the game crashes or hangs, it keeps the evidence in the run folder, restarts the game and carries on; such a run
   is marked not comparable (`comparable=no` in its last line, a warning in the report): repeat it before comparing.
 - **To stop a run, use `tools\Run-Benchmark.ps1 -Stop`** (it ends after the current scene and closes or parks the game

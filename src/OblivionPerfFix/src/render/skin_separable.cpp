@@ -1,4 +1,4 @@
-// SeparableSkinAbove4K (TRADE-OFF, off by default): skin scattering by the separable method while the game
+// SeparableSkinAbove4K (game bug fix, on by default since 1.2.4: user 2026-10-31): skin scattering by the separable method while the game
 // renders wider than a 4K screen (more than 3840 pixels across: an ultrawide at DLSS DLAA or FSR Native AA), the
 // game's Burley method otherwise.
 //
@@ -20,7 +20,7 @@
 // there (an Engine.ini line) is left alone. A change of the upscaler mode or window size is followed within a second.
 //
 // Changes the picture on purpose (skin shaded by the separable method: measured at a save in play, the skin looked the
-// same at play distance, about 0.2 ms less GPU time at 5120x2160; dialogue close-ups not compared). Off by default;
+// same at play distance, about 0.2 ms less GPU time at 5120x2160; dialogue close-ups not compared). On by default (user 2026-10-31);
 // live.
 #include "common.h"
 
@@ -208,7 +208,10 @@ void SetSeparableSkinAbove4K(bool on)
 
 void LogSeparableSkinAbove4KStats()
 {
-    if (g_switches) Log("[skinsss] switches so far %ld; now %s", g_switches, g_ours ? "separable (render wider than 4K)" : "the game's value");
+    static long logged = 0;  // monitor thread only (as SetSeparableSkinAbove4K)
+    if (g_switches == logged) return;  // only when it changed
+    logged = g_switches;
+    Log("[skinsss] switches so far %ld; now %s", g_switches, g_ours ? "separable (render wider than 4K)" : "the game's value");
 }
 
 void SeparableSkinTestSetup(int32_t* data, const float* percent, const int* windowWidth)
