@@ -239,6 +239,10 @@ struct Config {
     int pacingBudgetMs = 4;           // not in the shipped ini: NPC unit time per frame before far units wait
     int pacingMinDistance = 4096;      // not in the shipped ini: only actors farther than this (game units) wait
     int pacingMaxLagFrames = 15;       // not in the shipped ini: work older than this many frames runs regardless
+    bool clothBuildDefer = true;       // ClothBuildDefer: npcs/cloth_defer.cpp, a far, unseen NPC's first cloth simulation
+                                       // build waits a few frames, repeated requests merge (needs NpcCreationPacing; timing
+                                       // change; start-up install on the version.dll route, then live)
+    int clothDeferQuietFrames = 6;     // not in the shipped ini: ... frames without a new request before it is built
     bool pacingUseSlack = true;        // not in the shipped ini: under a frame-rate cap, use the cap's sleep as budget
     bool pacingFlowWait = true;        // not in the shipped ini: a level flow waits for the main queue instead of draining it
     bool pacingLeanFlowDrain = true;   // PacingLeanFlowDrain: a level flow at its wait bound drains the owed main queue only;
@@ -1129,6 +1133,28 @@ bool NpcPacingInfo(NpcPacingInfoOut* out);
 void NpcPacingTestSetup(const NpcPacingTestFakes& fakes);  // self-test only
 NpcPacingTestState NpcPacingTestRead();                    // self-test only
 bool NpcPacingPlayerPos(double* x, double* y, double* z);  // game thread: the player's position (UE units), if known
+// ClothBuildDefer (game thread): inside a unit of a far, unseen actor in a frame that defers: true, that unit's owner
+// (its delegate's weak object pointer) and the pacing frame; and later, whether that owner is still far and unseen. Both
+// walk past an owner chain's non-actors (an equipment unit's body pairing component), which pacing's own walk does not
+bool NpcPacingDistantUnit(uint64_t* ownerWeak, uint64_t* frame);
+bool NpcPacingStillDistant(uint64_t ownerWeak);
+// ---- npcs/cloth_defer.cpp (ClothBuildDefer) ----
+// RecreateClothSimulationProxy asked for inside a far, unseen actor's NpcCreationPacing unit while the component has no
+// simulation yet waits (later requests merge into it) and is made in a later frame, within the pacing budget
+bool InstallClothBuildDefer(bool beforeGameCode);   // start-up only (version.dll route; after ClothRegisterLite)
+void SetClothBuildDefer(bool on, int quietFrames);  // live
+void LogClothBuildDeferStats();
+uint64_t ClothDeferFrame(uint64_t frame, bool flushAll, uint64_t spentUs, uint64_t budgetUs, bool unitsRan,
+                         int* built = nullptr);  // NpcCreationPacing's frame start (game thread): the builds due now; their time (us)
+void* ClothDeferTestRecreate();                                           // self-test only: the detoured entry
+void ClothDeferTestSetFakes(void* recreate, void* unregister, void* suspended);  // self-test only; this thread plays the game thread
+void ClothDeferTestSetDistant(int mode, uint64_t frame);                  // self-test only: -1 = NpcCreationPacing decides, 0/1 forced
+bool ClothDeferTestSites(void*** unregisterSlot, void** suspendedCall, void** enabledThunk);  // self-test only
+void* ClothDeferTestUnregisterNext();                                     // self-test only: what OnUnregister's hook calls
+void ClothDeferTestCallRecreate(uint8_t* component);                      // self-test only
+void ClothDeferTestCallUnregister(uint8_t* component);                    // self-test only
+bool ClothDeferTestCallSuspended(uint8_t* component);                     // self-test only
+size_t ClothDeferTestPending();                                           // self-test only
 // hitch_ledger.cpp (diagnostic HitchLedger): per slow game-thread frame, its stage times into
 // OblivionPerfFix-ledger.csv (docs/stutter-ledger.md). NpcCreationPacing's frame hooks feed it.
 struct LedgerPacing {          // NpcCreationPacing's cumulative game-thread counters at a frame end (us)
@@ -1246,6 +1272,7 @@ bool InstallClothRegisterSkip(bool beforeGameCode);  // start-up only (version.d
 void SetClothRegisterLite(int mode);                 // ClothRegisterLite: 0 off, 3 all lite + completion (lab: 1 all builds of a
                                                      // call but the last lite, learned; 2 only the registration build); live
 bool ClothRegisterLiteAvailable();
+void** ClothRegisterUnregisterSlot();               // for ClothBuildDefer: OnUnregister's slot while this file's hook holds it
 void ClothRegisterLiteTestSetup(void* addRules, void* ccEnable, void* ccUpdate);  // self-test only (after ClothRegisterTestSetup)
 void LogClothRegisterStats();
 bool ClothRegisterInfo(ClothRegisterInfoOut* out);

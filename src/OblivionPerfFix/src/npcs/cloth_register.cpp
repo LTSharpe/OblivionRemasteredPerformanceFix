@@ -1400,6 +1400,13 @@ void SetClothRegisterLite(int mode)
 
 bool ClothRegisterLiteAvailable() { return g.addRulesCall != nullptr; }
 
+// For ClothBuildDefer (npcs/cloth_defer.cpp): the component's OnUnregister vtable slot while it holds this file's hook
+// (ClothBuildDefer's hook then goes in front of it), else nullptr.
+void** ClothRegisterUnregisterSlot()
+{
+    return g.onUnregisterSlot && *g.onUnregisterSlot == reinterpret_cast<void*>(&OnUnregisterHook) ? g.onUnregisterSlot : nullptr;
+}
+
 void LogClothRegisterStats()
 {
     {

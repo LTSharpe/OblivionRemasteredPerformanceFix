@@ -122,6 +122,8 @@ Config LoadConfig(const wchar_t* iniPath)
     c.pacingBudgetMs = get(L"Fixes", L"PacingBudgetMs", c.pacingBudgetMs);
     c.pacingMinDistance = get(L"Fixes", L"PacingMinDistance", c.pacingMinDistance);
     c.pacingMaxLagFrames = get(L"Fixes", L"PacingMaxLagFrames", c.pacingMaxLagFrames);
+    c.clothBuildDefer = get(L"Fixes", L"ClothBuildDefer", c.clothBuildDefer) != 0;
+    c.clothDeferQuietFrames = get(L"Fixes", L"ClothDeferQuietFrames", c.clothDeferQuietFrames);
     c.pacingUseSlack = get(L"Fixes", L"PacingUseSlack", c.pacingUseSlack) != 0;
     c.pacingFlowWait = get(L"Fixes", L"PacingFlowWait", c.pacingFlowWait) != 0;
     c.pacingFlowWaitFrames = get(L"Fixes", L"PacingFlowWaitFrames", c.pacingFlowWaitFrames);

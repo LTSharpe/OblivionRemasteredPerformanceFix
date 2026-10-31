@@ -380,11 +380,13 @@ static int g_pcDtors = 0;
 static int g_pcNestParent = -1;            // the delegate id whose run completes the nested ones at once
 static void* g_pcNested[4] = {};
 static bool (*g_pcNestHook)(void*) = nullptr;
+static void (*g_pcInUnit)(int id) = nullptr;  // called inside each delegate unit (ClothBuildDefer's questions to pacing)
 static bool FakeDelExec(void* inst)
 {
     const uint8_t* p = static_cast<const uint8_t*>(inst);
     const int id = *reinterpret_cast<const int*>(p + 0x20);
     g_pcDelRan.push_back(id);
+    if (g_pcInUnit) g_pcInUnit(id);
     g_pcSeq.push_back(id);
     g_pcClock += *reinterpret_cast<const uint64_t*>(p + 0x28);
     if (id == g_pcNestParent)
@@ -565,6 +567,7 @@ static uint64_t HashWords(uint64_t seed, const void* data, size_t bytes)
 #include "selftest_pso.h"          // PsoPrecompileFast's sites, trampoline and mode choices with fakes
 #include "selftest_destroybatch.h" // PhysicsDestroyBatch: sites and the wrapper with fakes
 #include "selftest_clothreg.h"    // ClothRegisterLite: sites, lite builds and their completion with fakes
+#include "selftest_clothdefer.h"     // ClothBuildDefer: sites, hooks and the defer rule (after ClothRegisterLite)
 #include "selftest_animpar.h"      // AnimTeardownParallel's shapes and the helper queue with fakes
 #include "selftest_cellbuf.h"      // CellBufferPacedEvict's shapes, the clamp stub and the buffer LRU with and without the fix
 #include "selftest_ledger.h"       // diagnostic HitchLedger: sites, record/ring/csv format, cost per frame
@@ -3595,6 +3598,50 @@ int wmain(int argc, wchar_t** argv)
                 NpcPacingTestFade(reinterpret_cast<const uint8_t* (*)()>(fcls));
             }
         }
+
+        // ClothBuildDefer's owner lookup: three delegates whose owner is like an equipment unit's (the character's body
+        // pairing component: no pointer at the actor's root-component offset), its outer a far actor. Pacing's walk ends at
+        // that owner: the units count as near and all run in their frame, as on main. Asked from inside them,
+        // NpcPacingDistantUnit and NpcPacingStillDistant walk on to the far actor, so a robe built there may wait
+        {
+            static FakeActor owActor{}, owRoot{}, owEquip{};
+            *reinterpret_cast<void**>(owActor.bytes + 0x1A0) = &owRoot;
+            *reinterpret_cast<void**>(owRoot.bytes + 0x20) = &owActor;
+            *reinterpret_cast<double*>(owRoot.bytes + 0x280) = 30000.0;
+            *reinterpret_cast<uintptr_t*>(owEquip.bytes + 0x1A0) = 0x10;  // no pointer: reading its outer faults
+            *reinterpret_cast<void**>(owEquip.bytes + 0x20) = &owActor;
+            static FakeDelInst ow[3]{};
+            for (int k = 0; k < 3; ++k) {
+                ow[k] = FakeDelInst{};
+                ow[k].vtable = reinterpret_cast<void*>(0x1234);
+                ow[k].weak = &owEquip;
+                ow[k].id = 90 + k;
+                ow[k].costUs = 6000;
+            }
+            static int askedFar, askedStill;
+            static uint64_t askedOwner;
+            askedFar = askedStill = 0;
+            askedOwner = 0;
+            g_pcInUnit = [](int) {
+                uint64_t owner = 0, frame = 0;
+                if (NpcPacingDistantUnit(&owner, &frame)) {
+                    ++askedFar;
+                    askedOwner = owner;
+                }
+                if (NpcPacingStillDistant(reinterpret_cast<uint64_t>(&owEquip))) ++askedStill;
+            };
+            g_pcDelRan.clear();
+            PcPost(kFakeEnd, 0, 0);
+            run(fakeMgr, -1);
+            for (int k = 0; k < 3; ++k) del(&ow[k]);
+            const size_t inFrame = g_pcDelRan.size();
+            end(fakeMgr, nullptr, 2, 0);
+            g_pcInUnit = nullptr;
+            Check(inFrame == 3 && g_pcDelRan == std::vector<int>({90, 91, 92}) && NpcPacingTestRead().fifo == 0 && !g_pcDeadlock,
+                  "pacing: an owner that faults at the root-component offset ends pacing's walk: near, all run at once (as on main)");
+            Check(askedFar == 3 && askedOwner == reinterpret_cast<uint64_t>(&owEquip) && askedStill == 3,
+                  "pacing (ClothBuildDefer): asked inside those units, the guarded walk reaches the far actor (a robe built there may wait)");
+        }
         SetNpcPacing(false, 4, 4096, 15, false);
         LogNpcPacingStats();
     }
@@ -3910,6 +3957,7 @@ int wmain(int argc, wchar_t** argv)
     }
 
     clr::ClothRegSelfTest(game);  // ClothRegisterLite (lab: also ClothRegisterSkip, ClothRegisterVerify)
+    cdf::ClothDeferSelfTest(game);  // ClothBuildDefer (its hooks run inside ClothRegisterLite's, as in the game)
 
     // ParallelStaticBodies: InitStaticBodies' call of CreateShapesAndActors (build 19115871), then the split against a fake.
     if (Installed(FindParallelStaticBodies(), "static bodies: InitStaticBodies' call found")) {

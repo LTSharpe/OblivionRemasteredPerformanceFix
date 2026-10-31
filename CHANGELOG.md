@@ -9,6 +9,14 @@ Downloads, checksums and build attestations: https://github.com/LTSharpe/Oblivio
 Bug fixes say whose bug it was: **game bug** = also happens without OblivionPerfFix (in the game, its engine or a
 driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 
+## Unreleased
+- **New: fewer hitches where robed characters appear in the distance** (`ClothBuildDefer`, on; a timing change of
+  `NpcCreationPacing`'s kind, not a bug fix): a far-away character you cannot see built its robe's or cape's cloth
+  simulation in the middle of its creation, often two or three times. That first build now waits a few frames and the
+  repeated requests become one build; it is made at once when the character comes near or into view, and after at most
+  60 frames. Nobody sees the robe before it is built; the cloth looks and moves the same. Installed at start-up with the
+  version.dll route; needs `NpcCreationPacing`. New key `ClothBuildDefer` (1; 0 = off).
+
 ## 1.2.3-beta
 For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Thanks to MitochondriaOverlords for issue #5,
 to mkusm for pull request #25, to cgisquet for pull request #19, to Hexaae for issue #27, and to everyone who reported
