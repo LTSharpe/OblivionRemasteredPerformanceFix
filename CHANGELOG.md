@@ -9,6 +9,15 @@ Downloads, checksums and build attestations: https://github.com/LTSharpe/Oblivio
 Bug fixes say whose bug it was: **game bug** = also happens without OblivionPerfFix (in the game, its engine or a
 driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 
+## Unreleased
+
+- **Benchmark:** a run now says when your own `Engine.ini` (`Documents\My Games\Oblivion Remastered\Saved\Config\Windows`)
+  holds settings the game does not write itself, usually an engine-tweak mod's file, which stays there after an
+  uninstall: a warning in the report (and the stock-vs-fix report) with how many settings, in which sections, and the
+  file's first comment, and `engineIni` in `result.json`. Every benchmark game runs with those settings, so such results
+  are not the stock game's. With a read-only `Engine.ini`, `-IniCvars` now stops with a clear message instead of
+  "access denied".
+
 ## 1.2.4-beta
 For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Thanks to Mishu117 for pull requests #33, #34,
 #35 and #36, to mkusm for pull request #31, to solir2 for the ROG Ally report, and to everyone who reported results and

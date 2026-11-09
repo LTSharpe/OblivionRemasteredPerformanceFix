@@ -230,6 +230,7 @@ tools\Sample-Timeline.ps1 -OutPrefix captures\t1 -Seconds 10          # the samp
 | `frameCapture: cpu-only` in a result | PresentMon could not follow frames to the display; frame times are CPU-side, GPU busy is missing. The log has a `PresentMon diagnosis:` line |
 | your game or Documents folder isn't found | set `$env:OBLIVION_GAME_DIR` (the folder with `OblivionRemastered\`) or `$env:OBLIVION_SAVED_DIR` (`...\My Games\Oblivion Remastered\Saved`); `tools\GamePaths.ps1` shows what it found. A copy of the game outside Steam (no `steam_api64.dll` in the folder) is started directly |
 | UE4SS state unclear | `tools\Install-UE4SS.ps1 -Status` |
+| a warning that `Engine.ini has N setting(s) of your own` | your `...\Saved\Config\Windows\Engine.ini` holds settings the game does not write (usually an engine-tweak mod's file; it stays there after an uninstall). Every benchmark game runs with them, so the results are not the stock game's: rename the file (the game makes a fresh one) to measure without them. A read-only `Engine.ini` also stops `-IniCvars` |
 
 **Paths and privacy.** The game and its Documents folder are found through Steam's library list (`tools\GamePaths.ps1`;
 with Documents on OneDrive, the game still uses `C:\Users\<you>\Documents`). The runner's working files go to `run\`
