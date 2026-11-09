@@ -216,6 +216,16 @@ struct State {
 std::atomic<bool> g_lumenOn{false};
 std::atomic<uint64_t> g_lumenCalls{0}, g_lumenKept{0};
 std::atomic<int32_t> g_lumenCapacity[kLumenSites];  // largest ArrayMax seen per array (for the log)
+// LumenGroupsPrior (entries; 0 = off) and its commit gate; set once a second from the ini (SetLumenGroupsPrior).
+std::atomic<int64_t> g_lumenGroupsPrior{0};
+std::atomic<int64_t> g_lumenPriorRoomMB{2048};  // commit room that must be left beyond the prior's block
+std::atomic<int64_t> g_priorTestRoomMB{-1};     // self-test only: pretend commit room (MB); -1 = the monitor's sample, -2 = unknown
+std::atomic<int64_t> g_priorTestFreeMB{-1};     // self-test only: pretend available commit (MB, without page file growth)
+// The last prior decision, logged by the monitor thread (the grow runs on a worker inside the Lumen task the render thread
+// waits for: no file write there). seq counts decisions; the fields are those of the latest.
+std::atomic<uint64_t> g_priorSeq{0}, g_priorTaken{0}, g_priorRefused{0};
+std::atomic<int64_t> g_priorEvtNum{0}, g_priorEvtFrom{0}, g_priorEvtPrior{0}, g_priorEvtRoomMB{-1}, g_priorEvtFreeMB{-1};
+std::atomic<bool> g_priorEvtTaken{false};
 std::atomic<int32_t> g_lumenPeakGroups{0};           // largest PrimitiveGroups.Num seen (the grow policy's memory)
 std::atomic<uint64_t> g_lumenGrows{0}, g_lumenGrowsEnlarged{0};
 const char* const kLumenArrayNames[kLumenSites] = {"PrimitiveGroups", "Heightfields", "MeshCards", "Cards", "PageTable"};
@@ -274,6 +284,17 @@ using GrowFn = void (*)(void* array, int32_t oldNum);
 // a larger Num, then put Num back: the array gets more spare capacity, the elements and Num are what the game set.
 // Policy: at least double the capacity; and when a new Lumen scene (after a door, a fast travel or a load) already holds
 // an eighth of the most this session has needed, go straight to that peak plus a quarter.
+// LumenGroupsPrior (2026-11-03, workers lumenwait / lumenprior): in a session's first dense exterior there is no peak yet,
+// so the array doubled its way up (15-17 grows to ~2.5M entries) and the last doublings copied 50-100 MB each (the 1.26M
+// -> 2.5M copy: 20-63 ms while the render thread waited; a late 1.57M -> 3.15M copy 22 min into a play session). Once a
+// scene holds 1/32 of the prior (81,250 entries, a ~6 MiB copy for the default 2.6M), the grow goes straight to the prior.
+// It only ever gives a larger block than the rule above (never a smaller one); a grow past the prior uses the rule above.
+// The block is committed at once (198 MiB for 2.6M; its pages take RAM only as entries are written), so it is taken only
+// while Windows' commit room (available commit + page file growth room, the memory monitor's last sample) stays at least
+// g_lumenPriorRoomMB (2x MemoryReliefCommitMB: the level at which MemoryRelief gives memory back again) beyond the block,
+// and the available commit alone holds the block (so Windows never has to grow the page file while the Lumen task, and
+// the render thread behind it, wait); otherwise this grow doubles as before. Under MemoryRelief's commit level (and on a shared-memory GPU) the whole fix
+// runs the game's way (g_lumenOn false), the prior with it.
 void LumenGrow(void* array, int32_t oldNum)
 {
     auto* const hdr = reinterpret_cast<int32_t*>(static_cast<uint8_t*>(array) + 8);  // [0] ArrayNum, [1] ArrayMax
@@ -284,6 +305,32 @@ void LumenGrow(void* array, int32_t oldNum)
         want = int64_t{hdr[1]} * 2;
         const int64_t peak = g_lumenPeakGroups.load(std::memory_order_relaxed);
         if (peak > 0 && num >= peak / 8 && peak + peak / 4 > want) want = peak + peak / 4;
+        const int64_t prior = g_lumenGroupsPrior.load(std::memory_order_relaxed);
+        if (prior > want && num >= prior / 32) {
+            uint64_t room = 0, avail = 0;
+            const int64_t test = g_priorTestRoomMB.load(std::memory_order_relaxed);
+            bool known = false;
+            if (test >= 0) {
+                room = static_cast<uint64_t>(test) << 20;
+                const int64_t testFree = g_priorTestFreeMB.load(std::memory_order_relaxed);
+                avail = testFree >= 0 ? static_cast<uint64_t>(testFree) << 20 : room;
+                known = true;
+            } else if (test == -1) {
+                known = LatestCommitRoom(&room, &avail);
+            }
+            const uint64_t block = static_cast<uint64_t>(prior) * 80;
+            const uint64_t need = block + (static_cast<uint64_t>(g_lumenPriorRoomMB.load(std::memory_order_relaxed)) << 20);
+            const bool take = known && room >= need && avail >= block;
+            if (take) want = prior;
+            (take ? g_priorTaken : g_priorRefused).fetch_add(1, std::memory_order_relaxed);
+            g_priorEvtNum.store(num, std::memory_order_relaxed);
+            g_priorEvtFrom.store(hdr[1], std::memory_order_relaxed);
+            g_priorEvtPrior.store(prior, std::memory_order_relaxed);
+            g_priorEvtRoomMB.store(known ? static_cast<int64_t>(room >> 20) : -1, std::memory_order_relaxed);
+            g_priorEvtFreeMB.store(known ? static_cast<int64_t>(avail >> 20) : -1, std::memory_order_relaxed);
+            g_priorEvtTaken.store(take, std::memory_order_relaxed);
+            g_priorSeq.fetch_add(1, std::memory_order_release);
+        }
         if (want > kMaxGroupsCapacity) want = kMaxGroupsCapacity;
     }
     const int64_t basis = want * 8 / 11;  // the game's slack turns this into ~want
@@ -368,16 +415,20 @@ uint32_t GpuSceneKeep(int kind, const void* key, uint32_t need, bool fresh)
         const bool toPeak = on && peak > need && need > peak / kGpuScenePeakFraction;
         const char* const unit = kind == 0 ? " instances" : " bytes";
         if (fresh || cap == 0 || need > cap) {
-            use = toPeak ? peak : need;
+            const uint32_t policy = toPeak ? peak : need;
+            use = on ? BufferFloorGrow(kind, policy, need) : policy;  // InstanceBufferFloor (render/buffer_floor.cpp): off = no change
             if (cap && !fresh) {
                 g_gsGrows[kind].fetch_add(1, std::memory_order_relaxed);
                 if (GpuSceneMB(kind, use) >= kGpuSceneSmallMB)
                     Log("[gpuscene] %s %u -> %u%s (%.0f -> %.0f MB): %s", kGpuSceneNames[kind], cap, use, unit, GpuSceneMB(kind, cap),
-                        GpuSceneMB(kind, use), use == need ? "the game grows it" : "grown straight to the session's largest");
+                        GpuSceneMB(kind, use), use == need     ? "the game grows it"
+                                               : use != policy ? "grown to InstanceBufferFloor's size"
+                                                               : "grown straight to the session's largest");
             }
             slot->capacity = use;
         } else if (need < cap) {
-            if (on && (need > cap / kGpuSceneShrinkDivisor || GpuSceneMB(kind, cap) < kGpuSceneSmallMB)) {
+            if (on && (need > cap / kGpuSceneShrinkDivisor || GpuSceneMB(kind, cap) < kGpuSceneSmallMB
+                       || BufferFloorHold(kind, need, cap))) {  // InstanceBufferFloor: the floor holds while the need is at its threshold
                 use = cap;
                 if (changed) {
                     g_gsKept[kind].fetch_add(1, std::memory_order_relaxed);
@@ -1086,8 +1137,9 @@ void LogStreamChurnStats()
     static uint64_t lastGrows = 0, lastEnlarged = 0;
     const uint64_t grows = g_lumenGrows.load(), enlarged = g_lumenGrowsEnlarged.load();
     if (g.lumenGrowCall && grows != lastGrows)
-        Log("[lumen] PrimitiveGroups grows since last report: %llu (%llu given extra room); most entries so far %d",
-            grows - lastGrows, enlarged - lastEnlarged, g_lumenPeakGroups.load());
+        Log("[lumen] PrimitiveGroups grows since last report: %llu (%llu given extra room; LumenGroupsPrior taken %llu, skipped "
+            "%llu in the session); most entries so far %d", grows - lastGrows, enlarged - lastEnlarged, g_priorTaken.load(),
+            g_priorRefused.load(), g_lumenPeakGroups.load());
     lastGrows = grows;
     lastEnlarged = enlarged;
     const uint64_t cleanMaxUs = g_uploadCleanMaxUs.exchange(0);
@@ -1151,5 +1203,51 @@ void StreamChurnTestOriginals(void* removeAt0, void* shrink1, void* buddy, void*
     if (buddy) g.buddyClean = buddy;
     if (pool) g.poolClean = pool;
 }
+
+void SetLumenGroupsPrior(int64_t entries, int minCommitRoomMB)
+{
+    if (entries < 0) entries = 0;
+    if (entries > kMaxGroupsCapacity) entries = kMaxGroupsCapacity;
+    g_lumenPriorRoomMB = minCommitRoomMB > 0 ? minCommitRoomMB : 0;
+    const long long spare = static_cast<long long>(g_lumenPriorRoomMB.load());
+    if (g_lumenGroupsPrior.exchange(entries) != entries && g.lumenGrowCall) {
+        if (entries)
+            Log("[lumen] LumenGroupsPrior %lld entries (%.0f MiB): PrimitiveGroups grows go straight there once a scene holds "
+                "1/32 of it, while Windows has the block available and the block + %lld MiB of commit room to spare",
+                static_cast<long long>(entries), entries * 80.0 / 1048576.0, spare);
+        else
+            Log("[lumen] LumenGroupsPrior 0: off (PrimitiveGroups doubles as it grows)");
+    }
+    // The grow hook's last decision (it runs inside the Lumen scene task, so it is logged here, once a second at most).
+    static uint64_t logged = 0;
+    const uint64_t seq = g_priorSeq.load(std::memory_order_acquire);
+    if (seq == logged) return;
+    const uint64_t missed = seq - logged - 1;
+    logged = seq;
+    // (Two Lumen scenes deciding within the same second could mix fields of one line: it is a log line only.)
+    const long long num = g_priorEvtNum.load(), from = g_priorEvtFrom.load(), prior = g_priorEvtPrior.load(),
+                    roomMB = g_priorEvtRoomMB.load(), freeMB = g_priorEvtFreeMB.load();
+    const double blockMB = prior * 80.0 / 1048576.0;
+    char more[64] = "";
+    if (missed) snprintf(more, sizeof more, " (and %llu earlier decisions)", static_cast<unsigned long long>(missed));
+    if (g_priorEvtTaken.load())
+        Log("[lumen] PrimitiveGroups at %lld entries (capacity %lld): grown straight to LumenGroupsPrior %lld (%.0f MiB), "
+            "commit available %.1f GB, room %.1f GB%s", num, from, prior, blockMB, freeMB / 1024.0, roomMB / 1024.0, more);
+    else if (roomMB < 0)
+        Log("[lumen] PrimitiveGroups at %lld entries (capacity %lld): LumenGroupsPrior skipped, Windows' commit not known yet: "
+            "doubled as before%s", num, from, more);
+    else
+        Log("[lumen] PrimitiveGroups at %lld entries (capacity %lld): LumenGroupsPrior skipped (commit available %.1f GB, room "
+            "%.1f GB; needs the %.0f MiB block available and the block + %lld MiB of room): doubled as before%s", num, from,
+            freeMB / 1024.0, roomMB / 1024.0, blockMB, spare, more);
+}
+
+void LumenPriorTestCommitRoom(int64_t roomMB, int64_t freeMB)
+{
+    g_priorTestRoomMB = roomMB;
+    g_priorTestFreeMB = freeMB;
+}
+
+void LumenGrowTestSetPeak(int32_t entries) { g_lumenPeakGroups = entries; }
 
 }  // namespace opf

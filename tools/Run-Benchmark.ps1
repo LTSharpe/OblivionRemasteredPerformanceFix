@@ -395,17 +395,82 @@ function Get-PendingConfig {
 
 function Restore-Config {
     if (-not (Test-Path $configPending)) { return }
+    $missing = @()
     foreach ($e in Get-PendingConfig) {
         if ($e.backup -and (Test-Path -LiteralPath $e.backup)) { Copy-Item -LiteralPath $e.backup -Destination $e.target -Force }
+        else { $missing += $e.target }
     }
     Remove-Item -LiteralPath $configPending
-    Step 'config files restored'
+    $script:ConfigNotRestored = $missing
+    if ($missing.Count) { Write-Warning "NOT restored, the backup is gone: $($missing -join ', ')" }
+    else { Step 'config files restored' }
 }
 
+# What a close really did, for its messages. $saves, $config: was there a record to restore, before the restores ran.
+$script:ConfigNotRestored = @()
+function Get-RestoreText([bool]$saves, [bool]$config) {
+    if ($config -and $script:ConfigNotRestored.Count) { return "config NOT fully restored (backup gone: $($script:ConfigNotRestored -join ', '))$(if ($saves) { ', saves restored' })" }
+    if ($saves -and $config) { return 'saves and config restored' }
+    if ($config) { return 'config restored, no save snapshot to restore' }
+    if ($saves) { return 'saves restored, no config changes to restore' }
+    'nothing to restore: no save snapshot or config changes on record, files left as they are'
+}
+
+# -Profile own / user takes the saved size as the player's. A saved size equal to the small profile's window is most
+# likely a benchmark's start-up window left behind, so that run would not be at the player's settings: it says so.
+# Only a check: it never stops a run. $null: nothing to say.
+function Get-SavedSizeWarning {
+    try {
+        $small = "$(Opt (Get-ProfileDef 'small') 'res' '')"
+        if (-not $small) { return $null }
+        $found = @()
+        foreach ($name in 'GameUserSettings.ini', 'AltarGameUserSetting.ini') {
+            $f = Join-Path $configDir $name
+            if (-not (Test-Path -LiteralPath $f)) { continue }
+            $x = $null; $y = $null
+            foreach ($line in Read-SharedLines $f) {
+                if (-not $x -and $line -match '^\s*ResolutionSizeX\s*=\s*(\d+)') { $x = $Matches[1] }
+                if (-not $y -and $line -match '^\s*ResolutionSizeY\s*=\s*(\d+)') { $y = $Matches[1] }
+            }
+            if ("${x}x$y" -eq $small) { $found += $name }
+        }
+        $sav = Join-Path $saveDir 'Save_Settings.sav'
+        if (Test-Path -LiteralPath $sav) {
+            try {   # a game that holds the file open, or a save of another format: the inis still count
+                $res = [OblvBench.SettingsSave]::Read($sav) | Where-Object { $_.Key -eq 'r.SetRes' } | Select-Object -First 1
+                if ($res -and $res.Value -match "^$([regex]::Escape($small))(\D|$)") { $found += 'Save_Settings.sav' }
+            } catch { }
+        }
+        if (-not $found.Count) { return $null }
+        "SAVED RESOLUTION: $($found -join ', ') say(s) $small, the size of the benchmark's small window. -Profile own / user runs with the saved size, so this run is at $small and is not your normal setting. If you did not choose it, an earlier run left it behind: set your resolution again in the game's options, or copy the files back from config-before in an earlier run's folder under captures\bench."
+    } catch { $null }
+}
+$script:SavedSizeWarning = $null
+function Show-SavedSizeWarning {
+    if (-not (Test-OwnProfile $prof)) { return }
+    $script:SavedSizeWarning = Get-SavedSizeWarning
+    if ($script:SavedSizeWarning) { Write-Warning $script:SavedSizeWarning }
+}
+
+# Saved before each file changes, not only at the end: any stop after that (a failed write, a killed process) still
+# gets the file restored by the run's clean-up, the next run or -Close.
+function Save-PendingConfig($list) { ConvertTo-Json @($list) | Set-Content $configPending -Encoding utf8 }
+
 function Set-RunConfig([string]$backupDir) {
+    $engineIni = Join-Path $configDir 'Engine.ini'
+    # What can refuse is checked before anything is written, so these stops leave every file as it was.
+    # tweak mods often leave Engine.ini read-only; writing it would fail with a bare "access denied"
+    if ($IniCvars.Count -and (Test-Path -LiteralPath $engineIni) -and (Get-Item -LiteralPath $engineIni).IsReadOnly) {
+        throw "Engine.ini is read-only ($engineIni; tweak mods often set that), so -IniCvars cannot write it: clear its read-only attribute or run without -IniCvars."
+    }
+    if ($FixIni.Count -and -not (Test-Path $fixIniPath)) { throw 'OblivionPerfFix is not installed (tools\Install-PerfFix.ps1), so -FixIni has nothing to configure.' }
+    foreach ($target in $Ini.Keys) {
+        $path = Join-Path $configDir (($target -split '\|', 2)[0])
+        if ((Test-Path -LiteralPath $path) -and (Get-Item -LiteralPath $path).IsReadOnly) { throw "$path is read-only, so -Ini cannot write it: clear its read-only attribute or run without that -Ini." }
+    }
+    Show-SavedSizeWarning
     New-Item -ItemType Directory -Force $backupDir | Out-Null
     $list = @()
-    $engineIni = Join-Path $configDir 'Engine.ini'
     # The game opens its window at the profile's size, windowed (or borderless for a borderless profile), never
     # at the player's: less GPU load (and fan noise) from the first frame, and nothing to resize later. UE reads
     # the size from GameUserSettings.ini at start-up, then the game applies its own options (Save_Settings.sav:
@@ -424,6 +489,7 @@ function Set-RunConfig([string]$backupDir) {
         # backed up in every profile ("own" too): the game rewrites both on exit (e.g. the frame cap the run lifts)
         Copy-Item -LiteralPath $f -Destination $backupDir -Force
         $list += [pscustomobject]@{ backup = (Join-Path $backupDir $name); target = $f }
+        Save-PendingConfig $list
         if ($res) { Set-IniValues $f '/Script/Altar.AltarGameUserSetting' ([hashtable]$window) }
     }
     $settingsSav = Join-Path $saveDir 'Save_Settings.sav'
@@ -433,18 +499,15 @@ function Set-RunConfig([string]$backupDir) {
         } catch { Step "start-up window: Save_Settings.sav not changed ($_): the game opens at the player's size first" }
     }
     if ($IniCvars.Count) {
-        # tweak mods often leave Engine.ini read-only; writing it would fail with a bare "access denied"
-        if ((Test-Path -LiteralPath $engineIni) -and (Get-Item -LiteralPath $engineIni).IsReadOnly) {
-            throw "Engine.ini is read-only ($engineIni; tweak mods often set that), so -IniCvars cannot write it: clear its read-only attribute or run without -IniCvars."
-        }
         Copy-Item -LiteralPath $engineIni -Destination $backupDir -Force
         $list += [pscustomobject]@{ backup = (Join-Path $backupDir 'Engine.ini'); target = $engineIni }
+        Save-PendingConfig $list
         Set-IniValues $engineIni 'SystemSettings' $IniCvars
     }
     if ($FixIni.Count) {
-        if (-not (Test-Path $fixIniPath)) { throw 'OblivionPerfFix is not installed (tools\Install-PerfFix.ps1), so -FixIni has nothing to configure.' }
         Copy-Item -LiteralPath $fixIniPath -Destination $backupDir -Force
         $list += [pscustomobject]@{ backup = (Join-Path $backupDir 'OblivionPerfFix.ini'); target = $fixIniPath }
+        Save-PendingConfig $list
         Set-IniValues $fixIniPath 'Fixes' $FixIni
     }
     foreach ($target in $Ini.Keys) {
@@ -454,10 +517,10 @@ function Set-RunConfig([string]$backupDir) {
         if (-not ($list | Where-Object { $_.target -eq $path })) {
             if (Test-Path $path) { Copy-Item -LiteralPath $path -Destination $copy -Force } else { Set-Content $copy '' -NoNewline -Encoding ascii }
             $list += [pscustomobject]@{ backup = $copy; target = $path }
+            Save-PendingConfig $list
         }
         Set-IniValues $path $section $Ini[$target]
     }
-    if ($list.Count) { ConvertTo-Json @($list) | Set-Content $configPending -Encoding utf8 }
 }
 
 # ---------------------------------------------------------------- the game session (process)
@@ -499,9 +562,9 @@ function Get-BaseFileHash([string]$target) {
 }
 # The player's own Engine.ini settings: every key outside the two sections the game writes itself ([Core.System] paths,
 # [WindowsApplication.Accessibility]), read from the file as the player has it. They apply to every benchmark game, so
-# a run says so (2026-10-26: a tweak mod's read-only Engine.ini from a year earlier had survived a reinstall, as Steam
-# leaves Documents\My Games alone, and was in every run on that PC). Read before the run starts a game: a game rewrites
-# a writable Engine.ini (comments and sections it does not know dropped), so afterwards the file says less. $null: none.
+# a run says so (PR #45 by luisAzcuaga: a tweak mod's read-only Engine.ini had survived a reinstall, as Steam leaves
+# Documents\My Games alone, and was in every run on his PC). Read before the run starts a game: a game rewrites a
+# writable Engine.ini (comments and sections it does not know dropped), so afterwards the file says less. $null: none.
 function Get-EngineIniTweaks {
     $target = Join-Path $configDir 'Engine.ini'
     $e = Get-PendingConfig | Where-Object { $_.target -eq $target } | Select-Object -First 1
@@ -1664,12 +1727,15 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
                         Add-Segment @{ id = "$($scene.id)/$leg"; type = 'door'; t0 = $t0; t1 = $t1; tA = $tA; arrived = [bool]$arr; activationRetries = $retries
                             shot = Save-Shot "$($scene.id)-$leg"; state = Get-BenchState; events = $events }
                         if ($ftTarget -and $arr) {
-                            # the map stays in the menu stack after the travel (menu=1, 2026-10-17 anvil-docks): a door
-                            # activated afterwards does nothing, so close it the way the player menu does
-                            for ($q = 0; $q -lt 3 -and (Get-BenchState).menu -eq '1'; $q++) { Send-Bench 'ft close' -NoThrow | Out-Null; Wait-Game 1 }
-                            $menuNow = (Get-BenchState).menu
-                            Step "  ${ftTarget}: menu=$menuNow after closing the map"
-                            if ($menuNow -eq '1') { Warn "$($scene.id)/${leg}: a menu is still open after the fast travel" }
+                            # A menu left open after the travel (2026-10-17 anvil-docks: a door activated afterwards did
+                            # nothing) is closed the way the player menu does. Since 2026-11-08 (rel130p) the click goes
+                            # through the map page's own path (bench.lua "ft go", by IconAddress) and the check counts the
+                            # menus really open (bench.lua "menus"): `state`'s menu= (the UI's IsMenuVisible) stays 1 after
+                            # any injected open and close with nothing on screen, so it warned after every fast travel.
+                            $menus = [string](Send-Bench 'menus' -NoThrow)
+                            for ($q = 0; $q -lt 3 -and $menus -match '^open=[1-9]'; $q++) { Send-Bench 'ft close' -NoThrow | Out-Null; Wait-Game 1; $menus = [string](Send-Bench 'menus' -NoThrow) }
+                            Step "  ${ftTarget}: after the travel: $menus"
+                            if ($menus -match '^open=[1-9]') { Warn "$($scene.id)/${leg}: a menu is still open after the fast travel ($menus)" }
                         }
                         $script:place = $null
                         if (-not $arr) { break }
@@ -2168,8 +2234,11 @@ if ($Close -or $Park) {
     }
     if (Get-Game) { Step 'closing the game'; Stop-BenchGame }
     if (Get-Game) { throw 'the game did not close' }
+    $hadSaves = Test-Path $guardPending; $hadConfig = Test-Path $configPending
     Restore-Config; Restore-Saves; Step (Disable-BenchUE4SS)
-    Set-BenchStatus @{ state = 'closed'; game = 'closed'; message = 'game closed, saves and config restored' }
+    $restoreText = Get-RestoreText $hadSaves $hadConfig
+    if (-not ($hadSaves -and $hadConfig)) { Step $restoreText }
+    Set-BenchStatus @{ state = 'closed'; game = 'closed'; message = "game closed, $restoreText" }
     Step 'done'
     return
 }
@@ -2223,6 +2292,7 @@ for ($run = 1; $run -le $Runs; $run++) {
                 # (2026-10-26, worker brumaburst; the behaviour is unchanged).
                 $script:ReuseIgnored = Get-ReuseIgnoredWarning
                 if ($script:ReuseIgnored) { Write-Warning $script:ReuseIgnored }
+                Show-SavedSizeWarning
             }
             if (-not $game) { Restore-Config }            # left by an earlier session
             Protect-Saves
@@ -2273,6 +2343,7 @@ for ($run = 1; $run -le $Runs; $run++) {
         if (Test-Path -LiteralPath $fixIniPath) { $result.perfFix.ini = @(Read-SharedLines $fixIniPath | Where-Object { $_ -match '^\s*\w+\s*=' }) }
         # -FixIni / -IniCvars / -Ini asked for but not in effect in a reused game (Get-ReuseIgnoredWarning)
         if ($script:ReuseIgnored -and $sessions.Count) { [void]$sessions[0].warnings.Add($script:ReuseIgnored) }
+        if ($script:SavedSizeWarning -and $sessions.Count) { [void]$sessions[0].warnings.Add($script:SavedSizeWarning) }
         # the game's command-line arguments as the game process has them (-FixedSeed since 2026-10-20)
         if (-not $SelfTest -and ($gNow = Get-Game)) {
             $cl = try { "$((Get-CimInstance Win32_Process -Filter "ProcessId=$($gNow.Id)").CommandLine)" } catch { '' }
@@ -2331,7 +2402,7 @@ for ($run = 1; $run -le $Runs; $run++) {
                 if ($policy -eq 'keep' -and $g) { if ($run -eq $Runs) { Send-Bench 'spectate off' -NoThrow | Out-Null; Set-BenchObserver $false | Out-Null; Send-Bench 'fade off' -NoThrow | Out-Null }; $gameLeft = 'left in the world' }
                 if ($policy -eq 'close' -or -not $g) {
                     if (Get-Game) { Step 'closing the game'; Stop-BenchGame }
-                    if (-not (Get-Game)) { Restore-Config; Restore-Saves; Step (Disable-BenchUE4SS); $gameLeft = 'closed (saves and config restored)' }
+                    if (-not (Get-Game)) { $hadSaves = Test-Path $guardPending; $hadConfig = Test-Path $configPending; Restore-Config; Restore-Saves; Step (Disable-BenchUE4SS); $gameLeft = "closed ($(Get-RestoreText $hadSaves $hadConfig))" }
                 } elseif ($run -eq $Runs -and ($IdleCloseMin -gt 0 -or $policy -eq 'park')) { Start-IdleWatcher }
                 if ($gameLeft -match 'parked|world') { Step "game $gameLeft. Tools\Run-Benchmark.ps1 -Close closes it and restores saves and config$(if ($IdleCloseMin -gt 0) { " (done by itself after $IdleCloseMin min without a run)" })." }
             }

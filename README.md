@@ -60,12 +60,28 @@ These compare 1.2.3 with those switches off and on (everything else on), not wit
 pre-release builds with the same code for these switches. `PhysAnimNoEmptyLock` and `RigTraceReuse` need the
 `version.dll` route (with OBSE64 they stay off); `ChaosMaxPayloadSize` and `PacingLeanFlowDrain` work on both.
 
-**New in 1.2.4:** fewer hitches where robed characters appear in the distance (`ClothBuildDefer`, pull request #31 by
-mkusm; Peryite's Shrine, `npcburst-visual`, scene `peryite-short`: the NPC work in the creation frames 181 -> 110 ms
-on our PC), the world back sooner after doors (`StreamBehindLoadingScreen`, pull request #34 by Mishu117), the HDR
-autosave stall taken off the main thread (his measurements: pull request #33), a start-up crash of ours fixed, five
-game bugs fixed and a new section of optional tweaks (pull requests #33 to #36 by Mishu117), and less memory kept on
-16 GB handhelds. Details: [CHANGELOG.md](CHANGELOG.md).
+**New in 1.3.0.** Against 1.2.4, all switches at their defaults (ours: RX 9070 XT, Ryzen 7 5800X, 4K, FSR Performance,
+frame generation, 60 cap, the public save-free flights `showcase` and `bravil-road`, 3 fresh games each): the Imperial
+City flight has about a third of the slow frames (frames of 33 ms or more 23 -> 8 per flight) and 14 % less time over
+16.7 ms, and the road to Bravil 30 % less time over 16.7 ms (4.6 -> 3.2 s per run). What changed (each switch's own
+measurements, and which of them come from lab routes or play, are in [CHANGELOG.md](CHANGELOG.md)): **Fewer stutters
+while travelling.** On AMD cards with 16 GB or more, the graphics driver's command memory is made ready before you enter
+the world (`CmdMemPregrow`; on its own, `bravil-road` frames of 33 ms or more 13 -> 1 in 3 runs). The land behind you is
+taken apart over a few frames instead of in one (`BodyRemovalSpread`), arriving land is added in smaller steps
+(`StreamRegisterGranularity`), and the characters' route searches after the land changes run on helper threads, with the
+same routes (`RepathParallel`). **Crowds and fights:** a new character's animation rig is copied from the first of its
+kind (`RigImportTemplate`), the first horse or creature of its kind far away no longer waits for the disk
+(`CreatePreload`), far calm characters and horses move 30 times a second (`FarPawnMoveHalfRate`, `FarHorseMove`), and
+big fights wait less for the old engine (`OtFrameTrim`, `LooseMissCache`). **Menus and loading screens:** the map opens
+faster (`MapPopupSpread`), menu backgrounds are made on the graphics card (`GpuMenuShot`), no water redraws after
+closing a menu (`WaterInfoSkip`), and the area you arrive in appears sooner (`DrawBehindLoadingScreen`). Game bugs
+fixed: a rare crash on arrival (`PairReleaseOnce`, a game bug our character pacing exposed) and menus opening a little
+slower after every fast travel (`SaveThumbLeftoverFix`, a game bug, also without the mod). Our bug fixed: writing the
+log could hold up the game. Most of these give the game's own result; some give an **equivalent** one, the same work a
+little later or another way (for example, far land's invisible collision stays up to half a second longer, a newly
+loaded cell appears 0.1-0.3 s later), and `FarPawnMoveHalfRate` / `FarHorseMove` are **not identical**: calm characters
+and horses 100 m or more away move in steps, as on a PC that runs the game at 30 fps. Each switch is on by default; set
+it to 0 in `OblivionPerfFix.ini` to get 1.2.4's behaviour.
 
 ![Cheydinhal at 4K, average fps, stock game vs the fix](docs/images/cheydinhal-4k.png)
 
@@ -106,7 +122,7 @@ we expect those rows to be unchanged or better now; we have not re-measured them
 | Steam, no mod manager | the four steps above |
 | Vortex or Mod Organizer 2 | install the same zip as a mod: it has the game's folder layout. In Mod Organizer 2 the files must land in the game's folder, not in `Data` (use its Root Builder plugin, or extract by hand) |
 | OBSE64, or another mod that already uses `version.dll` (some upscaler mods do) | don't overwrite that `version.dll`: download `OblivionPerfFix-<version>-OBSE.zip` instead and extract it into the game folder. It puts `OblivionPerfFix.dll` and its ini into `OblivionRemastered\Binaries\Win64\OBSE\Plugins\`, where OBSE64 loads it. Many fixes can only be put in place before the game's own code runs and stay off on this route ([which ones](#obse64-route-what-stays-off)); the log says so for each. If both are installed, the fix loads once |
-| Xbox / PC Game Pass (experimental) | download `OblivionPerfFix-<version>-GamePass.zip`; its files go into `OblivionRemastered\Binaries\WinGDK\` in the game's folder (usually `C:\XboxGames\The Elder Scrolls IV - Oblivion Remastered\`). Reported working by a few players; less tested than Steam: the log says which fixes found their code, and no log at all means it didn't load. A [test report](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/new/choose) helps everyone |
+| Xbox / PC Game Pass (experimental) | download `OblivionPerfFix-<version>-GamePass.zip`; its files go into `OblivionRemastered\Binaries\WinGDK\` in the game's folder (usually `C:\XboxGames\The Elder Scrolls IV - Oblivion Remastered\`). Reported working by a few players; less tested than Steam: the log says which fixes found their code, and no log at all usually means it didn't load. A [test report](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/new/choose) helps everyone |
 | Steam Deck / Linux (one Linux report so far; Steam Deck untested) | as for Steam, then add `WINEDLLOVERRIDES="version=n,b" %command%` to the game's launch options |
 
 **Check where the files landed** (a mod manager can put them in the wrong folder):
@@ -117,12 +133,18 @@ we expect those rows to be unchanged or better now; we have not re-measured them
 | `OblivionPerfFix-<version>-OBSE.zip` | `OblivionPerfFix.dll`, `OblivionPerfFix.ini` | `OblivionRemastered\Binaries\Win64\OBSE\Plugins\` |
 | `OblivionPerfFix-<version>-GamePass.zip` | `version.dll`, `OblivionPerfFix.ini` | `OblivionRemastered\Binaries\WinGDK\` |
 
-The log, `OblivionPerfFix.log`, appears next to the DLL at the first start; no log means the fix was not loaded.
+The log, `OblivionPerfFix.log`, appears next to the DLL at the first start. No log usually means the fix was not loaded,
+but not always:
+
+| You see | What it means |
+|---|---|
+| no `OblivionPerfFix.log`, or only an old one | Check the folders above: usually the fix did not load. But if that one file can't be written (a game process that did not fully close still holds it: look in Task Manager; or a folder the game may not write to), the fix runs on and since 1.2.5 logs to `OblivionPerfFix.<number>.log` in the same folder or, failing that, in `%TEMP%`; the first lines there say why. Before 1.2.5 it logged nothing in that case. With Mod Organizer 2 also look in its Overwrite folder. `LogFile=0` in the ini means no log at all |
+| `game build not recognised` near the top of the log | Your game's exe is not the build this version was made for (an update, a beta branch, an older copy). Harmless: each fix looks for its own code, and any it can't find stays off, with a line saying so, while the game runs as without it. Features that need such a fix are missing too (on one such build, the HDR menu rows). Quote that line in a [bug report](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/new/choose): it names the build |
 
 ### OBSE64 route: what stays off
 
 OBSE64 loads its plugins after the game's own code has started, and many fixes can only be put in place before that.
-With the OBSE package these stay off (the log says so for each): `ViewRenameGuard`, `NpcFadeInNoRebuild`, `FrozenClothStretchFix`, the four `WaterCapture*` fixes, `RayTracingBuildBatch`, `RtSceneBufferKeep`, `InstanceClearReserve`, `OsPageCache`, `NavLinkFast`, `ParallelStaticBodies`, `PipelinedBodyCreation`, `DirtyTreeQuickInsert`, `BulkIndexInsert`, `PhysicsPushParallel`, `PhysicsDestroyBatch`, `PhysAnimNoEmptyLock`, `NpcBodiesOneLock`, `ClothRegisterLite`, `RigVmHashMemo`, `RigLogicMapCache`, `RigTraceReuse`, `AnimTeardownParallel`, `CellBufferPacedEvict`, `ClothBuildDefer`, `ScreenshotReadbackConvert`, `ScreenshotParallel`, `SaveBytesBulk`, `SaveRefIdIndex`, `MenuOpenFlashFix`, `ShaderScreenAfterDriverChange`, `BowSneakAttackFix`, `AutosaveFollowsMenu`, `FrameGenCameraInfo`, `FrameGenPacingTuning`, `TaskWaitDeadlockGuard` (and `PsoCompileThreadPool`, which needs it), and the diagnostics `HitchLedger` and `HitchLedgerTickSplit`; `FrameGenAsyncCompute` keeps the game's value. The others work on both routes,
+With the OBSE package these stay off (the log says so for each): `ViewRenameGuard`, `NpcFadeInNoRebuild`, `FrozenClothStretchFix`, the four `WaterCapture*` fixes, `RayTracingBuildBatch`, `RtSceneBufferKeep`, `InstanceClearReserve`, `OsPageCache`, `NavLinkFast`, `ParallelStaticBodies`, `PipelinedBodyCreation`, `DirtyTreeQuickInsert`, `BulkIndexInsert`, `PhysicsPushParallel`, `PhysicsDestroyBatch`, `BodyRemovalSpread`, `StreamRegisterGranularity`, `PhysAnimNoEmptyLock`, `NpcBodiesOneLock`, `ClothRegisterLite`, `RigVmHashMemo`, `RigLogicMapCache`, `RigTraceReuse`, `AnimTeardownParallel`, `CellBufferPacedEvict`, `ClothBuildDefer`, `ScreenshotReadbackConvert`, `ScreenshotParallel`, `SaveBytesBulk`, `SaveRefIdIndex`, `MenuOpenFlashFix`, `ShaderScreenAfterDriverChange`, `BowSneakAttackFix`, `AutosaveFollowsMenu`, `SaveThumbLeftoverFix`, `FrameGenCameraInfo`, `FrameGenPacingTuning`, `TaskWaitDeadlockGuard` (and `PsoCompileThreadPool`, which needs it), `PairReleaseOnce`, and the diagnostics `HitchLedger` and `HitchLedgerTickSplit`; `FrameGenAsyncCompute` keeps the game's value. The others work on both routes,
 among them `ChaosMaxPayloadSize`, `NpcCreationPacing`, `NaniteInitialRootPages`, `FrameRateLimitAtStart`,
 `PsoPrecompileFast` and the Lumen, upload and GPU-scene memory fixes. If you can, use the `version.dll` package.
 
@@ -216,13 +238,17 @@ Several steps of that pipeline run on **a single CPU thread**, and when one of t
 why Cheydinhal can run at 30-40 fps while Task Manager shows the CPU only about 30% busy, and why the game hitches each
 time a new part of the world streams in.
 
-The fix is one small DLL that loads with the game. For each of its fixes (about fifty) it finds the specific place in
+The fix is one small DLL that loads with the game. For each of its fixes (about eighty) it finds the specific place in
 the game's code, checks that it is exactly what it expects, and changes how that code works, in memory only. Each change does **the same work in a
-cheaper way**. Two of them change only *when* something happens: far-away characters you can't see are built a few
-frames later, and the cells behind you are unloaded a few frames later, both in the game's own order. Two more can at
-most settle an exact tie or a split-second race differently, in ways the game itself already varies (a horse's repeated
-ground check, the order in which collision checks look at nearby shapes). Those are the performance improvements (part 1
-of the ini). The game bug fixes (part 2) change what the game does, back to what it was meant to do, and the optional
+cheaper way**. Some change only *when* something happens, by a few frames or a fraction of a second, in the game's own
+order: far-away characters you can't see are built a few frames later, the cells behind you are unloaded later, far
+land's invisible collision is taken down over half a second, arriving land is added in smaller steps (a new cell appears
+0.1-0.3 s later), water pictures are redrawn at most one per frame. Others reach the same result another way (a copied
+animation rig, a skipped redraw of an unchanged water picture), or can at most settle an exact tie or a split-second
+race differently, in ways the game itself already varies (a horse's repeated ground check, the order in which collision
+checks look at nearby shapes). One is not identical, on by default and easy to switch off: far-away calm characters and
+horses move 30 times a second (`FarPawnMoveHalfRate`, `FarHorseMove`). Those are the performance improvements (part 1 of
+the ini). The game bug fixes (part 2) change what the game does, back to what it was meant to do, and the optional
 tweaks (part 3, all off) change the look or the play on purpose, only if you switch them on.
 
 | Area | What was slow or broken | What the fix does |
@@ -238,8 +264,11 @@ tweaks (part 3, all off) change the look or the play on purpose, only if you swi
 | **Horses and collision checks** (1.2.3) | Near horses, the game's main thread waited for an exclusive physics lock that animation parts with nothing to move took every frame, and the horses repeated the same ground check about 12 times a frame; every collision check in the game first went through a list of about 730 huge shapes from all over the map | skip the empty update, answer a repeated check with its first answer, file the huge shapes in the search tree like everything else: **about 1.2-1.4 ms less main-thread work per frame** at those places |
 | **Characters with robes** (1.2.4) | A far-away character you cannot see built its robe's cloth simulation in the middle of its creation, often two or three times | build it once, a few frames later (at once when it comes near or into view; pull request #31 by mkusm) |
 | **Doors** (1.2.4) | After a door or a fast travel the game held the last loading-screen image until the new area's textures were streamed back in | stream them while the loading screen is still idling (pull request #34 by Mishu117) |
+| **Travel: land and routes** (1.3.0) | Behind you, the game took apart thousands of invisible collision bodies of rock and plant fields in a few frames; ahead, it added land ten objects at a time, and one object can bring a thousand collision bodies; when the land changed, every walking character's route was searched again, one after another, on the main thread | take the bodies apart over up to 30 frames, add land one object at a time, run the route searches on helper threads and use a result only when everything it read is the same; on AMD cards with 16 GB or more, the driver's command memory made ready before you enter the world |
+| **Crowds and fights** (1.3.0) | Each new character built its animation rig bone by bone; the first horse or creature of its kind made the main thread wait for the disk; in big fights the main thread waited for the old engine's thread, which slept 1-2 ms every frame and asked the disk about voice files that never exist | copy the rig from the first one of its kind; load the files in the background first, a few frames earlier; end that sleep when the path finder is done and remember the missing voice files; far calm characters and horses move 30 times a second (not identical, switchable) |
+| **Menus and loading screens** (1.3.0) | The map built its markers three to five times in one frame; a menu's background picture waited for a copy back from the graphics card; menus redrew every lake's water picture with nothing changed; the arriving area's first frame did all its first-time work as the loading screen faded | build the markers once, make the picture on the graphics card, skip unchanged water redraws, draw the area for 3 frames behind the loading screen |
 | **Handhelds, integrated graphics** (1.2.4) | there the graphics use the PC's RAM, so the memory our fixes keep to avoid stutter can be missing for the game and Windows on 16 GB devices | on such a PC with Windows and under 20 GB of RAM, those fixes act as the game (`SharedMemoryGpu`; the 24 GB Ally X, Proton, CrossOver and Mac players are unaffected) |
-| **Crashes and bugs** (part 2 of the ini) | crashes in the game's name table, its trap code, Unreal's video-memory tidying (UE-217692) and AMD's frame generation library; FSR left off after an alt-tab; a bright flash when the menu opens; since 1.2.4 (pull requests #33 and #35 by Mishu117): no shader screen after a driver update, "Show VRAM" stuck at 0/0, the wrong native resolution of very wide monitors, bow sneak attacks at 1x, magenta specks on skin above 4K | each guarded so the game carries on as it would have; FSR comes back by itself; the menu opens onto its normal background; the game does what it was meant to. Switch any of them off to stay closer to the stock game |
+| **Crashes and bugs** (part 2 of the ini) | crashes in the game's name table, its trap code, Unreal's video-memory tidying (UE-217692) and AMD's frame generation library; FSR left off after an alt-tab; a bright flash when the menu opens; since 1.2.4 (pull requests #33 and #35 by Mishu117): no shader screen after a driver update, "Show VRAM" stuck at 0/0, the wrong native resolution of very wide monitors, bow sneak attacks at 1x, magenta specks on skin above 4K; since 1.3.0: a rare crash on arrival, menus opening slower after every fast travel | each guarded so the game carries on as it would have; FSR comes back by itself; the menu opens onto its normal background; the game does what it was meant to. Switch any of them off to stay closer to the stock game |
 | **Optional tweaks** (part 3 of the ini, all off) | trade-offs some players want: the world unfrozen behind the loading screen, streamed textures kept or uploaded faster, HDR gamma 2.2, HDR menu backgrounds and save thumbnails, HDR and HUD rows in the Graphics menu, DLSS Ray Reconstruction (pull requests #34 and #36 by Mishu117) | nothing unless you switch it on: they may change the look or how the game plays |
 
 Every fix, its switch and its numbers, in plain words: [docs/how-it-works.md](docs/how-it-works.md). The measurements
@@ -327,14 +356,15 @@ rain, and little for the CPU to do, so it shows what your graphics card can carr
 ## Uninstall
 
 Delete `version.dll`, `OblivionPerfFix.ini`, the `OblivionPerfFix*.log` files and `OblivionPerfFix-gpu.txt` from
-`OblivionRemastered\Binaries\Win64\` (Game Pass: `Binaries\WinGDK\`; OBSE route: your file in `OBSE\Plugins\`).
-That's all: the fix changes nothing on disk, and your saves don't depend on it.
+`OblivionRemastered\Binaries\Win64\` (Game Pass: `Binaries\WinGDK\`; OBSE route: your file in `OBSE\Plugins\`), and any
+`OblivionPerfFix.<number>.log` in `%TEMP%` (there only if the normal log could not be written). That's all: the fix changes nothing on disk, and your saves don't depend on it.
 
 ## Is it safe?
 
 - **What it does:** every change happens in memory while the game runs; the game's files are never modified.
 - **What it doesn't do:** no internet access, no registry, and it writes no files other than its own log next to itself
-  (this session's and the last two, at most 8 MB each; plus a stutter report if you switch that diagnostic on), and
+  (this session's and the last two, at most 8 MB each; plus a stutter report if you switch that diagnostic on; if that log
+  can't be written, `OblivionPerfFix.<number>.log` there or in `%TEMP%`, at most three in each place), and
   `OblivionPerfFix-gpu.txt`, one line naming your graphics card and driver version (`ShaderScreenAfterDriverChange`). The DLL
   links only to Windows' `kernel32.dll`, and the only other DLL it loads is Windows' own `version.dll`, the one it
   stands in for.
@@ -400,7 +430,7 @@ and AMD CPUs, with DLSS and FSR, on Steam and Game Pass and through OBSE64 (the 
 ([Check it on your PC](#check-it-on-your-pc-before--after)).
 
 **Will it break when the game updates?** It shouldn't break the game: anything it can't find exactly, it leaves alone and
-logs. A fix that switched itself off needs a new release to come back.
+logs (and the log says `game build not recognised`). A fix that switched itself off needs a new release to come back.
 
 **I don't see a difference.** Then your graphics card is probably the limit where you are: the frame rate then
 depends on your graphics settings, and the fix can add little to it. The fix helps most where the CPU is the limit:
@@ -475,7 +505,7 @@ game update.
 
 Researched and built by Claude (Anthropic), directed and tested by [LTSharpe](https://github.com/LTSharpe). Code
 contributions by [Mishu117](https://github.com/Mishu117) (pull requests #33-#36), [mkusm](https://github.com/mkusm)
-(#25, #31), [cgisquet](https://github.com/cgisquet) (#19) and [luisAzcuaga](https://github.com/luisAzcuaga) (#11),
+(#25, #31), [cgisquet](https://github.com/cgisquet) (#19) and [luisAzcuaga](https://github.com/luisAzcuaga) (#11, #45),
 thank you; everyone who reported results and problems is thanked in [CHANGELOG.md](CHANGELOG.md). MIT licence: see
 [LICENSE](LICENSE).
 

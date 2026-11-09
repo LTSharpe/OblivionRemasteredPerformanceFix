@@ -184,9 +184,11 @@ struct Sample {
     uint64_t commitGrow;                                  // room the page files can still grow by (PageFileGrowRoom)
     uint64_t priv, ws;                                    // the game process
     uint64_t vram, vramBudget, shared, sharedBudget;      // the game on its GPU (0 = not known yet)
+    uint32_t frames, worstFrameUs, gpuFrameUs;            // game-thread frames in the second before, the longest, GPU time (HitchLedger)
+    bool framesKnown;
 };
 
-constexpr int kRing = 32;
+constexpr int kRing = 64;  // a minute at one sample per second (the GPU crash report prints them all)
 Sample g_ring[kRing];
 std::atomic<unsigned> g_ringNext{0};
 
@@ -299,6 +301,9 @@ bool g_largestGpuAsked = false;
 
 // The latest sample's video memory (bytes; 0 = not known yet), for VramCounterFix's game-thread reads.
 std::atomic<uint64_t> g_lastVram{0}, g_lastVramBudget{0};
+// The latest sample's commit room (available commit + page file growth room, bytes), for LumenGroupsPrior's gate.
+std::atomic<uint64_t> g_lastCommitRoom{0}, g_lastCommitFree{0};
+std::atomic<bool> g_commitKnown{false};
 
 }  // namespace
 
@@ -309,6 +314,14 @@ bool LatestGameVram(uint64_t* used, uint64_t* budget)
     *used = g_lastVram.load(std::memory_order_relaxed);
     *budget = g_lastVramBudget.load(std::memory_order_relaxed);
     return *budget != 0;
+}
+
+bool LatestCommitRoom(uint64_t* room, uint64_t* available)
+{
+    const bool known = g_commitKnown.load(std::memory_order_acquire);  // first: the values below are at least that sample's
+    *room = g_lastCommitRoom.load(std::memory_order_relaxed);
+    *available = g_lastCommitFree.load(std::memory_order_relaxed);
+    return known;
 }
 
 GpuMemoryKind GameGpuMemoryKind() { return static_cast<GpuMemoryKind>(g_gpuKind.load()); }
@@ -797,56 +810,233 @@ void Append(char* buf, size_t size, size_t& len, const char* text)
     buf[len] = 0;
 }
 
-// One line per command list that the GPU had started but not finished: where it stopped, as the open pass markers.
+const char* OpName(D3D12_AUTO_BREADCRUMB_OP op)
+{
+    switch (op) {
+    case D3D12_AUTO_BREADCRUMB_OP_SETMARKER: return "marker";
+    case D3D12_AUTO_BREADCRUMB_OP_BEGINEVENT: return "begin";
+    case D3D12_AUTO_BREADCRUMB_OP_ENDEVENT: return "end";
+    case D3D12_AUTO_BREADCRUMB_OP_DRAWINSTANCED: return "draw";
+    case D3D12_AUTO_BREADCRUMB_OP_DRAWINDEXEDINSTANCED: return "draw indexed";
+    case D3D12_AUTO_BREADCRUMB_OP_EXECUTEINDIRECT: return "execute indirect";
+    case D3D12_AUTO_BREADCRUMB_OP_DISPATCH: return "dispatch";
+    case D3D12_AUTO_BREADCRUMB_OP_COPYBUFFERREGION: return "copy buffer";
+    case D3D12_AUTO_BREADCRUMB_OP_COPYTEXTUREREGION: return "copy texture";
+    case D3D12_AUTO_BREADCRUMB_OP_COPYRESOURCE: return "copy resource";
+    case D3D12_AUTO_BREADCRUMB_OP_COPYTILES: return "copy tiles";
+    case D3D12_AUTO_BREADCRUMB_OP_RESOURCEBARRIER: return "barrier";
+    case D3D12_AUTO_BREADCRUMB_OP_CLEARRENDERTARGETVIEW: return "clear RT";
+    case D3D12_AUTO_BREADCRUMB_OP_CLEARUNORDEREDACCESSVIEW: return "clear UAV";
+    case D3D12_AUTO_BREADCRUMB_OP_CLEARDEPTHSTENCILVIEW: return "clear depth";
+    case D3D12_AUTO_BREADCRUMB_OP_BUILDRAYTRACINGACCELERATIONSTRUCTURE: return "build RT structure";
+    case D3D12_AUTO_BREADCRUMB_OP_COPYRAYTRACINGACCELERATIONSTRUCTURE: return "copy RT structure";
+    case D3D12_AUTO_BREADCRUMB_OP_DISPATCHRAYS: return "dispatch rays";
+    case D3D12_AUTO_BREADCRUMB_OP_DISPATCHMESH: return "dispatch mesh";
+    case D3D12_AUTO_BREADCRUMB_OP_WRITEBUFFERIMMEDIATE: return "write immediate";
+    case D3D12_AUTO_BREADCRUMB_OP_BEGIN_COMMAND_LIST: return "list start";
+    default: return "op";
+    }
+}
+
+// A command list's breadcrumb contexts (the marker names) in index order: a cursor over the array, which the runtime keeps
+// sorted by index; ContextAt for anything out of order.
+struct Contexts {
+    const D3D12_AUTO_BREADCRUMB_NODE1* n;
+    UINT at = 0;
+    const wchar_t* Get(UINT index)
+    {
+        if (!n->pBreadcrumbContexts || !n->BreadcrumbContextsCount) return nullptr;
+        while (at < n->BreadcrumbContextsCount && n->pBreadcrumbContexts[at].BreadcrumbIndex < index) ++at;
+        if (at < n->BreadcrumbContextsCount && n->pBreadcrumbContexts[at].BreadcrumbIndex == index)
+            return n->pBreadcrumbContexts[at].pContextString;
+        return ContextAt(n, index);
+    }
+};
+
+// "begin Lumen, begin LumenScreenProbeGather, dispatch, end" for up to `count` operations in [from, to) (names of markers).
+void DescribeOps(const D3D12_AUTO_BREADCRUMB_NODE1* n, UINT from, UINT to, int count, char* out, size_t size)
+{
+    size_t len = 0;
+    out[0] = 0;
+    Contexts ctx{n};
+    char part[128];
+    int shown = 0;
+    for (UINT i = from; i < to && i < n->BreadcrumbCount && shown < count; ++i) {
+        const D3D12_AUTO_BREADCRUMB_OP op = n->pCommandHistory[i];
+        if (op == D3D12_AUTO_BREADCRUMB_OP_BEGIN_COMMAND_LIST) continue;
+        if (shown++) Append(out, size, len, ", ");
+        Append(out, size, len, OpName(op));
+        if (op == D3D12_AUTO_BREADCRUMB_OP_BEGINEVENT || op == D3D12_AUTO_BREADCRUMB_OP_SETMARKER) {
+            Narrow(ctx.Get(i), nullptr, part, sizeof part);
+            Append(out, size, len, " ");
+            Append(out, size, len, part);
+        }
+    }
+    if (!shown) Append(out, size, len, "(none)");
+}
+
+// The markers still open before operation `last`, outermost first: "Frame > Scene > Lumen".
+void OpenMarkers(const D3D12_AUTO_BREADCRUMB_NODE1* n, UINT last, char* out, size_t size)
+{
+    const wchar_t* stack[24] = {};
+    int depth = 0;
+    Contexts ctx{n};
+    for (UINT i = 0; i < last && i < n->BreadcrumbCount; ++i) {
+        const D3D12_AUTO_BREADCRUMB_OP op = n->pCommandHistory[i];
+        if (op == D3D12_AUTO_BREADCRUMB_OP_BEGINEVENT) {
+            const wchar_t* c = ctx.Get(i);
+            if (depth < 24) stack[depth] = c;
+            ++depth;
+        } else if (op == D3D12_AUTO_BREADCRUMB_OP_ENDEVENT && depth > 0) --depth;
+    }
+    size_t len = 0;
+    out[0] = 0;
+    char part[128];
+    for (int d = 0; d < depth && d < 24; ++d) {
+        Narrow(stack[d], nullptr, part, sizeof part);
+        if (d) Append(out, size, len, " > ");
+        Append(out, size, len, part);
+    }
+    if (!len) Append(out, size, len, "(none)");
+}
+
+// The last `count` named markers before `end` and what follows them (for a finished list: how it ended).
+void LastMarkers(const D3D12_AUTO_BREADCRUMB_NODE1* n, UINT end, int count, char* out, size_t size)
+{
+    UINT from = end;
+    int found = 0;
+    while (from > 0 && found < count) {
+        --from;
+        const D3D12_AUTO_BREADCRUMB_OP op = n->pCommandHistory[from];
+        if (op == D3D12_AUTO_BREADCRUMB_OP_BEGINEVENT || op == D3D12_AUTO_BREADCRUMB_OP_SETMARKER) ++found;
+    }
+    DescribeOps(n, from, end, 12, out, size);
+}
+
+// Per queue (3D, compute, copy): how many lists the GPU finished, stopped in and never started; for each list it stopped
+// in, the open markers (the pass it was in) and the next operations; where a finished list meets a never-started one on
+// the same queue (the GPU stopped between lists), how the one ended and how the other begins.
 void LogBreadcrumbs(const D3D12_AUTO_BREADCRUMB_NODE1* head)
 {
-    unsigned done = 0, notStarted = 0, inFlight = 0, shown = 0;
-    for (const auto* n = head; n; n = n->pNext) {
+    struct Queue {
+        const void* key;
+        char name[80];
+        unsigned lists, done, part, notStarted, detailed, boundaries;
+        int lastState;  // -1 none yet, 0 finished, 1 part-way, 2 not started
+        const D3D12_AUTO_BREADCRUMB_NODE1* lastNode;
+        unsigned lastIndex;
+    };
+    Queue queues[8] = {};
+    int nq = 0;
+    unsigned done = 0, notStarted = 0, inFlight = 0, shown = 0, index = 0, total = 0;
+    for (const auto* n = head; n && total < 100000; n = n->pNext) ++total;
+    char open[600], next[600], list[96];
+    for (const auto* n = head; n && index < 100000; n = n->pNext, ++index) {
         const UINT count = n->BreadcrumbCount;
         const UINT last = n->pLastBreadcrumbValue ? *n->pLastBreadcrumbValue : 0;
-        if (last >= count) { ++done; continue; }
-        if (last == 0) { ++notStarted; continue; }
-        ++inFlight;
-        if (shown >= 12) continue;
-        ++shown;
-        // The markers still open after the last completed operation (the game's DRED records markers only).
-        const wchar_t* stack[24];
-        int depth = 0;
-        for (UINT i = 0; i < last && n->pCommandHistory; ++i) {
-            const D3D12_AUTO_BREADCRUMB_OP op = n->pCommandHistory[i];
-            if (op == D3D12_AUTO_BREADCRUMB_OP_BEGINEVENT) {
-                if (depth < 24) stack[depth] = ContextAt(n, i);
-                ++depth;
-            } else if (op == D3D12_AUTO_BREADCRUMB_OP_ENDEVENT && depth > 0) --depth;
+        const int state = last >= count ? 0 : last == 0 ? 2 : 1;
+        int qi = 0;
+        while (qi < nq && queues[qi].key != n->pCommandQueue) ++qi;
+        if (qi == nq) {
+            if (nq == 8) qi = 7;  // more queues than expected: the rest counted with the last one
+            else {
+                Queue& q = queues[nq++];
+                q.key = n->pCommandQueue;
+                Narrow(n->pCommandQueueDebugNameW, n->pCommandQueueDebugNameA, q.name, sizeof q.name);
+                q.lastState = -1;
+            }
         }
-        char queue[96], list[96], line[900], part[160];
-        Narrow(n->pCommandQueueDebugNameW, n->pCommandQueueDebugNameA, queue, sizeof queue);
-        Narrow(n->pCommandListDebugNameW, n->pCommandListDebugNameA, list, sizeof list);
-        size_t len = 0;
-        line[0] = 0;
-        for (int d = 0; d < depth && d < 24; ++d) {
-            Narrow(stack[d], nullptr, part, sizeof part);
-            if (d) Append(line, sizeof line, len, " > ");
-            Append(line, sizeof line, len, part);
+        Queue& q = queues[qi];
+        ++q.lists;
+        if (state == 0) ++done, ++q.done;
+        else if (state == 2) ++notStarted, ++q.notStarted;
+        else {
+            ++inFlight, ++q.part;
+            if (shown < 12 && q.detailed < 4 && n->pCommandHistory) {
+                ++shown, ++q.detailed;
+                Narrow(n->pCommandListDebugNameW, n->pCommandListDebugNameA, list, sizeof list);
+                OpenMarkers(n, last, open, sizeof open);
+                DescribeOps(n, last, count, 6, next, sizeof next);
+                Log("[gpucrash]   %s, list %u of %u (%s): %u of %u operations done; open: %s; next: %s", q.name, index + 1, total, list,
+                    last, count, open, next);
+            }
         }
-        const D3D12_AUTO_BREADCRUMB_OP nextOp = n->pCommandHistory ? n->pCommandHistory[last] : D3D12_AUTO_BREADCRUMB_OP_SETMARKER;
-        Narrow(ContextAt(n, last), nullptr, part, sizeof part);
-        Log("[gpucrash]   %s, list %s: %u of %u operations done; open: %s; next: %s %s", queue, list, last, count,
-            len ? line : "(none)",
-            nextOp == D3D12_AUTO_BREADCRUMB_OP_BEGINEVENT ? "begin" : nextOp == D3D12_AUTO_BREADCRUMB_OP_ENDEVENT ? "end" : "op",
-            part);
+        // a finished list next to a never-started one on the same queue: the GPU stopped between the two
+        if (q.lastState >= 0 && q.boundaries < 2 && n->pCommandHistory && q.lastNode->pCommandHistory &&
+            ((q.lastState == 0 && state == 2) || (q.lastState == 2 && state == 0))) {
+            ++q.boundaries;
+            const auto* fin = state == 0 ? n : q.lastNode;
+            const auto* nst = state == 0 ? q.lastNode : n;
+            const unsigned finIndex = state == 0 ? index : q.lastIndex, nstIndex = state == 0 ? q.lastIndex : index;
+            LastMarkers(fin, fin->BreadcrumbCount, 3, open, sizeof open);
+            DescribeOps(nst, 0, nst->BreadcrumbCount, 5, next, sizeof next);
+            Log("[gpucrash]   %s: list %u of %u finished (its end: %s), list %u never started (its start: %s)", q.name, finIndex + 1,
+                total, open, nstIndex + 1, next);
+        }
+        q.lastState = state;
+        q.lastNode = n;
+        q.lastIndex = index;
     }
+    for (int i = 0; i < nq; ++i)
+        Log("[gpucrash] DRED %s: %u command lists, %u finished, %u stopped part-way, %u never started", queues[i].name, queues[i].lists,
+            queues[i].done, queues[i].part, queues[i].notStarted);
     Log("[gpucrash] DRED command lists: %u stopped part-way (%u shown above), %u not started, %u finished", inFlight, shown,
         notStarted, done);
 }
 
-void LogAllocations(const char* what, const D3D12_DRED_ALLOCATION_NODE1* n)
+const char* AllocationTypeName(D3D12_DRED_ALLOCATION_TYPE t)
 {
-    char name[160];
+    switch (t) {
+    case D3D12_DRED_ALLOCATION_TYPE_COMMAND_QUEUE: return "command queue";
+    case D3D12_DRED_ALLOCATION_TYPE_COMMAND_ALLOCATOR: return "command allocator";
+    case D3D12_DRED_ALLOCATION_TYPE_PIPELINE_STATE: return "pipeline state";
+    case D3D12_DRED_ALLOCATION_TYPE_COMMAND_LIST: return "command list";
+    case D3D12_DRED_ALLOCATION_TYPE_FENCE: return "fence";
+    case D3D12_DRED_ALLOCATION_TYPE_DESCRIPTOR_HEAP: return "descriptor heap";
+    case D3D12_DRED_ALLOCATION_TYPE_HEAP: return "heap";
+    case D3D12_DRED_ALLOCATION_TYPE_QUERY_HEAP: return "query heap";
+    case D3D12_DRED_ALLOCATION_TYPE_COMMAND_SIGNATURE: return "command signature";
+    case D3D12_DRED_ALLOCATION_TYPE_PIPELINE_LIBRARY: return "pipeline library";
+    case D3D12_DRED_ALLOCATION_TYPE_RESOURCE: return "resource";
+    case D3D12_DRED_ALLOCATION_TYPE_PASS: return "render pass";
+    case D3D12_DRED_ALLOCATION_TYPE_STATE_OBJECT: return "state object (ray tracing)";
+    default: return "other";
+    }
+}
+
+// A resource's description for the page-fault lines (the resource may already be gone: guarded).
+void DescribeResource(IUnknown* object, uint64_t va, char* out, size_t size)
+{
+    out[0] = 0;
+    __try {
+        ID3D12Resource* r = nullptr;
+        if (FAILED(object->QueryInterface(IID_PPV_ARGS(&r))) || !r) return;
+        const D3D12_RESOURCE_DESC d = r->GetDesc();
+        if (d.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
+            const uint64_t base = r->GetGPUVirtualAddress();
+            sprintf_s(out, size, ": buffer %.2f MB, flags 0x%X, fault %s 0x%llX", d.Width / 1048576.0, static_cast<unsigned>(d.Flags),
+                      va >= base ? "at offset" : "before it by", static_cast<unsigned long long>(va >= base ? va - base : base - va));
+        } else {
+            sprintf_s(out, size, ": texture (dimension %d) %llux%u x%u, %u mips, DXGI format %d, flags 0x%X", static_cast<int>(d.Dimension),
+                      static_cast<unsigned long long>(d.Width), d.Height, static_cast<unsigned>(d.DepthOrArraySize),
+                      static_cast<unsigned>(d.MipLevels), static_cast<int>(d.Format), static_cast<unsigned>(d.Flags));
+        }
+        r->Release();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        strcpy_s(out, size, ": (object gone)");
+    }
+}
+
+void LogAllocations(const char* what, const D3D12_DRED_ALLOCATION_NODE1* n, uint64_t va)
+{
+    char name[160], desc[200];
     int i = 0;
     for (; n && i < 8; n = n->pNext, ++i) {
         Narrow(n->ObjectNameW, n->ObjectNameA, name, sizeof name);
-        Log("[gpucrash]   %s: %s (type %d)", what, name, static_cast<int>(n->AllocationType));
+        desc[0] = 0;
+        if (n->AllocationType == D3D12_DRED_ALLOCATION_TYPE_RESOURCE && n->pObject) DescribeResource(const_cast<IUnknown*>(n->pObject), va, desc, sizeof desc);
+        Log("[gpucrash]   %s: %s, %s (type %d)%s", what, name, AllocationTypeName(n->AllocationType), static_cast<int>(n->AllocationType),
+            desc);
     }
     if (!i) Log("[gpucrash]   %s: none", what);
 }
@@ -873,15 +1063,15 @@ void LogDred(ID3D12Device* device)
         if (SUCCEEDED(dred2->GetPageFaultAllocationOutput2(&pf)) && pf.PageFaultVA) {
             Log("[gpucrash] GPU page fault at VA 0x%llX (flags 0x%X)", static_cast<unsigned long long>(pf.PageFaultVA),
                 static_cast<unsigned>(pf.PageFaultFlags));
-            LogAllocations("allocation there", pf.pHeadExistingAllocationNode);
-            LogAllocations("recently freed there", pf.pHeadRecentFreedAllocationNode);
+            LogAllocations("allocation there", pf.pHeadExistingAllocationNode, pf.PageFaultVA);
+            LogAllocations("recently freed there", pf.pHeadRecentFreedAllocationNode, pf.PageFaultVA);
         } else Log("[gpucrash] no GPU page fault recorded");
     } else {
         D3D12_DRED_PAGE_FAULT_OUTPUT1 pf{};
         if (SUCCEEDED(dred1->GetPageFaultAllocationOutput1(&pf)) && pf.PageFaultVA) {
             Log("[gpucrash] GPU page fault at VA 0x%llX", static_cast<unsigned long long>(pf.PageFaultVA));
-            LogAllocations("allocation there", pf.pHeadExistingAllocationNode);
-            LogAllocations("recently freed there", pf.pHeadRecentFreedAllocationNode);
+            LogAllocations("allocation there", pf.pHeadExistingAllocationNode, pf.PageFaultVA);
+            LogAllocations("recently freed there", pf.pHeadRecentFreedAllocationNode, pf.PageFaultVA);
         } else Log("[gpucrash] no GPU page fault recorded");
     }
     dred1->Release();
@@ -902,6 +1092,122 @@ void LogSample(const char* prefix, const Sample& s, ULONGLONG now)
     Log("%s %+5.1f s: RAM free %.2f GB, commit free %.2f of %.1f GB, game private %.2f GB, working set %.2f GB, VRAM %.2f of %.2f GB, shared %.2f GB",
         prefix, (static_cast<double>(s.tick) - static_cast<double>(now)) / 1000.0, s.ramFree / kGB, s.commitFree / kGB,
         s.commitLimit / kGB, s.priv / kGB, s.ws / kGB, s.vram / kGB, s.vramBudget / kGB, s.shared / kGB);
+}
+
+// ---- what the crash report adds around DRED (worker hangcapture, 2026-11-03) ----
+
+// The ini's [Fixes] and [General] keys as "Key=value" (lab keys included), refreshed by the monitor thread every 10 s so the
+// crash report prints what was in effect without reading a file.
+wchar_t g_iniPathCopy[MAX_PATH] = L"";
+char g_keys[2][12288];
+std::atomic<unsigned> g_keysSeq{0};
+ULONGLONG g_keysAt = 0;
+
+void SnapshotKeys()
+{
+    if (!g_iniPathCopy[0]) return;
+    const ULONGLONG now = GetTickCount64();
+    if (g_keysAt && now - g_keysAt < 10000) return;
+    g_keysAt = now;
+    static wchar_t section[16384];
+    char* out = g_keys[(g_keysSeq.load() + 1) & 1];
+    size_t len = 0;
+    out[0] = 0;
+    const wchar_t* names[] = {L"Fixes", L"General"};
+    for (const wchar_t* name : names) {
+        const DWORD n = GetPrivateProfileSectionW(name, section, static_cast<DWORD>(sizeof section / sizeof section[0]), g_iniPathCopy);
+        char head[16];
+        WideCharToMultiByte(CP_UTF8, 0, name, -1, head, sizeof head, nullptr, nullptr);
+        Append(out, sizeof g_keys[0], len, len ? " | [" : "[");
+        Append(out, sizeof g_keys[0], len, head);
+        Append(out, sizeof g_keys[0], len, "]");
+        for (const wchar_t* e = section; e < section + n && *e; e += wcslen(e) + 1) {
+            if (*e == L';' || *e == L'#') continue;
+            char kv[160];
+            WideCharToMultiByte(CP_UTF8, 0, e, -1, kv, sizeof kv, nullptr, nullptr);
+            Append(out, sizeof g_keys[0], len, " ");
+            Append(out, sizeof g_keys[0], len, kv);
+        }
+    }
+    g_keysSeq.fetch_add(1);
+}
+
+double ProcessUpSeconds()
+{
+    FILETIME created, exited, kernel, user, now;
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) return -1;
+    GetSystemTimeAsFileTime(&now);
+    const uint64_t c = (static_cast<uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+    const uint64_t t = (static_cast<uint64_t>(now.dwHighDateTime) << 32) | now.dwLowDateTime;
+    return t > c ? (t - c) / 1e7 : 0;
+}
+
+void LogCrashContext(ULONGLONG now)
+{
+    double x = 0, y = 0, z = 0;
+    char pos[96] = "not known";
+    if (NpcPacingLastPlayerPos(&x, &y, &z)) sprintf_s(pos, "UE (%.0f, %.0f, %.0f)", x, y, z);
+    const int markers = GpuPassMarkersMode();
+    Log("[gpucrash] context: game process up %.0f s, player at %s, GpuPassMarkers %s", ProcessUpSeconds(), pos,
+        markers < 0   ? "not installed (no pass names in DRED)"
+        : markers == 0 ? "0 (off: no pass names in DRED)"
+        : markers == 1 ? "1 (pass names in DRED)"
+        : markers == 2 ? "2 (AMD markers only: no pass names in DRED)"
+                       : "3 (pass names in DRED and AMD markers)");
+    static_cast<void>(now);  // used only by the block below, which not every build compiles
+}
+
+// The last minute, one line per second (oldest first), then the extremes.
+void LogHistory(ULONGLONG now)
+{
+    const unsigned next = g_ringNext.load();
+    unsigned n = 0;
+    while (n < kRing && n < next && now - g_ring[(next - 1 - n) % kRing].tick <= 61000) ++n;
+    uint64_t ramMin = UINT64_MAX, commitMin = UINT64_MAX, vramMax = 0, budgetAtMax = 0, budgetMin = UINT64_MAX, budgetMax = 0;
+    unsigned over = 0, worstUs = 0;
+    for (unsigned k = n; k-- > 0;) {
+        const Sample& s = g_ring[(next - 1 - k) % kRing];
+        char frames[96] = "";
+        if (s.framesKnown) sprintf_s(frames, ", frames %u (longest %.1f ms), GPU %.1f ms", s.frames, s.worstFrameUs / 1000.0, s.gpuFrameUs / 1000.0);
+        Log("[gpucrash] mem %+5.1f s: VRAM %.2f of %.2f GB (%.0f%%), shared %.2f of %.2f GB, RAM free %.2f GB, commit free %.2f GB "
+            "(+%.1f page file growth), game private %.2f GB%s",
+            (static_cast<double>(s.tick) - static_cast<double>(now)) / 1000.0, s.vram / kGB, s.vramBudget / kGB,
+            s.vramBudget ? 100.0 * static_cast<double>(s.vram) / static_cast<double>(s.vramBudget) : 0.0, s.shared / kGB,
+            s.sharedBudget / kGB, s.ramFree / kGB, s.commitFree / kGB, s.commitGrow / kGB, s.priv / kGB, frames);
+        ramMin = s.ramFree < ramMin ? s.ramFree : ramMin;
+        commitMin = s.commitFree < commitMin ? s.commitFree : commitMin;
+        if (s.vram > vramMax) vramMax = s.vram, budgetAtMax = s.vramBudget;
+        if (s.vramBudget && s.vramBudget < budgetMin) budgetMin = s.vramBudget;
+        if (s.vramBudget > budgetMax) budgetMax = s.vramBudget;
+        if (s.vramBudget && s.vram > s.vramBudget) ++over;
+        if (s.framesKnown && s.worstFrameUs > worstUs) worstUs = s.worstFrameUs;
+    }
+    if (n)
+        Log("[gpucrash] last %u s: RAM free min %.2f GB, commit free min %.2f GB, VRAM max %.2f of %.2f GB, budget %.2f-%.2f GB, %u s over "
+            "budget, longest frame %.1f ms",
+            n, ramMin / kGB, commitMin / kGB, vramMax / kGB, budgetAtMax / kGB, budgetMin == UINT64_MAX ? 0.0 : budgetMin / kGB,
+            budgetMax / kGB, over, worstUs / 1000.0);
+}
+
+void LogKeys()
+{
+    const unsigned seq = g_keysSeq.load();
+    if (!seq) return;
+    const char* k = g_keys[seq & 1];
+    const size_t total = strlen(k);
+    char chunk[904];
+    for (size_t at = 0, part = 1; at < total && part <= 16; ++part) {
+        size_t n = total - at < 900 ? total - at : 900;
+        if (at + n < total) {  // cut at a space
+            size_t cut = n;
+            while (cut > 600 && k[at + cut] != ' ') --cut;
+            if (cut > 600) n = cut;
+        }
+        memcpy(chunk, k + at, n);
+        chunk[n] = 0;
+        Log("[gpucrash] ini %zu: %s", part, chunk);
+        at += n;
+    }
 }
 
 std::atomic<bool> g_reported{false};
@@ -929,26 +1235,17 @@ void WriteGpuCrashReport(const CONTEXT* ctx)
     } else Log("[gpucrash] the game's D3D12 device was not found on this thread (%d D3D12 objects seen): no DRED data", candidates);
     const ULONGLONG now = GetTickCount64();
     LogSample("[gpucrash] memory now", TakeSample(), now);
-    // The last 30 seconds: every 5 s and the extremes.
-    const unsigned next = g_ringNext.load();
-    uint64_t ramMin = UINT64_MAX, commitMin = UINT64_MAX, vramMax = 0, budgetAtMax = 0;
-    for (unsigned i = 0; i < kRing && i < next; ++i) {
-        const Sample& s = g_ring[(next - 1 - i) % kRing];
-        if (now - s.tick > 31000) break;
-        ramMin = s.ramFree < ramMin ? s.ramFree : ramMin;
-        commitMin = s.commitFree < commitMin ? s.commitFree : commitMin;
-        if (s.vram > vramMax) vramMax = s.vram, budgetAtMax = s.vramBudget;
-        if (i % 5 == 0) LogSample("[gpucrash] memory", s, now);
-    }
-    if (ramMin != UINT64_MAX)
-        Log("[gpucrash] last 30 s: RAM free min %.2f GB, commit free min %.2f GB, VRAM max %.2f of %.2f GB", ramMin / kGB,
-            commitMin / kGB, vramMax / kGB, budgetAtMax / kGB);
+    LogCrashContext(now);
+    LogHistory(now);
+    LogKeys();
+    Log("[gpucrash] end of the report");
 }
 
 LONG CALLBACK GpuCrashHandler(EXCEPTION_POINTERS* info)
 {
     if (info->ExceptionRecord->ExceptionCode != kUeGpuCrashException || g_reported.exchange(true))
         return EXCEPTION_CONTINUE_SEARCH;
+    LogCrashMode();  // the log's queued lines first; the report's lines are then written as they come
     WriteGpuCrashReport(info->ContextRecord);
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -973,8 +1270,25 @@ void UpdateMemory(const Config& cfg, MemoryRelief* relief)
     OpenAdapter();
     DetectGpuMemoryKind(cfg.sharedMemoryGpu);
     Sample s = TakeSample();
+    {
+        uint32_t frames = 0, maxUs = 0;
+        if (LedgerFrameStats(&frames, &maxUs)) {  // HitchLedger installed (its GGPUFrameTime search ran at start-up)
+            s.framesKnown = true;
+            s.frames = frames;
+            s.worstFrameUs = maxUs;
+            static LARGE_INTEGER qpf{};
+            if (!qpf.QuadPart) QueryPerformanceFrequency(&qpf);
+            if (const volatile uint32_t* gpu = FindGpuFrameTime())
+                s.gpuFrameUs = static_cast<uint32_t>(static_cast<uint64_t>(*gpu) * 1000000ull / static_cast<uint64_t>(qpf.QuadPart));
+        }
+    }
     g_lastVram.store(s.vram, std::memory_order_relaxed);
     g_lastVramBudget.store(s.vramBudget, std::memory_order_relaxed);
+    if (s.ramTotal) {  // GlobalMemoryStatusEx answered
+        g_lastCommitRoom.store(s.commitFree + s.commitGrow, std::memory_order_relaxed);
+        g_lastCommitFree.store(s.commitFree, std::memory_order_relaxed);
+        g_commitKnown.store(true, std::memory_order_release);
+    }
     g_ring[g_ringNext.load() % kRing] = s;
     g_ringNext.fetch_add(1);
     Interval& in = g_interval;
@@ -995,6 +1309,7 @@ void UpdateMemory(const Config& cfg, MemoryRelief* relief)
             reasons);
     }
     g_sharedModeLogged = cfg.sharedMemoryGpu;
+    if (cfg.gpuCrashReport) SnapshotKeys();
     relief->lumen = g_reliefCommit;
     relief->upload = g_reliefRam || g_reliefCommit || g_reliefVram;
     relief->translate = g_reliefVramTranslate;
@@ -1022,6 +1337,37 @@ void LogMemoryStats()
         s.commitGrow / kGB, s.priv / kGB, in.privMax / kGB, s.ws / kGB, vram, relief[0] ? relief + 1 : "off", g_ramEpisodes,
         g_commitEpisodes, g_vramRelief.Episodes(), g_vramRelief.Helped());
     in = Interval{};
+}
+
+void SetGpuCrashIniPath(const wchar_t* path) { wcsncpy_s(g_iniPathCopy, path, _TRUNCATE); }
+
+
+void GpuCrashReportTestBreadcrumbs(const void* headNode1) { LogBreadcrumbs(static_cast<const D3D12_AUTO_BREADCRUMB_NODE1*>(headNode1)); }
+
+// Self-test: three fake samples in the ring (the newest now), then the context and history lines.
+void GpuCrashReportTestContext()
+{
+    const ULONGLONG now = GetTickCount64();
+    for (int i = 2; i >= 0; --i) {
+        Sample s{};
+        s.tick = now - static_cast<ULONGLONG>(i) * 1000;
+        s.ramFree = (1ull << 30) - static_cast<uint64_t>(i) * (100ull << 20);
+        s.ramTotal = 32ull << 30;
+        s.commitFree = 2ull << 30;
+        s.vram = 12ull << 30;
+        s.vramBudget = (11ull << 30) + static_cast<uint64_t>(i) * (1ull << 30);
+        s.framesKnown = true;
+        s.frames = 60;
+        s.worstFrameUs = 33000 + static_cast<uint32_t>(i);
+        s.gpuFrameUs = 14000;
+        g_ring[g_ringNext.load() % kRing] = s;
+        g_ringNext.fetch_add(1);
+    }
+    g_keysAt = 0;
+    SnapshotKeys();
+    LogCrashContext(now);
+    LogHistory(now);
+    LogKeys();
 }
 
 // Self-test: the video-memory level, one second per step on a fresh state machine (reset = true starts one).

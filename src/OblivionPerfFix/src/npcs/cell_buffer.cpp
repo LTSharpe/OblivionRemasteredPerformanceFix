@@ -132,8 +132,27 @@ std::atomic<uint64_t> g_trimmed{0}, g_paced{0}, g_immediate{0}, g_blocked{0}, g_
     g_maxTrimUs{0}, g_maxOverflow{0}, g_returned{0}, g_iniWrites{0};
 uint64_t g_logged = ~0ull;
 bool g_site1Shift = false;
-int g_drainLogs = 0;
 struct Drain { uint32_t cells, frames, overflow; uint64_t us, maxUs; } g_drain{};
+// CellBufferEvictDelayMs (2026-11-07, worker otunload; public since 1.3.0, port130k; review rev130f; default 1500): the paced
+// drain starts this long after the crossing instead of in the OT frame right after it, so the tail's teardown leaves the
+// crossing package's frames (the new row's NPC units and pre-placed actor adoptions run on the GT in the first ~0.5-1 s; the
+// GT's busy time drops to its median after ~1-1.5 s, plays play1107 / play1107b). Same cells, same order, same thread, same
+// point of the OT frame: only later OT frames, i.e. a state the stock game reaches with a bigger uExterior Cell Buffer (as
+// the paced drain itself). No delay for a drain whose crossing found cells of the previous drain still in the tail.
+// Its cost (rev130f C-S1): the tail stays full longer, so a second crossing within the delay (a diagonal move near a cell
+// corner) can push tail cells off the buffer's end; the game's own insert then tears them down inside that crossing frame,
+// as the stock game does at every crossing. Counted below (g_crossTail, g_insertTorn), never worse than stock. Only the
+// per-frame crossings with the key on are counted (rev130n CB-N1): a door, fast travel or coc jump (or another caller)
+// empties the tail in its own call whatever the delay, as stock.
+std::atomic<uint32_t> g_delayUs{0};
+uint64_t g_crossUs = 0;     // OT: when the last crossing's grid change returned
+bool g_noDelay = false;     // OT: the last crossing found tail cells left from the drain before
+uint64_t g_drainStartUs = 0;  // OT: when this drain's first paced cell was torn down (0 = not started)
+std::atomic<uint64_t> g_delayFrames{0};  // OT frames a pending drain waited for the delay
+// C-S1: crossings that found tail cells left, and the tail cells the game's insert tore down inside such a crossing frame
+// (a tail cell before the grid change that is nowhere in the buffer after it); drains finished, and their first cell's
+// delay after the crossing (sum / max, for the stats line instead of a line per drain).
+std::atomic<uint64_t> g_crossTail{0}, g_insertTorn{0}, g_drains{0}, g_drainDelayUs{0}, g_drainDelayMaxUs{0};
 
 uint64_t Us()
 {
@@ -224,14 +243,37 @@ uint64_t GridHookAt(const uint8_t* ret, uint64_t tesArg, uint64_t pos, uint64_t 
     if (!tes || !*s.done) return s.gridOrig(tesArg, pos, flag, r9);
     const int32_t x0 = *reinterpret_cast<int32_t*>(tes + kTesGridX), y0 = *reinterpret_cast<int32_t*>(tes + kTesGridY);
     const uint32_t before = Overflow(tes);
+    // C-S1: the tail's cells before the call (at most the spare slots; only while the tail holds cells)
+    uint8_t* tailBefore[64];
+    uint32_t nTail = 0;
+    const bool perFrame = ret == s.site1Ret || ret == s.site2Ret;
+    const int mode = s.mode.load(std::memory_order_relaxed);
+    if (before && perFrame && mode != 0) {
+        uint8_t** const buf = *reinterpret_cast<uint8_t***>(tes + kTesBuffer);
+        for (uint32_t i = *s.base; buf && i < Bound() && nTail < 64; ++i)
+            if (buf[i]) tailBefore[nTail++] = buf[i];
+    }
     const uint64_t r = s.gridOrig(tesArg, pos, flag, r9);
     const int32_t x1 = *reinterpret_cast<int32_t*>(tes + kTesGridX), y1 = *reinterpret_cast<int32_t*>(tes + kTesGridY);
     const bool shifted = static_cast<uint8_t>(r) != 0;
-    const bool perFrame = ret == s.site1Ret || ret == s.site2Ret;
     const bool jump = x0 == 0x7FFFFFFF || y0 == 0x7FFFFFFF || x1 - x0 > 1 || x0 - x1 > 1 || y1 - y0 > 1 || y0 - y1 > 1;
-    const int mode = s.mode.load(std::memory_order_relaxed);
+    if (shifted && nTail && !jump) {  // C-S1: which of those cells the insert tore down in this call (gone from the whole buffer)
+        g_crossTail.fetch_add(1, std::memory_order_relaxed);
+        uint8_t** const buf = *reinterpret_cast<uint8_t***>(tes + kTesBuffer);
+        const uint32_t end = Bound();
+        uint64_t gone = 0;
+        for (uint32_t k = 0; k < nTail; ++k) {
+            bool found = false;
+            for (uint32_t i = 0; buf && i < end && !found; ++i) found = buf[i] == tailBefore[k];
+            gone += !found;
+        }
+        if (gone) g_insertTorn.fetch_add(gone, std::memory_order_relaxed);
+    }
     if (mode == 0 || !perFrame || (shifted && jump)) {
-        if (Trim(tes, 0xFFFFFFFF, false)) g_drain = {};
+        if (Trim(tes, 0xFFFFFFFF, false)) {
+            g_drain = {};
+            g_drainStartUs = 0;
+        }
         if (ret == s.site1Ret) g_site1Shift = false;
         return r;
     }
@@ -244,18 +286,35 @@ uint64_t GridHookAt(const uint8_t* ret, uint64_t tesArg, uint64_t pos, uint64_t 
         if (!g_drain.overflow) g_drain = {0, 0, ov, 0, 0};
         else g_drain.overflow = ov;
         if (ret == s.site1Ret) g_site1Shift = true;
+        g_crossUs = Us();
+        g_noDelay = before > 0;
+        g_drainStartUs = 0;
         return r;
     }
     if (ret == s.site2Ret) {
-        const bool skip = g_site1Shift;
+        bool skip = g_site1Shift;
         g_site1Shift = false;
-        if (!skip && SafeForPaced(tes) && Trim(tes, 1, true) && !Overflow(tes) && g_drain.cells) {
-            if (g_drainLogs < 2000) {
-                ++g_drainLogs;
-                Log("[cellbuf] tail drained: %u cell(s) over %u OT frame(s), %.2f ms (max %.2f ms per cell)", g_drain.cells,
-                    g_drain.frames, g_drain.us / 1000.0, g_drain.maxUs / 1000.0);
+        const uint64_t delayUs = g_delayUs.load(std::memory_order_relaxed);
+        if (!skip && delayUs && !g_noDelay && g_crossUs && Us() - g_crossUs < delayUs && Overflow(tes)) {
+            skip = true;
+            g_delayFrames.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (!skip && SafeForPaced(tes)) {
+            const uint64_t t0 = Us();
+            if (Trim(tes, 1, true)) {
+                if (!g_drainStartUs) g_drainStartUs = t0;
+                if (!Overflow(tes) && g_drain.cells) {
+                    // rev130f nit: no line per drain (~6 a minute riding); the stats line has their count and delay
+                    g_drains.fetch_add(1, std::memory_order_relaxed);
+                    if (g_crossUs && g_drainStartUs >= g_crossUs) {
+                        const uint64_t d = g_drainStartUs - g_crossUs;
+                        g_drainDelayUs.fetch_add(d, std::memory_order_relaxed);
+                        Max(g_drainDelayMaxUs, d);
+                    }
+                    g_drain = {};
+                    g_drainStartUs = 0;
+                }
             }
-            g_drain = {};
         }
     }
     return r;
@@ -471,6 +530,17 @@ void SetCellBufferPacedEvict(int mode)
                               : "outgoing cells torn down in the crossing frame (as the game does)");
 }
 
+// CellBufferEvictDelayMs (see g_delayUs; live, 0..3000): 0 = the drain starts in the OT frame after the crossing (fix 50 as is).
+void SetCellBufferEvictDelay(int ms)
+{
+    const uint32_t v = static_cast<uint32_t>(ms < 0 ? 0 : ms > 3000 ? 3000 : ms) * 1000u;
+    if (g_delayUs.exchange(v) != v && s.installed)
+        Log("[cellbuf] CellBufferEvictDelayMs=%u: %s", v / 1000u,
+            v ? "the paced drain starts this long after a crossing" : "the paced drain starts right after a crossing");
+}
+
+uint64_t CellBufferEvictDelayFrames() { return g_delayFrames.load(std::memory_order_relaxed); }
+
 void LogCellBufferPacedEvictStats()
 {
     if (!s.installed) return;
@@ -499,6 +569,13 @@ void LogCellBufferPacedEvictStats()
         static_cast<unsigned long long>(g_trimmed.load()), static_cast<unsigned long long>(g_paced.load()),
         static_cast<unsigned long long>(g_immediate.load()), g_trimUs.load() / 1000.0, g_maxTrimUs.load() / 1000.0,
         static_cast<unsigned long long>(g_blocked.load()), static_cast<unsigned long long>(g_iniWrites.load()));
+    const uint64_t drains = g_drains.load();
+    Log("[cellbuf] CellBufferEvictDelayMs=%u: drains %llu (first cell after the crossing: mean %.0f ms, max %.0f ms; %llu OT frames "
+        "waited); crossings that found tail cells %llu, tail cells the game tore down inside such a crossing frame %llu",
+        g_delayUs.load() / 1000u, static_cast<unsigned long long>(drains),
+        drains ? g_drainDelayUs.load() / 1000.0 / static_cast<double>(drains) : 0.0, g_drainDelayMaxUs.load() / 1000.0,
+        static_cast<unsigned long long>(g_delayFrames.load()), static_cast<unsigned long long>(g_crossTail.load()),
+        static_cast<unsigned long long>(g_insertTorn.load()));
 }
 
 // ---- self-test ----
@@ -536,7 +613,8 @@ void CellBufferTestSetup(const CellBufferTest& t)
     s.site2Ret = static_cast<uint8_t*>(t.site2Ret);
     s.installed = true;
     for (auto* c : {&g_trimmed, &g_paced, &g_immediate, &g_blocked, &g_crossings, &g_full, &g_trimUs, &g_maxTrimUs,
-                    &g_maxOverflow, &g_returned, &g_iniWrites})
+                    &g_maxOverflow, &g_returned, &g_iniWrites, &g_crossTail, &g_insertTorn, &g_drains, &g_drainDelayUs,
+                    &g_drainDelayMaxUs})
         c->store(0);
     g_site1Shift = false;
     g_drain = {};
@@ -549,7 +627,8 @@ uint64_t CellBufferTestGridHook(const void* caller, uint64_t tes, uint64_t pos, 
 
 CellBufferCounts CellBufferTestCounts()
 {
-    return {g_trimmed.load(), g_paced.load(), g_immediate.load(), g_blocked.load(), g_crossings.load(), g_maxOverflow.load()};
+    return {g_trimmed.load(), g_paced.load(), g_immediate.load(), g_blocked.load(), g_crossings.load(), g_maxOverflow.load(),
+            g_crossTail.load(), g_insertTorn.load()};
 }
 
 }  // namespace opf

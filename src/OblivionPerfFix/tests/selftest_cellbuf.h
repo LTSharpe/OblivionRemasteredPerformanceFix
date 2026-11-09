@@ -151,8 +151,10 @@ bool IsSubsequence(const std::vector<uint32_t>& a, const std::vector<uint32_t>& 
 }
 
 // One walk: n crossings, frames between them from the rng; mode 1 paced, 0 off. Returns failures counted in *bad.
-struct Result { int compared, mismatched; size_t stockEvicted, fixEvicted; bool subseq, exact, tailEmptyAfterOther; uint32_t maxTail; };
-Result RunWalk(int mode, uint32_t seed, int crossings, int maxGap, bool straight = false)
+struct Result { int compared, mismatched; size_t stockEvicted, fixEvicted; bool subseq, exact, tailEmptyAfterOther, jumpUncounted; uint32_t maxTail; };
+// endJump: before the last drain, a jump of 5 rows by another caller (a door / fast travel) while the tail holds cells; its
+// teardowns must not count as the delay's (rev130n CB-N1): jumpUncounted.
+Result RunWalk(int mode, uint32_t seed, int crossings, int maxGap, bool straight = false, bool endJump = false)
 {
     Model stock, fix;
     stock.Init(kBase);
@@ -242,6 +244,17 @@ Result RunWalk(int mode, uint32_t seed, int crossings, int maxGap, bool straight
             }
         }
     }
+    if (endJump) {
+        const uint32_t tb = tail();
+        const CellBufferCounts c0 = CellBufferTestCounts();
+        y += 5;
+        g_cur = &stock;
+        Shift(stock, ws, x, y, kBase);
+        fixCall(g_other, true, x, y);
+        const CellBufferCounts c1 = CellBufferTestCounts();
+        r.jumpUncounted = tb > 0 && tail() == 0 && c1.crossTail == c0.crossTail && c1.insertTorn == c0.insertTorn;
+    }
+    SetCellBufferEvictDelay(0);  // CellBufferEvictDelayMs: let the last tail drain
     for (int f = 0; f < 64 && tail(); ++f) fixCall(g_site2, false, x, y);  // the last crossing's tail
     r.stockEvicted = stock.evicted.size();
     r.fixEvicted = fix.evicted.size();
@@ -333,10 +346,41 @@ static void Run(const GameModule& game)
         const Result so = RunWalk(0, 53, 1500, 6, true);
         Check(so.exact && so.mismatched == 0 && so.stockEvicted > 1000, "cell buffer: off, forward walk: exactly the stock teardowns");
         const Result sp = RunWalk(1, 54, 1500, 12, true);
+        const CellBufferCounts cp = CellBufferTestCounts();
         Check(sp.exact && sp.mismatched == 0 && sp.compared > 500, "cell buffer: paced, forward walk: exactly the stock teardowns, in order");
+        Check(cp.insertTorn + cp.trimmed == sp.fixEvicted && cp.insertTorn <= cp.crossTail * 9,
+              "cell buffer: paced, forward walk: every teardown is the fix's or counted as the insert's (C-S1 counter)");
         const Result sq = RunWalk(1, 55, 1500, 1, true);
         Check(sq.exact && sq.mismatched == 0, "cell buffer: paced, forward walk with back-to-back crossings: exactly the stock teardowns");
         Check(c.paced == 0 && c.trimmed > 0 && c.trimmed <= o.fixEvicted, "cell buffer: off, every overflow torn down in its own call");
+    }
+    // ---- CellBufferEvictDelayMs: a drain waits for the delay (never elapses within a walk: QPC time), a crossing that
+    // finds tail cells left drains without delay; the teardowns stay exactly the stock ones in the stock order; the cells
+    // the game's insert tears down inside such a crossing frame are counted (rev130f C-S1) ----
+    {
+        Check(Config().cellBufferEvictDelayMs == 1500, "cell buffer: CellBufferEvictDelayMs defaults to 1500");
+        const uint64_t f0 = CellBufferEvictDelayFrames();
+        SetCellBufferEvictDelay(3000);
+        const Result sd = RunWalk(1, 57, 1500, 12, true);
+        const CellBufferCounts cd = CellBufferTestCounts();
+        const uint64_t waited = CellBufferEvictDelayFrames() - f0;
+        Check(sd.exact && sd.mismatched == 0 && sd.compared > 100 && waited > 100,
+              "cell buffer: drain delay, forward walk: drains wait, then exactly the stock teardowns, in order");
+        Check(cd.crossTail > 0 && cd.insertTorn > 0 && cd.insertTorn + cd.trimmed == sd.fixEvicted,
+              "cell buffer: drain delay, forward walk: the insert's crossing-frame teardowns counted exactly (C-S1)");
+        if (cd.insertTorn + cd.trimmed != sd.fixEvicted)
+            printf("      insert %llu + fix %llu != teardowns %zu\n", static_cast<unsigned long long>(cd.insertTorn),
+                   static_cast<unsigned long long>(cd.trimmed), sd.fixEvicted);
+        SetCellBufferEvictDelay(3000);
+        const Result jd = RunWalk(1, 59, 300, 12, true, true);
+        Check(jd.jumpUncounted && jd.mismatched == 0 && jd.subseq,
+              "cell buffer: drain delay, a door / fast-travel jump with tail cells empties the tail and is not counted (CB-N1)");
+        SetCellBufferEvictDelay(3000);
+        const Result rd = RunWalk(1, 58, 3000, 12);
+        Check(rd.mismatched == 0 && rd.subseq, "cell buffer: drain delay, random walk: stock buffer and order");
+        printf("      drain delay: %llu OT frames waited, forward walk %zu teardowns (stock %zu)\n",
+               static_cast<unsigned long long>(waited), sd.fixEvicted, sd.stockEvicted);
+        SetCellBufferEvictDelay(0);
     }
     // ---- an attached cell in the tail stops the trim ----
     {

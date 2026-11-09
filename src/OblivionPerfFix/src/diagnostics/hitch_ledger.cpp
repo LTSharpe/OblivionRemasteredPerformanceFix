@@ -627,11 +627,36 @@ uint64_t LedgerClockUs() { return g_installed ? Us() : 0; }
 
 bool LedgerIsGameThread() { return g_installed && OnGt(); }
 
+// The GPU crash report's frame history (memory_monitor.cpp samples it once a second): game-thread frames and the longest
+// frame since the last read, whether the ledger records or not.
+namespace {
+std::atomic<uint32_t> g_fsFrames{0}, g_fsMaxUs{0};
+uint64_t g_fsLastUs = 0;  // game thread only
+}  // namespace
+
+bool LedgerFrameStats(uint32_t* frames, uint32_t* maxUs)
+{
+    if (!g_installed) return false;
+    *frames = g_fsFrames.exchange(0, std::memory_order_relaxed);
+    *maxUs = g_fsMaxUs.exchange(0, std::memory_order_relaxed);
+    return true;
+}
+
 void LedgerFrameEnd(const LedgerPacing& p)
 {
     if (!g_installed) return;
     if (!g_gtId.load(std::memory_order_relaxed)) g_gtId.store(GetCurrentThreadId(), std::memory_order_relaxed);
     if (!OnGt()) return;
+    {
+        const uint64_t t = Us();
+        if (g_fsLastUs && t > g_fsLastUs) {
+            const uint64_t d = t - g_fsLastUs;
+            const uint32_t d32 = d > 0xFFFFFFFFull ? 0xFFFFFFFFu : static_cast<uint32_t>(d);
+            g_fsFrames.fetch_add(1, std::memory_order_relaxed);
+            if (d32 > g_fsMaxUs.load(std::memory_order_relaxed)) g_fsMaxUs.store(d32, std::memory_order_relaxed);
+        }
+        g_fsLastUs = t;
+    }
     const bool on = g_on.load(std::memory_order_relaxed);
     const uint64_t now = Us();
     const uint64_t bodies = StaticBodiesGtUs();

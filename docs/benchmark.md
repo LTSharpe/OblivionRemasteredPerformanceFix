@@ -105,6 +105,7 @@ Every scenario is a file in `bench/scenarios/`; `tools\Run-Benchmark.ps1 -List` 
 | `world` | flights over the Niben and near Leyawiin, a dungeon exit, Kvatch's Oblivion plane, the Shivering Isles | 13, ~9 min | open world, GPU-heavy places |
 | `actors` | the Imperial City market, a crowd of 40 soldiers, a battle | 5, ~3 min | many characters |
 | `silver-road` | the Silver Road north from Roxey Inn to Bruma at running speed (`silver-road-upper`: the climb only) | 1, ~5 min | stutter while travelling (the streaming, physics and navigation-mesh fixes) |
+| `bravil-road` | the road to Bravil: the Green Road from the Old Bridge map marker south past Pell's Gate and the Inn of Ill Omen to Bravil's bridge at running speed, after a 20 s hover like a fast-travel arrival | 1, ~4 min | stutter while travelling; the Bravil numbers in the 1.3.0-beta notes (`-Profile native-cap60`) |
 | `roxey-night` | Roxey Inn at night, then the road west to Sercen (`roxey-ft`: a forest first, then a jump there, like a fast travel) | 3, ~3 min | stutter after fast travel (`UploadMemoryKeep`, `GpuSceneKeepCapacity`) |
 | `blackwood` | the Blackwood forest at dusk: a low flight north towards the Wayshrine of Stendarr as Sheogorath's shrine and its worshippers load, and back south (`blackwood-onfoot`: the way north on foot) | 2, ~3 min | where the first travel-stutter fixes were found: streaming stutter and an NPC burst |
 | `npcburst` | a flight past Peryite's shrine as its five worshippers are created | 1, ~1 min | NPC creation hitches (`NpcCreationPacing`) |
@@ -231,6 +232,7 @@ tools\Sample-Timeline.ps1 -OutPrefix captures\t1 -Seconds 10          # the samp
 | your game or Documents folder isn't found | set `$env:OBLIVION_GAME_DIR` (the folder with `OblivionRemastered\`) or `$env:OBLIVION_SAVED_DIR` (`...\My Games\Oblivion Remastered\Saved`); `tools\GamePaths.ps1` shows what it found. A copy of the game outside Steam (no `steam_api64.dll` in the folder) is started directly |
 | UE4SS state unclear | `tools\Install-UE4SS.ps1 -Status` |
 | a warning that `Engine.ini has N setting(s) of your own` | your `...\Saved\Config\Windows\Engine.ini` holds settings the game does not write (usually an engine-tweak mod's file; it stays there after an uninstall). Every benchmark game runs with them, so the results are not the stock game's: rename the file (the game makes a fresh one) to measure without them. A read-only `Engine.ini` also stops `-IniCvars` |
+| a warning that starts `SAVED RESOLUTION:` | a run with your own settings (`-Profile own`, `user`) found the size of the benchmark's small window (854x480) saved as yours, so it runs at that size. If you did not choose it, an earlier benchmark version left it behind after a run that stopped early: set your resolution again in the game's options. |
 
 **Paths and privacy.** The game and its Documents folder are found through Steam's library list (`tools\GamePaths.ps1`;
 with Documents on OneDrive, the game still uses `C:\Users\<you>\Documents`). The runner's working files go to `run\`

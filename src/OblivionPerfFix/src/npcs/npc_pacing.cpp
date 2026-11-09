@@ -235,6 +235,11 @@ constexpr uint64_t kSlackMarginUs = 1500;  // kept free below the cap
 // 1 = FadeIn), the value (+0xBC), the owner actor (+0xA8), the owner class check (StaticClass call; UE 5.3
 // FStructBaseChain: class +0x30 array / +0x38 depth, object class at +0x10) and the actor's fade component (+0x7A0)
 // whose floor (+0xCC) the tick applies as max(floor, value).
+// Lab PacingNearFadeFrames (nearfade 2026-11-01, user decision "ok that they build while they fade-in"): the same test for
+// NEAR actors, stricter (dither >= 4.0, kNearFadeMin) and bounded: their appearance / equipment / hair units may wait under
+// the budget for at most the key's frames (1-3), run at once once the dither is below 4.0, and run as near units (nested
+// completions, ClothBuildDefer, AnimSkipPlaceholder see a near actor). The create and the head/BP pairing command are not
+// touched (the pairing queue keeps its stock timing for near actors).
 constexpr char kFadeTick[] =
     "48 89 5C 24 10 57 48 83 EC 20 48 8B D9 8B 89 ?? ?? 00 00 83 E9 01 0F 84 ?? ?? ?? ?? 83 F9 01 0F 85 ?? ?? ?? ?? "
     "F3 0F 59 8B ?? ?? 00 00 F3 0F 58 8B ?? ?? 00 00 0F 2F 8B ?? ?? 00 00 F3 0F 11 8B ?? ?? 00 00 72 ?? 48 8D 4B 30 "
@@ -354,6 +359,7 @@ struct State {
     std::atomic<bool> useSlack{true};
     std::atomic<bool> flowWait{true};
     std::atomic<int> flowWaitFrames{kMaxFlowWaitProgress};
+    std::atomic<bool> ownerWalk{true};  // PacingOwnerWalk (mkusm, PR #25): a non-actor in a delegate's owner chain does not end the walk
     std::atomic<bool> leanFlowDrain{true};  // PacingLeanFlowDrain: a level flow at its wait bound drains the main queue only
 
     // game-thread state
@@ -774,8 +780,9 @@ bool ActorLocation(const uint8_t* obj, double* x, double* y, double* z)
 
 // ActorLocation for any object of an owner chain: a smaller object (an equipment or hair delegate's owner, e.g. the
 // character's body pairing component) has no root component at that offset, and the word read there can be an invalid
-// pointer. That object is no actor; the walk goes on with its outer (ClothBuildDefer's owner lookup; lab PacingOwnerWalk).
-// Pacing's own walk in the public build (ResolveDelegate) ends there as before: the unit counts as near.
+// pointer. That object is no actor; the walk goes on with its outer (ClothBuildDefer's owner lookup; pacing's own walk with
+// PacingOwnerWalk, mkusm's code from the first version of public PR #25). With PacingOwnerWalk=0 pacing's own walk
+// (ResolveDelegate) ends there: the unit counts as near (runs at once).
 bool ActorLocationGuarded(const uint8_t* obj, double* x, double* y, double* z)
 {
     __try {
@@ -874,7 +881,7 @@ bool FarFrom(double x, double y, double z)
 // A delegate's owner (the weak pointer at +0x18) -> the actor it belongs to (itself or an outer); distant = farther than
 // the minimum distance and not rendered recently (PacingFadeAware: or still invisible in its spawn fade-in). Unknown
 // counts as near (runs as before). guarded: an object that faults at the root-component offset is skipped instead of
-// ending the walk (ClothBuildDefer's questions; lab: also pacing's own walk with PacingOwnerWalk). log: pacing's own
+// ending the walk (ClothBuildDefer's questions; also pacing's own walk with PacingOwnerWalk). log: pacing's own
 // call (the first 16 resolutions are logged; lab: its counters).
 bool ResolveOwner(const uint8_t* ownerWeak, uintptr_t* key, bool* distant, bool log, bool guarded)
 {
@@ -884,7 +891,7 @@ bool ResolveOwner(const uint8_t* ownerWeak, uintptr_t* key, bool* distant, bool 
     if (!g.testPlayer && (!g.outerOk || !g.weakGet)) return false;
     __try {
         const uint8_t* obj = static_cast<const uint8_t*>(g.weakGet(ownerWeak));
-        const bool walk = guarded;
+        const bool walk = guarded || g.ownerWalk.load(std::memory_order_relaxed);
         for (int i = 0; obj && i < 4; ++i) {
             double x, y, z;
             if (walk ? ActorLocationGuarded(obj, &x, &y, &z) : ActorLocation(obj, &x, &y, &z)) {
@@ -1043,6 +1050,7 @@ bool StillMayWait(const Entry& e)
 }
 
 
+
 // Runs a unit (depth and the distance a nested completion inherits) and returns its time in us.
 template <class F>
 uint64_t TimeUnit(int type, bool distant, const uint8_t* ownerWeak, F&& body)
@@ -1066,7 +1074,8 @@ void RunEntry()
 {
     Entry& e = Front();
     const DelegateType& d = g.del[e.type - kAppearance];
-    const uint64_t us = TimeUnit(e.type, e.distant, e.inst + kOwnerWeakOffset, [&] {
+    const bool runDistant = e.distant;
+    const uint64_t us = TimeUnit(e.type, runDistant, e.inst + kOwnerWeakOffset, [&] {
         d.execIfSafe(e.inst);
         d.dtor(e.inst, 0);
     });
@@ -1150,6 +1159,7 @@ bool DelegateUnit(int type, void* inst, bool* result)
         return false;
     }
     bool distant = false;
+    bool nearFade = false;  // lab PacingNearFadeFrames: near and fade-hidden (runs as a near unit)
     uintptr_t unitKey = 0;
     if (!FrameOpen()) {
         if (g.count && g.allowDefer && g.drainLogs < 12) {
@@ -1164,7 +1174,7 @@ bool DelegateUnit(int type, void* inst, bool* result)
         unitKey = key;
         // With a backlog, a distant unit (or one of an actor that has queued units) queues behind it; a near unit of
         // another actor runs now. Without one, a distant unit waits only when the frame's budget is spent.
-        const bool wait = g.count ? (distant || FifoHasKey(key)) : (distant && OverBudget(type));
+        bool wait = g.count ? (distant || FifoHasKey(key)) : (distant && OverBudget(type));
         const bool fadeHeld = g.lastFadeHeld;
         if (wait) {
             if (Enqueue(type, p, key, distant, fadeHeld)) {
@@ -1175,7 +1185,7 @@ bool DelegateUnit(int type, void* inst, bool* result)
         }
     }
     if (OverBudget(type)) g.frameFlags |= 4;
-    const uint64_t us = TimeUnit(type, distant, p + kOwnerWeakOffset, [&] { *result = d.execIfSafe(inst); });
+    const uint64_t us = TimeUnit(type, distant && !nearFade, p + kOwnerWeakOffset, [&] { *result = d.execIfSafe(inst); });
     Account(type, us);
     LAB_UNIT(type, us, reinterpret_cast<const uint8_t*>(unitKey), nullptr, 0);
     (void)unitKey;
@@ -1231,6 +1241,13 @@ uint64_t CreateExecHook(void* cmd)
     }
     if (g.allowDefer && distant && !PairForced() && OverBudget(kCreate, PairLag()))
         return Defer(static_cast<uint8_t*>(g.session), kCreate);
+    // CreatePreload (bigcreate; public 1.3.0): a far create whose form asset / class is not loaded waits while it loads
+    // asynchronously (CreatePreloadNear: also a near one, a few frames at most, while its spot is out of the camera's view)
+    const bool nearWait = !distant && g.allowDefer && !PairForced() &&
+                          CreatePreloadNearMayWait(x * kOldToUe, -y * kOldToUe, z * kOldToUe);
+    if (CreatePreloadBefore(cmd, (g.allowDefer && distant && !PairForced()) || nearWait, PairLag(),
+                            static_cast<uint64_t>(g.maxLag.load(std::memory_order_relaxed)), nearWait))
+        return Defer(static_cast<uint8_t*>(g.session), kCreate);
     if (PairForced() && distant) s.forced.fetch_add(1, std::memory_order_relaxed);
     g.lastCreateFar = distant;
     if (OverBudget(kCreate)) g.frameFlags |= distant ? 2 : 4;
@@ -1278,6 +1295,7 @@ void EndFrameStats()
             static_cast<unsigned long long>(PairLag()), static_cast<unsigned long long>(FifoAge()),
             g.frameFlags & 1 ? ", drained" : "", g.frameFlags & 2 ? ", lag bound" : "", g.frameFlags & 4 ? ", near/seen units" : "",
             g.frameFlags & 8 ? ", a level flow waits" : "");
+    MapPopupSpreadFrameEnd(g.frame);  // MapPopupSpread (public 1.3.0): safety flush at the next frame start (counted late)
     s.frames.fetch_add(1, std::memory_order_relaxed);
     AtomicMax(s.maxUnitsPerFrame, static_cast<uint64_t>(g.units));
     AtomicMax(s.maxFrameUnitUs, g.unitUs);
@@ -1324,6 +1342,7 @@ void MaxTickRateHook(void* engine)
         DoorDiagFrameEnd();  // diagnostic DoorDiag's loading-screen timeline (no-op unless installed)
         StreamBehindLoadingFrameEnd();  // StreamBehindLoadingScreen (no-op unless installed and on)
     }
+    BodySpreadFrame();     // BodyRemovalSpread (physics/body_spread.cpp): no-op unless installed
     const uint64_t sleep = t1 - t0, period = g.lastPaceEnd ? t1 - g.lastPaceEnd : 0;
     g.lastPaceEnd = t1;
     if (!period || period > 200000) return;
@@ -1386,6 +1405,7 @@ uint8_t FrameRun(void* manager)
     if (!g.allowDefer) ReplayAll();
     else if (g.count && g.heldFrames == 0 && FifoAge() >= PairLag()) ReplayBudget();
     g.inMainRun = true;
+    MapPopupSpreadPairing(true);  // MapPopupSpread: map icon lists may be kept until this run ends
     uint8_t r = 4;
     bool first = true;
     const uint64_t pair0 = NowUs(), pairUnits0 = g.unitCumUs;
@@ -1410,6 +1430,7 @@ uint8_t FrameRun(void* manager)
         g.pairCumUs += all > units ? all - units : 0;
     }
     g.inMainRun = false;
+    MapPopupSpreadPairing(false);  // MapPopupSpread: kept map icon lists run now
     if (g.deferredNow || g.E < g.S) s.deferFrames.fetch_add(1, std::memory_order_relaxed);
     // ClothBuildDefer (cloth_defer.cpp): the cloth simulation builds that wait, in what the frame's budget has left;
     // they count as units (the ledger's NPC units; the delegate units after the post-tick no longer run as the frame's
@@ -1516,6 +1537,8 @@ void HandlerEndHook(void* manager, void* tag, uint64_t a3, uint64_t a4)
 {
     const void* ret = _ReturnAddress();
     if (ret == g.postTickReturn) LedgerPostActorTick();  // HitchLedger: OnWorldPostActorTick (no-op unless recording)
+    if (ret == g.postTickReturn && OnGameThread()) MapPopupSpreadPostTick();  // MapPopupSpread: safety flush (counted late)
+    if (ret == g.postTickReturn && OnGameThread()) BodySpreadPostTick();  // BodyRemovalSpread: its drain point
     if ((ret == g.postTickReturn || g.testAnyCaller) && OnGameThread() && g.depth == 0 && !g.inMainRun && g.inFrame) {
         if (!g.allowDefer || !g.enabled.load(std::memory_order_relaxed)) ReplayAll();
         else ReplayBudget();
@@ -1606,6 +1629,11 @@ void SetNpcPacing(bool enabled, int budgetMs, int minDistance, int maxLagFrames,
     if (was != g.enabled.load()) Log("[pacing] NPC creation pacing %s", g.enabled.load() ? "on" : "off (backlog runs at once)");
 }
 
+void SetNpcPacingOwnerWalk(bool on)
+{
+    if (g.ownerWalk.exchange(on) != on)
+        Log("[pacing] a delegate owner's non-actor objects %s (PacingOwnerWalk %d)", on ? "are skipped" : "end the walk", on);
+}
 
 void SetNpcPacingLeanFlowDrain(bool on)
 {
@@ -1624,6 +1652,7 @@ void SetNpcPacingFadeAware(int mode)
             : fa              ? " (a far NPC still invisible in its spawn fade-in counts as unseen)"
                               : " (only the rendered test, as 1.2.2)");
 }
+
 
 
 
@@ -1703,9 +1732,21 @@ bool NpcPacingStillDistant(uint64_t ownerWeak)
     return ResolveOwnerQuiet(reinterpret_cast<const uint8_t*>(&ownerWeak), &key, &distant) && distant;
 }
 
+bool NpcPacingOnGameThread() { return OnGameThread(); }  // MapPopupSpread (port130k): the pairing hooks' game thread
+
 bool NpcPacingPlayerPos(double* x, double* y, double* z)
 {
     if (!g.installed || !OnGameThread() || !Player()) return false;
+    *x = g.px;
+    *y = g.py;
+    *z = g.pz;
+    return true;
+}
+
+// The last position the game thread saw (any thread; for the GPU crash report: the values may be a frame old or mixed).
+bool NpcPacingLastPlayerPos(double* x, double* y, double* z)
+{
+    if (!g.installed || (g.px == 0 && g.py == 0 && g.pz == 0)) return false;
     *x = g.px;
     *y = g.py;
     *z = g.pz;

@@ -18,6 +18,8 @@
 // safe while the game runs). Everything is found by byte patterns and the offsets are read from the game's code.
 #include "common.h"
 
+#include <atomic>
+
 namespace opf {
 namespace {
 
@@ -68,6 +70,7 @@ struct State {
     ExecIfSafeFn origExecIfSafe = nullptr;
 };
 State g;
+std::atomic<uint32_t> g_fadeToGameCalls{0};  // did the game's fade-to-game run? (game thread; CmdMemPregrow, lab DrawBehindLoadingScreen)
 
 uint32_t Disp32(const uint8_t* at) { return *reinterpret_cast<const uint32_t*>(at); }
 
@@ -237,6 +240,7 @@ void ExecHook(void* delegateInstance)
 {
     const uint64_t t0 = LedgerClockUs();  // HitchLedger: the fade-to-game frame and its time (PrepareCollisionBehindLoadingScreen included)
     const bool prepared = PrepareFirst(delegateInstance);
+    g_fadeToGameCalls.fetch_add(1, std::memory_order_relaxed);
     g.origExec(delegateInstance);
     if (prepared) PrepareCollisionEnd();
     if (t0) LedgerFadeToGame(LedgerClockUs() - t0);
@@ -246,6 +250,7 @@ bool ExecIfSafeHook(void* delegateInstance)
 {
     const uint64_t t0 = LedgerClockUs();
     const bool prepared = PrepareFirst(delegateInstance);
+    g_fadeToGameCalls.fetch_add(1, std::memory_order_relaxed);
     const bool result = g.origExecIfSafe(delegateInstance);
     if (prepared) PrepareCollisionEnd();
     if (t0) LedgerFadeToGame(LedgerClockUs() - t0);
@@ -307,6 +312,14 @@ bool FadeHookInfo(FadeHookSites* out)
     out->execHook = reinterpret_cast<void*>(&ExecHook);
     out->execIfSafeHook = reinterpret_cast<void*>(&ExecIfSafeHook);
     return true;
+}
+
+
+// How often the game's fade-to-game has run through our hook; false if the hook is not in
+uint32_t FadeToGameCalls(bool* hooked)
+{
+    if (hooked) *hooked = g.installed;
+    return g_fadeToGameCalls.load(std::memory_order_relaxed);
 }
 
 void FadeHookTestFunctions(void* fakeExec, void* fakeExecIfSafe, void* fakeGetFreeze)

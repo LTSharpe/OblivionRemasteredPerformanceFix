@@ -137,6 +137,8 @@ namespace {
 void ResizeHook(int32_t srcW, int32_t srcH, const ColorView* src, int32_t dstW, int32_t dstH, const ColorView* dst, bool linear,
                 bool forceOpaque)
 {
+    // GpuMenuShot: the backdrop handler called with a placeholder; the GPU pass makes the picture.
+    if (GpuMenuShotSkipResize(srcW, srcH, dstW, dstH, linear)) return;
     if (g_enabled.load(std::memory_order_relaxed) && !linear && srcW == dstW && srcH == dstH && srcW > 0 && srcH > 0 && src &&
         dst && src->data && dst->data) {
         const int64_t n = static_cast<int64_t>(srcW) * srcH;

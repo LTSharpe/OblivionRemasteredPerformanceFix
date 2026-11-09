@@ -25,7 +25,9 @@
 // the functions that use it (for example that the freeze writes the very bit the physics tick setup reads).
 #include "common.h"
 
+#include <algorithm>
 #include <atomic>
+#include <cstdio>
 
 namespace opf {
 namespace {
@@ -480,5 +482,6 @@ void CollisionPrepareTestFunctions(void* fakeDispatch, void* fakeCopy, void* fak
     g.testSimEnable = fakeSimEnable;
     if (fakeForceDisableAsync) g.forceDisableAsync = fakeForceDisableAsync;
 }
+
 
 }  // namespace opf

@@ -26,6 +26,7 @@ TG_NAMES = ["TG_PrePhysics", "TG_StartPhysics", "TG_DuringPhysics", "TG_EndPhysi
             "TG_PostUpdateWork", "TG_LastDemotable", "TG_NewlySpawned"]
 F_FADE, F_GRID, F_UNFOCUSED, F_TRAVEL, F_PSO = 4, 8, 16, 32, 64
 EDGE_FRAMES = 2          # a state change this many frames ago (or less) makes the frame a transition edge
+REVEAL_FRAMES = 60      # frames after the fade-to-game call that count as the reveal while the world is still frozen
 AFTER_LOAD_FRAMES = 300  # frames after the fade-to-game counted as "after a loading screen" (about 5 s at 60 fps)
 DOMINANT = 0.5           # a stage holding at least this share of the excess names the cause
 GRID_MS = 1.0            # the OT's grid transition this long (ms) in the frame = a cell-row crossing
@@ -168,6 +169,11 @@ def classify(f):
 
 def bucket(f, ignore_focus):
     flags = int(f["flags"])
+    # The fade-to-game frame and the fade-in frames before the unfreeze keep the "loading" state (freeze mode 1), but the
+    # player sees them: the loading picture stays up during the fade-to-game frame and the fade-in starts after it
+    # (2026-11-02, worker loadreveal: these were the largest after-load frames of a long play session, hidden in "loading").
+    if f["state"] == "loading" and not flags & F_TRAVEL and f["since_fade"] <= REVEAL_FRAMES:
+        return "reveal"
     if f["state"] == "loading" or flags & F_TRAVEL:
         return "loading"
     if f["since_change"] <= EDGE_FRAMES or flags & F_FADE:
@@ -296,6 +302,7 @@ def main():
           "screen's fade-to-game.\n\n")
     table("menu", "Menus (inventory, dialogue, map, pause): slow frames by cause", False)
     table("edge", "Transition edges (a menu opens or closes, the fade-to-game frame)", False)
+    table("reveal", "After a loading screen, world still frozen (the fade-to-game frame and the first fade-in frames)", False)
     table("unfocused", "Play without the keyboard focus", False)
     table("other", "Other states", False)
     nload = sum(1 for r in rows if r[1] == "loading")

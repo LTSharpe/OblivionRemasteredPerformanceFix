@@ -241,6 +241,7 @@ void ResizeWrapper(int32_t srcW, int32_t srcH, const ColorArray* src, int32_t ds
 {
     g_original(srcW, srcH, src, dstW, dstH, dst, linear, forceOpaque);
     if (!g_on.load(std::memory_order_relaxed)) return;
+    if (GpuMenuShotSkipping()) return;  // GpuMenuShot: a placeholder; the GPU pass applies this table (HdrMenuBackgroundShotTable)
     float ui = 0;
     int32_t device = 0;
     if (!dst || !dst->data || dstW <= 0 || dstH <= 0 || !Hdr10(&ui, &device)) {
@@ -267,6 +268,16 @@ void ResizeWrapper(int32_t srcW, int32_t srcH, const ColorArray* src, int32_t ds
 }
 
 }  // namespace
+
+// GpuMenuShot: the table the handler's resize would get now (false: no conversion now: off, SDR or not HDR10).
+bool HdrMenuBackgroundShotTable(uint8_t (&table)[256])
+{
+    float ui = 0;
+    int32_t device = 0;
+    if (!g_call || !g_on.load(std::memory_order_relaxed) || !Hdr10(&ui, &device)) return false;
+    HdrMenuBackgroundTable(ui, table);
+    return true;
+}
 
 bool ApplyHdrMenuBackground(bool beforeGameCode)
 {

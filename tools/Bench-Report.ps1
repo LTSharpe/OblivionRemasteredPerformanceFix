@@ -229,7 +229,10 @@ if ($first.profile.own) {
     $set = @($testRuns | ForEach-Object { $_.R.sessions } | Where-Object { $_.kind -eq 'perf' -and $_.settings } | Select-Object -First 1).settings
     if ($set) {
         $lv = { param($v) if ($null -eq $v) { '?' } else { @('Low', 'Medium', 'High', 'Ultra', 'Cinematic')[[math]::Min(4, [math]::Max(0, [int][double]$v))] } }
-        $up = switch ([int][double]$set.'Altar.UpscalingMethod') { 0 { 'none' } 1 { 'TSR' } 2 { 'FSR' } 3 { 'DLSS' } 4 { 'XeSS' } default { "method $($set.'Altar.UpscalingMethod')" } }
+        # Altar.UpscalingMethod, read from the game's apply function (exe+0x4974BC0, Ghidra, 2026-11-05): 1 switches on the DLSS
+        # cvar, 2 FSR3, 3 the XeSS cvar (its handler sets r.XeSS.Enabled); 0 uses the engine's own scaling; 4 does nothing.
+        # This agrees with issue #24, where an XeSS setup was printed as value 3. (Before: 1 TSR, 3 DLSS, 4 XeSS, which was wrong.)
+        $up = switch ([int][double]$set.'Altar.UpscalingMethod') { 0 { 'none (the engine''s TSR)' } 1 { 'DLSS' } 2 { 'FSR' } 3 { 'XeSS' } default { "method $($set.'Altar.UpscalingMethod')" } }
         $txt = "render scale $([math]::Round([double]$set.'r.ScreenPercentage'))%, upscaler $up, frame generation $(if ([double]$set.'r.FidelityFX.FI.Enabled' -ge 1) { 'on (FSR)' } else { 'off (FSR)' }), " +
                "hardware RT $(if ([double]$set.'r.Lumen.HardwareRayTracing' -ge 1) { "on (lighting mode $([int][double]$set.'r.Lumen.HardwareRayTracing.LightingMode'))" } else { 'off' }), " +
                "view distance $(& $lv $set.'sg.ViewDistanceQuality'), shadows $(& $lv $set.'sg.ShadowQuality'), GI $(& $lv $set.'sg.GlobalIlluminationQuality'), " +

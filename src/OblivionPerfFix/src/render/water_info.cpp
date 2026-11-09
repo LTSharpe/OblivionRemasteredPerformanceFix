@@ -139,6 +139,7 @@ using GtFn = void (*)(void* scene, const uint8_t* ctx);
 using RtFn = void (*)(void* rhiCmdList, const void* params);
 
 struct Sites {
+    uint8_t* gt = nullptr;  // UpdateWaterInfoRendering (game thread): WaterInfoSkip (lab: and WaterInfoProbe)
     uint8_t* rt = nullptr;
     uint8_t* endFlush = nullptr;
     uint8_t* waitOcc = nullptr;
@@ -160,6 +161,7 @@ std::atomic<bool> g_noOccWait{false};
 std::atomic<uint64_t> g_occSkipped{0};
 RtFn g_rt = nullptr;
 std::atomic<uint64_t> g_updates{0};  // water-info renders since start (render thread)
+GtFn g_gt = nullptr;
 thread_local bool t_inWaterInfo = false;  // inside the water-info render and skipping FSR3's copy
 thread_local bool t_inWater2 = false;      // inside the water-info render (any mode)
 
@@ -171,6 +173,14 @@ struct WaterScope {
     WaterScope& operator=(const WaterScope&) = delete;
 };
 
+
+// UpdateWaterInfoRendering's entry (game thread): WaterInfoSkip first (water/water_info_skip.cpp: true = the zone's inputs are
+// those of its last redraw, the call is skipped), then the game's function (lab: through WaterInfoProbe's timing).
+void GtHook(void* scene, const uint8_t* ctx)
+{
+    if (WaterInfoSkipGt(ctx)) return;
+    g_gt(scene, ctx);
+}
 
 void RtHook(void* cmd, const void* params)
 {
@@ -396,6 +406,7 @@ Sites FindSites()
 {
     Sites s;
     s.rt = FindByCaller(kRtCall, kRtCallAt, kRtPro, sizeof kRtPro, "UpdateWaterInfoRendering_RenderThread");
+    s.gt = FindByCaller(kGtCall, kGtCallAt, kGtPro, sizeof kGtPro, "UpdateWaterInfoRendering");
     s.endFlush = FindByCaller(kFlushJmp, kFlushJmpAt, kEndFlushPro, sizeof kEndFlushPro, "FRDGBuilder::EndFlushResourcesRHI");
     const auto occ = FindAll(Game().text, ParsePattern(kWaitOccBody));
     const auto en = FindAll(Game().text, ParsePattern(kEnableBody));
@@ -558,7 +569,7 @@ void FakeRt(void*, const void*)  // what the water-info render does: FSR3's Post
 
 }  // namespace
 
-bool InstallWaterCapture(bool beforeGameCode, bool probe)
+bool InstallWaterCapture(bool beforeGameCode, bool gtDetour)
 {
     if (!beforeGameCode) {
         Log("[water] WaterCapture*: can only be installed at start-up (version.dll), not installed");
@@ -574,7 +585,18 @@ bool InstallWaterCapture(bool beforeGameCode, bool probe)
     g_rt = reinterpret_cast<RtFn>(rt);
     Log("[water] UpdateWaterInfoRendering_RenderThread exe+0x%llX detoured (game TimeDateStamp 0x%08X)",
         static_cast<unsigned long long>(g_sites.rt - Game().base), Game().timeDateStamp);
-    (void)probe;
+    void* gt = nullptr;
+    if (gtDetour) {
+        if (Detour(g_sites.gt, kGtPro, sizeof kGtPro, reinterpret_cast<void*>(&GtHook), &gt, "UpdateWaterInfoRendering")) {
+            g_gt = reinterpret_cast<GtFn>(gt);
+            Log("[water] UpdateWaterInfoRendering exe+0x%llX detoured (game thread: WaterInfoSkip%s)",
+                static_cast<unsigned long long>(g_sites.gt - Game().base),
+                ""
+            );
+        } else {
+            Log("[water] UpdateWaterInfoRendering (game thread) unavailable: WaterInfoSkip off");
+        }
+    }
     if (g_sites.fsrSlot) {
         g_fsr = reinterpret_cast<FsrFn>(g_sites.fsrFn);
         if (WritePointer(g_sites.fsrSlot, reinterpret_cast<void*>(&FsrHook)))
@@ -611,11 +633,14 @@ bool InstallWaterCapture(bool beforeGameCode, bool probe)
     return true;
 }
 
+// UpdateWaterInfoRendering when its game-thread detour is in (WaterInfoSkip checks its layout in that function), else null.
+uint8_t* WaterInfoGtSite() { return g_gt ? g_sites.gt : nullptr; }
+
 bool WaterInfoTestPatched()  // self-test: the sites carry our patches (lab: the game-thread one only when the probe asked)
 {
     auto movJmp = [](const uint8_t* b) { return b && b[0] == 0x48 && b[1] == 0xB8 && b[10] == 0xFF && b[11] == 0xE0; };
     const bool rt = movJmp(g_sites.rt) && g_rt;
-    const bool gt = true;
+    const bool gt = !g_gt || movJmp(g_sites.gt);
     const bool fsr = g_sites.fsrSlot && *g_sites.fsrSlot == reinterpret_cast<void*>(&FsrHook);
     const bool fl = g_sites.endFlush && g_sites.endFlush[0] == 0xE9 && g_endFlush &&
                     memcmp(reinterpret_cast<const void*>(g_endFlush), kEndFlushPro, kEndFlushMoved) == 0;

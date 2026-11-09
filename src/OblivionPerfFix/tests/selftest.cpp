@@ -22,6 +22,7 @@
 #include <mutex>
 #include <algorithm>
 #include <string>
+#include <thread>
 #include <vector>
 
 // ---- fakes for the descriptor heap guard test ----
@@ -438,6 +439,7 @@ static void FakeRecycle(void* ev)
 
 static bool LogContains(const char* text)
 {
+    LogFlush();  // the log's writer thread may not have written the line yet
     bool hit = false;
     if (FILE* f = _wfsopen(L"selftest.log", L"r", _SH_DENYNO)) {
         char line[1024];
@@ -554,6 +556,9 @@ static uint64_t HashWords(uint64_t seed, const void* data, size_t bytes)
 #include "selftest_savebytes.h"     // SaveBytesBulk's sites and the game's array serialization vs the hook; SaveThumbnailAsync
 #include "selftest_saverefid.h"     // SaveRefIdIndex's sites and the helper vs the linear search
 #include "selftest_rigsetup.h"      // RigVmHashMemo / RigLogicMapCache: sites, memo and map replay with fakes
+#include "selftest_rigtmpl.h"       // RigImportTemplate: discovery, offsets, the RemoveElement guard, cap and table with fakes
+#include "selftest_farpawn.h"       // FarPawnMoveHalfRate / FarHorseMove: discovery, cadence, root motion, input mean, fakes
+#include "selftest_createpreload.h" // CreatePreload: sites, the form-asset map readers with a fake holder, per-command wait count
 #include "selftest_npcbodies.h"     // NpcBodiesOneLock: sites and the one-hold wrapper with a fake scene lock
 #include "selftest_rtscene.h"       // RtSceneBufferKeep: sites, patch and the stub's decisions
 #include "selftest_rtbatch.h"       // RayTracingBuildBatch: sites, patch and the queue decision
@@ -568,9 +573,23 @@ static uint64_t HashWords(uint64_t seed, const void* data, size_t bytes)
 #include "selftest_destroybatch.h" // PhysicsDestroyBatch: sites and the wrapper with fakes
 #include "selftest_clothreg.h"    // ClothRegisterLite: sites, lite builds and their completion with fakes
 #include "selftest_clothdefer.h"     // ClothBuildDefer: sites, hooks and the defer rule (after ClothRegisterLite)
+#include "selftest_bodyspread.h"   // BodyRemovalSpread: sites on the mapped exe, the queue / drain / drop logic with fakes
+#include "selftest_streamgran.h"    // StreamRegisterGranularity: the cvar's int on the mapped exe, set / live / left alone
+#include "selftest_lumennarrow.h"   // LumenCardsNarrow: sites, refusal, stub, unwind, the decision with fakes (lab: the proof)
+#include "selftest_waterinfo_skip.h"  // WaterInfoSkip: layout reads on the mapped exe, the same-input decision with fakes
+#include "selftest_waterspread.h"     // WaterInfoSpread: sites + shared zone layout on the mapped exe, the defer / merge logic with fakes
+#include "selftest_mapspread.h"       // MapPopupSpread: sites by pattern on the mapped exe, the keep / drop / reuse logic with fakes
+#include "selftest_gpushot.h"         // GpuMenuShot: sites by pattern on the mapped exe, the shader arithmetic, the shader on this GPU
+#include "selftest_thumbleft.h"        // SaveThumbLeftoverFix: sites by pattern, the removal decision, the bound-entry search
+#include "selftest_repath.h"        // RepathParallel: discovery on the mapped exe, the key, the nav-edit counter, the link marker
+#include "selftest_bufferfloor.h"   // InstanceBufferFloor: gate, the reserve (lab SceneBufferFloorMiB: sites, stub, hook, patches)
+#include "selftest_pairrace.h"      // PairReleaseOnce: discovery, the fix's writes and counting stubs (lab PairRaceProbe: a fake pool)
+#include "selftest_otframe.h"       // OtFrameTrim: discovery, install, the consumer and timer with fakes
+#include "selftest_loosemiss.h"     // LooseMissCache: discovery, install, the finder's checks with a fake _access
 #include "selftest_animpar.h"      // AnimTeardownParallel's shapes and the helper queue with fakes
 #include "selftest_cellbuf.h"      // CellBufferPacedEvict's shapes, the clamp stub and the buffer LRU with and without the fix
 #include "selftest_vramcounter.h"  // VramCounterFix: the Show VRAM counter
+#include "selftest_hangcapture.h"  // GpuPassMarkers and the GPU crash report's per-queue DRED / history lines
 #include "selftest_shaderscreen.h"  // ShaderScreenAfterDriverChange
 #include "selftest_doordiag.h"     // diagnostic DoorDiag: sites (locate only)
 #include "selftest_streamload.h"   // StreamBehindLoadingScreen: sites (locate only)
@@ -1060,6 +1079,16 @@ int wmain(int argc, wchar_t** argv)
         };
         const wchar_t* ini = L"logfile\\t.ini";
         put(ini, "[General]\r\nLogFile=0\r\n");
+        // DrawBehindLoadingScreen (loadreveal; public 1.3.0): 3 by default and when missing, read when set; its bookkeeping
+        Check(Config().drawBehindLoading == 3 && LoadConfig(ini).drawBehindLoading == 3, "DrawBehindLoadingScreen: 3 by default");
+        put(ini, "[Fixes]\r\nDrawBehindLoadingScreen=0\r\n");
+        Check(LoadConfig(ini).drawBehindLoading == 0, "DrawBehindLoadingScreen=0 is read");
+        {
+            char why[160] = "";
+            const bool ok = DrawBehindLoadingSelfTest(why, sizeof why);
+            Check(ok, ok ? "DrawBehindLoadingScreen: start, frames, undo, game changes, fade-to-game, abort, off, D-S1/S2/S3" : why);
+        }
+        put(ini, "[General]\r\nLogFile=0\r\n");
         Check(!LoadConfig(ini).logFile, "LogFile=0 is read");
         put(ini, "[General]\r\nLogFile=1\r\n");
         Check(LoadConfig(ini).logFile, "LogFile=1 is read");
@@ -1100,13 +1129,354 @@ int wmain(int argc, wchar_t** argv)
                   read(l1) == "OLD0" && read(l2) == "OLD1",
               "LogFile=1: the log is written and the earlier ones rotate (unchanged behaviour)");
         LogClose();
+        // The log's writer thread (ourbugs1107): the same bytes, order and time stamps as the caller-written log; the
+        // queue is written at a crash, at TerminateProcess and at ExitProcess (also the rest of a cut write); a full queue
+        // drops lines (counted, one note) instead of making the caller wait.
+        {
+            auto has = [](const std::string& text, const char* what) { return text.find(what) != std::string::npos; };
+            auto count = [](const std::string& text, const char* what) {
+                int n = 0;
+                for (size_t at = text.find(what); at != std::string::npos; at = text.find(what, at + 1)) ++n;
+                return n;
+            };
+            auto lines = [](const std::string& text) {
+                std::vector<std::string> v;
+                for (size_t a = 0; a < text.size();) {
+                    const size_t e = text.find("\r\n", a);
+                    if (e == std::string::npos) { v.push_back(text.substr(a)); break; }
+                    v.push_back(text.substr(a, e - a));
+                    a = e + 2;
+                }
+                return v;
+            };
+            auto stampMs = [](const std::string& l) -> long long {
+                int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0, ms = 0;
+                if (sscanf_s(l.c_str(), "%d-%d-%d %d:%d:%d.%d", &y, &mo, &d, &h, &mi, &s, &ms) != 7) return -1;
+                return ((static_cast<long long>(d) * 24 + h) * 60 + mi) * 60000LL + s * 1000LL + ms;
+            };
+            auto lineOf = [](const std::vector<std::string>& v, const char* what) {
+                for (size_t i = 0; i < v.size(); ++i)
+                    if (v[i].find(what) != std::string::npos) return static_cast<long long>(i);
+                return -1LL;
+            };
+            put(l0, "");
+            LogOpen(l0, 0, true);
+            LogGoAsync(nullptr);
+            Check(LogTestAsync(), "log writer: after LogGoAsync the lines go through the background thread");
+            Log("first line");
+            Log("two\nparts");
+            LogFlush();
+            std::string text = read(l0);
+            Check(has(text, "[log] lines are written by a background thread") && has(text, " first line\r\n") &&
+                      has(text, " two\r\nparts\r\n") && !has(text, "\n\n") && count(text, "\r\n") == count(text, "\n"),
+                  "log writer: the same bytes as the C runtime's text mode (CRLF, an inner \\n as \\r\\n)");
+
+            // order and time stamps: lines queued while the writer is held keep their callers' times and order
+            LogTestHoldWriter(true);
+            Log("held A");
+            Sleep(60);
+            Log("held B");
+            const bool queuedOnly = !has(read(l0), "held A");
+            constexpr int kThreads = 4, kPer = 2000;
+            std::vector<std::thread> threads;
+            for (int th = 0; th < kThreads; ++th)
+                threads.emplace_back([th] { for (int i = 0; i < kPer; ++i) Log("mt %d %d", th, i); });
+            for (std::thread& t : threads) t.join();
+            LogTestHoldWriter(false);
+            LogFlush();
+            text = read(l0);
+            std::vector<std::string> v = lines(text);
+            const long long a = lineOf(v, "held A"), b = lineOf(v, "held B");
+            Check(queuedOnly, "log writer: a held writer leaves the lines in the queue (the caller does not write them)");
+            Check(a >= 0 && b > a && stampMs(v[static_cast<size_t>(b)]) - stampMs(v[static_cast<size_t>(a)]) >= 50,
+                  "log writer: time stamps are taken at the call, not at the write");
+            {
+                int next[kThreads] = {}, bad = 0;
+                long long lastMs[kThreads] = {};
+                for (const std::string& l : v) {
+                    int th = -1, i = -1;
+                    const size_t at = l.find(" mt ");
+                    if (at == std::string::npos || sscanf_s(l.c_str() + at, " mt %d %d", &th, &i) != 2 || th < 0 || th >= kThreads) continue;
+                    const long long ms = stampMs(l);
+                    if (i != next[th] || ms < lastMs[th]) ++bad;
+                    next[th] = i + 1;
+                    lastMs[th] = ms;
+                }
+                bool all = bad == 0;
+                for (int th = 0; th < kThreads; ++th) all = all && next[th] == kPer;
+                Check(all && !has(text, "queue full"),
+                      "log writer: 4 threads x 2000 lines: every line once, each thread's in its order with rising time stamps, none dropped");
+            }
+
+            // a crash: LogCrashMode writes the queue at once, later lines are written by their callers
+            LogTestHoldWriter(true);
+            Log("before the crash 1");
+            Log("before the crash 2");
+            const bool waited = !has(read(l0), "before the crash 1");
+            LogCrashMode();
+            text = read(l0);
+            const bool flushed = has(text, "before the crash 1") && has(text, "before the crash 2") &&
+                                 text.find("before the crash 1") < text.find("before the crash 2");
+            Log("after the crash");
+            Check(waited && flushed && has(read(l0), "after the crash") && !LogTestAsync(),
+                  "log writer: at a crash every queued line is in the file at once, later lines too");
+            LogClose();
+
+            // a "[crash]" line (the crash handlers' own) writes the queue before it, also without LogCrashMode
+            LogOpen(l0, 0, true);
+            LogGoAsync(nullptr);
+            LogFlush();
+            LogTestHoldWriter(true);
+            Log("queued line");
+            Log("[crash] UE is reporting a crash (test)");
+            text = read(l0);
+            Check(has(text, "queued line") && has(text, "[crash] UE is reporting") && text.find("queued line") < text.find("[crash]"),
+                  "log writer: a [crash] line is written at once, with every line before it");
+            LogClose();
+
+            // the game's TerminateProcess (the guard's body)
+            LogOpen(l0, 0, true);
+            LogGoAsync(nullptr);
+            LogFlush();
+            LogTestHoldWriter(true);
+            Log("before TerminateProcess");
+            const bool queuedT = !has(read(l0), "before TerminateProcess");
+            LogBeforeExit();
+            Check(queuedT && has(read(l0), "before TerminateProcess"), "log writer: TerminateProcess writes the queue first");
+            LogClose();
+
+            // ExitProcess ended the writer in the middle of a write: DLL_PROCESS_DETACH writes the rest of it, then the queue
+            LogOpen(l0, 0, true);
+            LogGoAsync(nullptr);
+            LogFlush();
+            LogTestHoldWriter(true);
+            Log("cut line one");
+            Log("cut line two");
+            Log("cut line three");
+            const bool cut = LogTestEndedMidWrite(30);  // 30 bytes: into the first line
+            Log("queued after the cut");
+            LogProcessExit(true);
+            text = read(l0);
+            v = lines(text);
+            const long long c1 = lineOf(v, "cut line one"), c3 = lineOf(v, "cut line three"), q = lineOf(v, "queued after the cut");
+            Check(cut && count(text, "cut line one") == 1 && count(text, "cut line two") == 1 && count(text, "cut line three") == 1 &&
+                      count(text, "queued after the cut") == 1 && c1 >= 0 && c3 > c1 && q > c3 && stampMs(v[static_cast<size_t>(c1)]) >= 0,
+                  "log writer: at ExitProcess the cut write is completed (no line lost or doubled), then the queue");
+            LogClose();
+
+            // a full queue: the caller does not wait; the lines are dropped, counted and noted before the next line
+            LogOpen(l0, 0, true);
+            LogTestSetCapacity(4096);
+            LogGoAsync(nullptr);
+            LogFlush();
+            LogTestHoldWriter(true);
+            LARGE_INTEGER f, t0, t1;
+            QueryPerformanceFrequency(&f);
+            double worstUs = 0;
+            for (int i = 0; i < 200; ++i) {
+                QueryPerformanceCounter(&t0);
+                Log("fill %03d ..........................................................................", i);
+                QueryPerformanceCounter(&t1);
+                worstUs = std::max(worstUs, (t1.QuadPart - t0.QuadPart) * 1e6 / f.QuadPart);
+            }
+            LogTestHoldWriter(false);
+            LogFlush();
+            Log("after the drops");
+            LogFlush();
+            text = read(l0);
+            v = lines(text);
+            int kept = 0, firstMissing = -1;
+            for (int i = 0; i < 200; ++i) {
+                char key[16];
+                snprintf(key, sizeof key, "fill %03d ", i);
+                if (has(text, key)) {
+                    ++kept;
+                    if (firstMissing >= 0) firstMissing = 1000;  // a gap: a later line kept after a dropped one
+                } else if (firstMissing < 0) firstMissing = i;
+            }
+            unsigned long long noted = 0;
+            const long long note = lineOf(v, "[log] queue full: "), after = lineOf(v, "after the drops");
+            if (note >= 0) sscanf_s(v[static_cast<size_t>(note)].c_str() + v[static_cast<size_t>(note)].find("full: ") + 6, "%llu", &noted);
+            Check(kept > 10 && kept < 200 && firstMissing == kept && noted == static_cast<unsigned long long>(200 - kept) &&
+                      note >= 0 && after == note + 1 && worstUs < 5000,
+                  "log writer: a full queue drops the newest lines without waiting (< 5 ms per call), counts them in one note before the next line");
+            LogClose();
+        }
+
+        // The log can't be opened: OblivionPerfFix.<pid>.log next to it, then the same name in %TEMP%, the reasons at the
+        // top. A handle without FILE_SHARE_WRITE stands in for a leftover game process holding the file.
+        {
+            const std::wstring pid = std::to_wstring(GetCurrentProcessId());
+            const std::wstring lp = L"logfile\\OblivionPerfFix." + pid + L".log";
+            CreateDirectoryW(L"logfile\\tmp", nullptr);
+            wchar_t tmpDir[MAX_PATH], oldTmp[MAX_PATH] = L"";
+            GetFullPathNameW(L"logfile\\tmp\\", MAX_PATH, tmpDir, nullptr);
+            const DWORD hadTmp = GetEnvironmentVariableW(L"TMP", oldTmp, MAX_PATH);
+            SetEnvironmentVariableW(L"TMP", tmpDir);  // nothing of this test lands in the real %TEMP%
+            const std::wstring lt = std::wstring(tmpDir) + L"OblivionPerfFix." + pid + L".log";
+            auto hold = [](const wchar_t* path) {
+                return CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            };
+            auto exists = [](const std::wstring& path) { return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES; };
+            auto has = [](const std::string& text, const char* what) { return text.find(what) != std::string::npos; };
+
+            // step 1: another process holds the log
+            put(l0, "HELD");
+            HANDLE h0 = hold(l0);
+            LogOpen(l0, 2, true);
+            Log("loaded as test");
+            LogClose();
+            std::string text = read(lp.c_str());
+            Check(has(text, "loaded as test"), "log fallback: a held log: the session's lines go to OblivionPerfFix.<pid>.log");
+            Check(has(text, "could not open logfile\\OblivionPerfFix.log (Windows error 32") && has(text, "did not fully close") &&
+                      has(text, "Only the log is affected") && text.find("could not open") < text.find("loaded as test"),
+                  "log fallback: its top says which file failed, why, and that the fixes are not affected");
+            Check(read(l0) == "HELD" && !exists(lt), "log fallback: the held log is untouched, %TEMP% not used");
+            DeleteFileW(lp.c_str());
+
+            // step 1 again: every log file read-only, so neither rotation nor the open works
+            CloseHandle(h0);
+            put(l0, "RO0"); put(l1, "RO1"); put(l2, "RO2");
+            for (const wchar_t* f : {l0, l1, l2}) SetFileAttributesW(f, FILE_ATTRIBUTE_READONLY);
+            LogOpen(l0, 2, true);
+            Log("loaded as test");
+            LogClose();
+            text = read(lp.c_str());
+            Check(has(text, "loaded as test") && has(text, "(Windows error 5") && has(text, "access denied"),
+                  "log fallback: read-only logs: OblivionPerfFix.<pid>.log, reason access denied");
+            DeleteFileW(lp.c_str());
+            SetFileAttributesW(l2, FILE_ATTRIBUTE_NORMAL);
+            SetFileAttributesW(l1, FILE_ATTRIBUTE_NORMAL);
+
+            // a read-only log alone is no failure: rotation moves it away (Windows renames read-only files)
+            LogOpen(l0, 2, true);
+            Log("loaded as test");
+            LogClose();
+            Check(has(read(l0), "loaded as test") && read(l1) == "RO0" && !exists(lp),
+                  "log: a read-only log alone rotates away and the normal log opens (no fallback)");
+            SetFileAttributesW(l1, FILE_ATTRIBUTE_NORMAL);
+
+            // step 2: the same folder fails too
+            put(l0, "HELD"); put(lp.c_str(), "HELDP");
+            h0 = hold(l0);
+            HANDLE hp = hold(lp.c_str());
+            LogOpen(l0, 2, true);
+            Log("loaded as test");
+            LogClose();
+            text = read(lt.c_str());
+            Check(has(text, "loaded as test"), "log fallback: both held: the session's lines go to %TEMP%");
+            Check(has(text, "could not open logfile\\OblivionPerfFix.log (") && has(text, ("could not open logfile\\OblivionPerfFix." + std::to_string(GetCurrentProcessId()) + ".log (").c_str()),
+                  "log fallback: the %TEMP% log names both files that failed");
+            Check(read(l0) == "HELD" && read(lp.c_str()) == "HELDP", "log fallback: the held files are untouched");
+
+            // nowhere left: no crash, nothing written, the fix goes on
+            HANDLE ht = hold(lt.c_str());
+            LogOpen(l0, 2, true);
+            Log("loaded as test");
+            Check(LogEnabled() && read(l0) == "HELD" && read(lp.c_str()) == "HELDP", "log fallback: all three held: Log does nothing, no crash");
+            LogClose();
+            CloseHandle(ht);
+            DeleteFileW(lt.c_str());
+            CloseHandle(hp);
+            DeleteFileW(lp.c_str());
+
+            // LogFile=0: no fallback file at start-up either; a crash report takes the fallback
+            LogOpen(l0, 2, false);
+            Log("loaded as test");
+            Check(!exists(lp) && !exists(lt) && read(l0) == "HELD", "log fallback: LogFile=0: nothing created at start-up, also with a held log");
+            Log("[gpucrash] device removed reason 0x887A0006");
+            Log("[mem] after the crash report");
+            LogClose();
+            text = read(lp.c_str());
+            Check(has(text, "device removed reason") && has(text, "LogFile=0") && has(text, "could not open") &&
+                      !has(text, "loaded as test") && !has(text, "after the crash report"),
+                  "log fallback: LogFile=0: a crash report takes the fallback, with both notes and nothing else");
+            DeleteFileW(lp.c_str());
+
+            // clean-up: only the two newest other <pid> logs stay; rotated logs and other names are left alone
+            const wchar_t* const old[] = {L"logfile\\OblivionPerfFix.900000104.log", L"logfile\\OblivionPerfFix.900000108.log",
+                                          L"logfile\\OblivionPerfFix.900000112.log", L"logfile\\OblivionPerfFix.900000116.log",
+                                          L"logfile\\OblivionPerfFix.900000120.log"};
+            FILETIME now;
+            GetSystemTimeAsFileTime(&now);
+            ULARGE_INTEGER age{{now.dwLowDateTime, now.dwHighDateTime}};
+            for (const wchar_t* f : old) {  // made oldest first, an hour apart
+                put(f, "OLD");
+                age.QuadPart -= 36000000000ULL;
+            }
+            for (const wchar_t* f : old) {
+                age.QuadPart += 36000000000ULL;
+                FILETIME ft{age.LowPart, age.HighPart};
+                HANDLE file = CreateFileW(f, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                SetFileTime(file, nullptr, nullptr, &ft);
+                CloseHandle(file);
+            }
+            const wchar_t* lOther = L"logfile\\OblivionPerfFix.notes.log";
+            put(lOther, "KEEP"); put(l1, "KEEP1"); put(l2, "KEEP2");
+            CloseHandle(h0);
+            LogOpen(l0, 2, true);  // a normal start
+            Log("loaded as test");
+            LogClose();
+            Check(exists(old[0]) && exists(old[4]), "log fallback: a normal start leaves earlier <pid> logs alone");
+            put(l1, "KEEP1"); put(l2, "KEEP2");
+            h0 = hold(l0);
+            LogOpen(l0, 2, true);
+            Log("loaded as test");
+            LogClose();
+            CloseHandle(h0);
+            Check(!exists(old[0]) && !exists(old[1]) && !exists(old[2]) && exists(old[3]) && exists(old[4]) && exists(lp),
+                  "log fallback: the new log and the two newest others stay, older <pid> logs are deleted");
+            Check(read(lOther) == "KEEP" && exists(l2) && exists(l0), "log fallback: other names and the rotated logs stay");
+            DeleteFileW(old[3]); DeleteFileW(old[4]); DeleteFileW(lOther); DeleteFileW(lp.c_str());
+
+            // a folder name outside the C locale: the top line must survive (UTF-8)
+            const std::wstring dirU = std::wstring(L"logfile\\") + static_cast<wchar_t>(0x041F);
+            CreateDirectoryW(dirU.c_str(), nullptr);
+            const std::wstring lu = dirU + L"\\OblivionPerfFix.log";
+            const std::wstring lup = dirU + L"\\OblivionPerfFix." + pid + L".log";
+            h0 = hold(lu.c_str());
+            LogOpen(lu.c_str(), 0, true);
+            Log("loaded as test");
+            LogClose();
+            CloseHandle(h0);
+            text = read(lup.c_str());
+            Check(has(text, "could not open logfile\\\xD0\x9F\\OblivionPerfFix.log (Windows error 32") && has(text, "loaded as test"),
+                  "log fallback: a non-ASCII path is written in full (UTF-8)");
+            DeleteFileW(lu.c_str()); DeleteFileW(lup.c_str());
+            RemoveDirectoryW(dirU.c_str());
+
+            // Game builds: the known pairs say nothing; anything else gets one plain line, and nothing is switched off by it
+            put(l0, "");
+            LogOpen(l0, 0, true);
+            GameModule build;
+            build.timeDateStamp = 0xF19077A4u; build.sizeOfImage = 0x9E1E000u;
+            const bool steamKnown = NoteGameBuild(build);
+            build.timeDateStamp = 0x94273715u; build.sizeOfImage = 0x94A7000u;
+            const bool gamePassKnown = NoteGameBuild(build);
+            Check(steamKnown && gamePassKnown && !has(read(l0), "not recognised"), "game build: Steam 19115871 and Game Pass: no line");
+            build.timeDateStamp = 0xF19077A4u; build.sizeOfImage = 0x9E58000u;
+            const bool sizeDiffers = NoteGameBuild(build);
+            build.timeDateStamp = 0xA63B96A2u; build.sizeOfImage = 0x9E58000u;  // the build in issue #43
+            const bool stampDiffers = NoteGameBuild(build);
+            LogClose();
+            text = read(l0);
+            Check(!sizeDiffers && !stampDiffers && has(text, "game build not recognised (TimeDateStamp 0xA63B96A2, SizeOfImage 0x9E58000)") &&
+                      has(text, "stays off"),
+                  "game build: another stamp or size: one line with both values and what it means");
+
+            if (hadTmp) SetEnvironmentVariableW(L"TMP", oldTmp); else SetEnvironmentVariableW(L"TMP", nullptr);
+            RemoveDirectoryW(L"logfile\\tmp");
+        }
+        for (const wchar_t* f : {l0, l1, l2}) SetFileAttributesW(f, FILE_ATTRIBUTE_NORMAL);
         DeleteFileW(l0); DeleteFileW(l1); DeleteFileW(l2); DeleteFileW(ini);
         RemoveDirectoryW(L"logfile");
     }
     LogOpen(L"selftest.log");
+    LogGoAsync(nullptr);  // the rest of the self-test logs through the writer thread, as the game does
 
     GameModule game;
     Check(InitGameModule(game, module), "game module sections found");
+    if (game.timeDateStamp == 0xF19077A4u) Check(NoteGameBuild(game), "game build: this exe is the Steam build NoteGameBuild knows");
     scantest::Begin();  // every search below is checked against the reference search
     scantest::RandomTests(game);
 
@@ -2577,6 +2947,20 @@ int wmain(int argc, wchar_t** argv)
     dnat::Run(game);
     // SeparableSkinAbove4K (selftest_skinsss.h).
     skinsss::Run(game);
+    // BodyRemovalSpread (selftest_bodyspread.h): discovery only on the mapped exe (nothing installed) and its logic with fakes.
+    BodySpreadRun(game);
+    // StreamRegisterGranularity (selftest_streamgran.h): the cvar's bound int on the mapped exe and the set rules.
+    StreamGranRun();
+    // LumenCardsNarrow (selftest_lumennarrow.h): discovery, refusal and patch on a copy, the stubs, the decision with fakes.
+    LumenNarrowRun(game);
+    // RepathParallel (selftest_repath.h): discovery on the mapped exe (nothing installed), the key and hooks with fakes.
+    RepathRun(game);
+    // PairReleaseOnce / lab PairRaceProbe (selftest_pairrace.h): rewrites the two early releases (no later test reads them).
+    PairRaceRun(game);
+    // OtFrameTrim (selftest_otframe.h): rewrites the OT frame-start sleep's call and the node timer (no later test reads them).
+    OtFrameTrimRun(game);
+    // LooseMissCache (selftest_loosemiss.h): rewrites the file finder's two _access calls (no later test reads them).
+    LooseMissRun(game);
     // AnimTeardownParallel (lab prototype): dying NPC animation data's interpolators on helper threads (selftest_animpar.h).
     apar::Run(game);
     // CellBufferPacedEvict (lab prototype): spare cell buffer slots, overflow torn down one cell per OT frame (selftest_cellbuf.h); after
@@ -2593,6 +2977,8 @@ int wmain(int argc, wchar_t** argv)
 
     // VramCounterFix (selftest_vramcounter.h).
     vramc::Run(game);
+    // GpuPassMarkers (discovery only, nothing installed) and the GPU crash report's new parts with fakes (selftest_hangcapture.h).
+    hangcap::Run(game);
     // ShaderScreenAfterDriverChange (selftest_shaderscreen.h).
     shs::Run(game);
 
@@ -2959,6 +3345,64 @@ int wmain(int argc, wchar_t** argv)
         reinterpret_cast<GrowFn>(sc.growHook)(&fresh, 59999);
         Check(fresh.num == 60000 && fresh.max >= 490000 && fresh.max <= 510000,
               "lumen on: a new scene at 1/8 of the session's peak grows straight to the peak + 1/4");
+        // LumenGroupsPrior (default 2,600,000: 1/32 = 81,250). The session's peak is set to 400,000 here (as the cases above
+        // leave it), so without the prior a grow from 1/8 of it goes to the peak + 1/4 (500,000). The commit room and the
+        // available commit come from the self-test override.
+        {
+            constexpr int64_t kPrior = 2600000;
+            constexpr int kSpareMB = 2048;  // 2 x MemoryReliefCommitMB
+            constexpr int64_t kBlockMB = (kPrior * 80 + (1 << 20) - 1) >> 20;  // 199 (198.4 MiB, rounded up)
+            const int64_t needMB = kBlockMB + kSpareMB;
+            LumenGrowTestSetPeak(400000);
+            SetLumenGroupsPrior(kPrior, kSpareMB);
+            LumenPriorTestCommitRoom(100000, -1);
+            auto growTo = [&](int32_t num) {
+                FakeTArray arr{nullptr, num, num - 1};
+                reinterpret_cast<GrowFn>(sc.growHook)(&arr, num - 1);
+                return arr;
+            };
+            auto viaRule = [](const FakeTArray& t) { return t.max >= 490000 && t.max <= 510000; };   // peak + 1/4
+            auto viaPrior = [](const FakeTArray& t) { return t.max >= 2590000 && t.max <= 2610000; };
+            const FakeTArray under = growTo(81249);  // one under 1/32: the policy above
+            const FakeTArray at = growTo(81250);     // exactly 1/32: straight to the prior
+            const bool boundary = viaRule(under) && viaPrior(at) && at.num == 81250 && g_fakeGrowOldNum == 81249;
+            Check(boundary, "LumenGroupsPrior: one entry under 1/32 the grow policy as before, at exactly 1/32 straight to the "
+                            "prior (Num and the copied count unchanged)");
+            if (!boundary) printf("    under %d at %d\n", under.max, at.max);
+            LumenPriorTestCommitRoom(needMB - 2, -1);  // commit room under the block + 2 GB: doubled as before
+            const FakeTArray tight = growTo(81251);
+            LumenPriorTestCommitRoom(needMB, -1);
+            const FakeTArray roomy = growTo(81251);
+            Check(viaRule(tight) && viaPrior(roomy), "LumenGroupsPrior: skipped while the commit room is under the block + 2 GB, "
+                                                     "taken from there");
+            if (!(viaRule(tight) && viaPrior(roomy))) printf("    tight %d roomy %d\n", tight.max, roomy.max);
+            LumenPriorTestCommitRoom(100000, kBlockMB - 2);  // room through page file growth only: Windows would grow it mid-copy
+            const FakeTArray growth = growTo(81251);
+            LumenPriorTestCommitRoom(100000, kBlockMB);
+            const FakeTArray avail = growTo(81251);
+            Check(viaRule(growth) && viaPrior(avail), "LumenGroupsPrior: skipped while the available commit (without page file "
+                                                      "growth) is under the block, taken from there");
+            if (!(viaRule(growth) && viaPrior(avail))) printf("    growth %d avail %d\n", growth.max, avail.max);
+            LumenPriorTestCommitRoom(-2, -1);  // no memory sample yet
+            Check(viaRule(growTo(81251)), "LumenGroupsPrior: skipped while the commit room is not known yet");
+            SetLumenGroupsPrior(kPrior, kSpareMB);  // logs the last decision (as the monitor thread does once a second)
+            LumenPriorTestCommitRoom(100000, -1);
+            SetLumenGroupsPrior(0, kSpareMB);
+            Check(viaRule(growTo(81251)), "LumenGroupsPrior=0: the grow policy as before (0.12.0-1.2.4)");
+            SetLumenGroupsPrior(kPrior, kSpareMB);
+            SetLumenKeepCapacityEnabled(false);  // the ini, MemoryRelief's commit level or a shared-memory GPU
+            const FakeTArray stock = growTo(81251);
+            Check(stock.max == 81251 + 3 * 81251 / 8 + 16, "LumenGroupsPrior: with LumenKeepArrayCapacity off (or under MemoryRelief) "
+                                                         "the game's own grow");
+            SetLumenKeepCapacityEnabled(true);
+            const FakeTArray late = growTo(2600001);  // a grow past the prior: doubles (never a smaller block than before)
+            Check(late.num == 2600001 && late.max >= 5150000 && late.max <= 5250000,
+                  "LumenGroupsPrior: a grow past the prior doubles as before");
+            if (!(late.max >= 5150000 && late.max <= 5250000)) printf("    late %d\n", late.max);
+            SetLumenGroupsPrior(0, kSpareMB);
+            LumenPriorTestCommitRoom(-1, -1);
+            LumenGrowTestSetPeak(400000);  // as before this block
+        }
 
         SetUploadMemoryKeep(true, 3600, 64, 0);
         reinterpret_cast<BuddyFn>(sc.buddyHook)(nullptr, 20);
@@ -3679,6 +4123,47 @@ int wmain(int argc, wchar_t** argv)
                   "pacing: the delegates run afterwards, queue in step");
         }
 
+        // PacingOwnerWalk (mkusm, PR #25): three delegates whose owner is a smaller object (equipment, hair) with an invalid word
+        // at the actor's root-component offset, its outer a far actor. Off: the fault ends the walk, the units count as near
+        // and all run in their frame; on: the walk goes on to the outer, so they wait like that actor's units
+        {
+            static FakeActor owActor{}, owRoot{}, owEquip{};
+            *reinterpret_cast<void**>(owActor.bytes + 0x1A0) = &owRoot;
+            *reinterpret_cast<void**>(owRoot.bytes + 0x20) = &owActor;
+            *reinterpret_cast<double*>(owRoot.bytes + 0x280) = 30000.0;
+            *reinterpret_cast<uintptr_t*>(owEquip.bytes + 0x1A0) = 0x10;  // no pointer: reading its outer faults
+            *reinterpret_cast<void**>(owEquip.bytes + 0x20) = &owActor;
+            static FakeDelInst ow[3]{};
+            auto ownerWalk = [&](bool on, int idBase) {
+                SetNpcPacingOwnerWalk(on);
+                for (int k = 0; k < 3; ++k) {
+                    ow[k] = FakeDelInst{};
+                    ow[k].vtable = reinterpret_cast<void*>(0x1234);
+                    ow[k].weak = &owEquip;
+                    ow[k].id = idBase + k;
+                    ow[k].costUs = 6000;
+                }
+                g_pcDelRan.clear();
+                PcPost(kFakeEnd, 0, 0);
+                run(fakeMgr, -1);
+                for (int k = 0; k < 3; ++k) del(&ow[k]);
+                const size_t inFrame = g_pcDelRan.size();
+                end(fakeMgr, nullptr, 2, 0);
+                for (int k = 0; k < 12 && NpcPacingTestRead().fifo; ++k) {
+                    PcPost(kFakeEnd, 0, 0);
+                    run(fakeMgr, -1);
+                    end(fakeMgr, nullptr, 2, 0);
+                }
+                return inFrame;
+            };
+            const size_t ranOff = ownerWalk(false, 80);
+            Check(ranOff == 3 && g_pcDelRan == std::vector<int>({80, 81, 82}),
+                  "pacing: PacingOwnerWalk=0: an owner that faults at the root-component offset ends the walk: near, all run at once");
+            const size_t ranOn = ownerWalk(true, 90);
+            Check(ranOn == 1 && g_pcDelRan == std::vector<int>({90, 91, 92}) && NpcPacingTestRead().fifo == 0 && !g_pcDeadlock &&
+                      NpcPacingTestRead().S == NpcPacingTestRead().E,
+                  "pacing: PacingOwnerWalk=1: the walk goes on to its outer, a far actor: the first runs, the others wait, in order");
+        }
 
         // PacingLeanFlowDrain: a level flow reaches its bound (3 frames: the queue owes an older OT frame) and the owed
         // main queue drains before it; off: the waiting delegates drain with it (as before), on: they stay queued and
@@ -3813,8 +4298,9 @@ int wmain(int argc, wchar_t** argv)
 
         // ClothBuildDefer's owner lookup: three delegates whose owner is like an equipment unit's (the character's body
         // pairing component: no pointer at the actor's root-component offset), its outer a far actor. Pacing's walk ends at
-        // that owner: the units count as near and all run in their frame, as on main. Asked from inside them,
-        // NpcPacingDistantUnit and NpcPacingStillDistant walk on to the far actor, so a robe built there may wait
+        // that owner (PacingOwnerWalk=0 for this check): the units count as near and all run in their frame. Asked from inside
+        // them, NpcPacingDistantUnit and NpcPacingStillDistant walk on to the far actor, so a robe built there may wait
+        SetNpcPacingOwnerWalk(false);
         {
             static FakeActor owActor{}, owRoot{}, owEquip{};
             *reinterpret_cast<void**>(owActor.bytes + 0x1A0) = &owRoot;
@@ -3854,6 +4340,7 @@ int wmain(int argc, wchar_t** argv)
             Check(askedFar == 3 && askedOwner == reinterpret_cast<uint64_t>(&owEquip) && askedStill == 3,
                   "pacing (ClothBuildDefer): asked inside those units, the guarded walk reaches the far actor (a robe built there may wait)");
         }
+        SetNpcPacingOwnerWalk(true);
         SetNpcPacing(false, 4, 4096, 15, false);
         LogNpcPacingStats();
     }
@@ -3998,6 +4485,8 @@ int wmain(int argc, wchar_t** argv)
             // The give-back decides every wrapper's place before any goes back (an obtain between the passes must not
             // make it reset or return a wrapper the engine uses), and an exception keeps the trim off (1.1.3).
             const char* why = AllocatorTrimSelfTest();
+            const char* const whyPregrow = CmdPregrowSelfTest();
+            Check(whyPregrow == nullptr, whyPregrow ? whyPregrow : "CmdMemPregrow: pool handling (fake pool: each wrapper back once, engine running, failures, stops, quit, cap) and gates");
             Check(why == nullptr, why ? why : "allocators: give-back safe against an obtain between the passes; off after an exception stays off");
         }
     }
@@ -4376,10 +4865,19 @@ int wmain(int argc, wchar_t** argv)
     svb::SaveBytesSelfTest(game);   // SaveBytesBulk / SaveThumbnailAsync
     srid::SaveRefIdSelfTest(game);  // SaveRefIdIndex
     rsu::RigSetupSelfTest(game);    // RigVmHashMemo / RigLogicMapCache
+    rtm::RigTmplSelfTest(game);     // RigImportTemplate
+    fpm::FarPawnSelfTest(game);     // FarPawnMoveHalfRate / FarHorseMove
+    cpl::CreatePreloadSelfTest(game);  // CreatePreload
     nbl::NpcBodiesSelfTest(game);   // NpcBodiesOneLock
     rts::RtSceneSelfTest(game);     // RtSceneBufferKeep
+    BufferFloorRun(game);           // InstanceBufferFloor / lab SceneBufferFloorMiB (after GpuSceneKeepCapacity's and RtSceneBufferKeep's tests)
     nsb::NaniteSelfTest(game);      // NaniteInitialRootPages (lab: NaniteStreamProbe / Nanite*MinMB)
     wtr::WaterInfoSelfTest(game);   // WaterCaptureFsrSkip / NoRhiFlush / NoOcclusionWait / FastMeshScan (lab: WaterInfoProbe)
+    WaterInfoSkipRun(game);         // WaterInfoSkip (selftest_waterinfo_skip.h): after the install above (its game-thread detour)
+    WaterSpreadRun(game);           // WaterInfoSpread (selftest_waterspread.h): discovery only (nothing installed), logic with fakes
+    MapSpreadRun(game);             // MapPopupSpread (selftest_mapspread.h): discovery only (nothing installed), logic with fakes
+    GpuShotRun(game);               // GpuMenuShot (selftest_gpushot.h): discovery only, the shader's arithmetic, the shader on this GPU
+    ThumbLeftoverRun(game);         // SaveThumbLeftoverFix (selftest_thumbleft.h)
     fpc::FpsCapSelfTest(game);      // FrameRateLimitAtStart
     nlf::NavLinkSelfTest(game);     // NavLinkFast
     objrep::ObjectReplaceSelfTest(game);  // ObjectReplaceCrashGuard
@@ -5313,6 +5811,7 @@ int wmain(int argc, wchar_t** argv)
     }
     rtb::RtBatchSelfTest(game);     // RayTracingBuildBatch (last: it patches a call other searches might read)
     scantest::Report();
+    LogFlush();
     printf("\n--- selftest.log ---\n");
     if (FILE* f = _wfsopen(L"selftest.log", L"r", _SH_DENYNO)) {
         char line[1024];

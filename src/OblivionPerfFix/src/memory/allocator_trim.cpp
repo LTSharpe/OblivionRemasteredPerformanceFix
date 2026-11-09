@@ -16,9 +16,10 @@
 // to count the allocators in flight per queue and their peak over the last AllocatorTrimWindowSeconds (20); the
 // constructor to count the real ones. Once a second the monitor thread checks the copy pool when the game is within
 // AllocatorTrimHeadroomMB (2048; 0 = always) of its video memory budget, and with a 3-second window once it has been over
-// the budget for 10 s in a row (arrival peaks pass). The direct and compute pools always keep their peak, as in the game:
+// the budget for 10 s in a row (arrival peaks pass). The direct and compute pools keep their peak, as in the game:
 // their need returns with every busy scene (trimming them made the engine create ~300 again in 5 minutes on a roomy card,
 // ~960 in 6 minutes over budget, where each new one took fresh chunks from a paging driver and the scenes ran slower).
+// The one exception is CmdMemPregrow's give-back (cmd_pregrow.cpp): one pass on the direct pool, once a session, of what was grown ahead of need.
 // A copy pool with a clear surplus over its window peak (plus max(8, peak/8)) is emptied with the engine's own lock-free
 // pop, the surplus wrappers (at most 32 a second) get an inert stand-in in place of their D3D12 allocator, every wrapper goes back
 // (stand-ins at the bottom), and the real allocators are released four at a time with 25 ms pauses, which frees their
@@ -139,6 +140,7 @@ struct QueueStats {
     std::atomic<int64_t> trimmed{0};    // real allocators swapped for the stand-in and released
     std::atomic<int64_t> refilled{0};   // stand-ins given a new allocator on their way out of the pool
     std::atomic<int64_t> bucket[kBuckets];
+    std::atomic<int64_t> peakEver{0};   // the most in flight this session (CmdMemPregrow's give-back keeps this much)
     int64_t lastLogCreated = 0, lastLogTrimmed = 0, lastLogRefilled = 0;
 };
 
@@ -188,6 +190,9 @@ void NoteInFlight(QueueStats& s, int64_t now)
     int64_t cur = b.load(std::memory_order_relaxed);
     while (now > cur && !b.compare_exchange_weak(cur, now, std::memory_order_relaxed)) {
     }
+    cur = s.peakEver.load(std::memory_order_relaxed);
+    while (now > cur && !s.peakEver.compare_exchange_weak(cur, now, std::memory_order_relaxed)) {
+    }
 }
 
 std::atomic<int64_t> g_createUs{0}, g_createMaxUs{0};  // time spent creating allocators (the engine's and refills)
@@ -221,8 +226,8 @@ void* ObtainHook(void* device, int queueType)
     }
     if (queueType >= 0 && queueType < kQueues) {
         if (g_device.load(std::memory_order_relaxed) != device) {
+            g_deviceSinceMs.store(GetTickCount64());  // first: a tick that sees the new device must not see the old device's age
             g_device.store(device);
-            g_deviceSinceMs.store(GetTickCount64());
         }
         auto& s = g_q[queueType];
         const int64_t inFlight = s.inFlight.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -610,6 +615,46 @@ const char* AllocatorTrimSelfTest()
         expect(same, mode ? "trim: an obtain between the passes: every other wrapper back once, stand-ins below"
                           : "trim: every wrapper back once, stand-ins at the bottom, real ones on top");
     }
+    // CmdMemPregrow's give-back: a pool of 30, keep 10. The engine gets the kept ones first, then stand-ins that it refills one by one, as it
+    // would make new ones: the books (created - trimmed = real) stay right and nothing goes back twice. The latch against a second pass: CmdPregrowSelfTest.
+    if (!fail) {
+        constexpr int n = 30;
+        static FakeWrapper w[n];
+        void* held[n];
+        uint8_t standIn[n];
+        static void* toRelease[n];
+        static int d3d[n];
+        for (int i = 0; i < n; ++i) {
+            w[i] = {nullptr, 0, &d3d[i]};
+            held[i] = &w[i];
+        }
+        g_fakePool = FakePool{};
+        int real = 0;
+        const int swapped = MarkStandIns(held, n, 10, 20, toRelease, standIn, &real);
+        expect(swapped == 20 && real == 30, "give-back: 20 of 30 released, 10 kept");
+        GiveBack(nullptr, held, standIn, n, &FakePush);
+        expect(g_fakePool.fail == nullptr, g_fakePool.fail);
+        expect(g_fakePool.n == n, "give-back: every wrapper back");
+        int64_t created = 30;
+        const int64_t trimmed = swapped;
+        // The next obtains: only the kept ones, the most recently used first.
+        for (int i = 0; i < 10 && !fail; ++i) {
+            auto* top = static_cast<FakeWrapper*>(g_fakePool.items[g_fakePool.n - 1 - i]);
+            expect(top->d3d != &g_stub, "give-back: a stand-in above a kept allocator");
+            expect(top == &w[i], "give-back: the kept ones are the most recently used");
+        }
+        // A later busy scene takes everything: the rest are stand-ins, refilled on the way out.
+        for (int i = 10; i < n && !fail; ++i) {
+            auto* next = static_cast<FakeWrapper*>(g_fakePool.items[g_fakePool.n - 1 - i]);
+            expect(next->d3d == &g_stub, "give-back: a real allocator below the stand-ins");
+            next->d3d = &d3d[0];  // what ObtainHook's constructor call does
+            ++created;
+        }
+        expect(created - trimmed == 30, "give-back: the books after the regrowth");
+        int stillStub = 0;
+        for (int i = 0; i < n; ++i) stillStub += w[i].d3d == &g_stub ? 1 : 0;
+        expect(stillStub == 0, "give-back: stand-ins left after the regrowth");
+    }
     // An exception in a trim pass switches the trim off until the game restarts: the per-second ini reload must not
     // switch it back on.
     const bool wasEnabled = g_enabled.load(), wasFailed = g_failed.load();
@@ -633,6 +678,41 @@ void SetImmediateAllocatorLists(int lists)
     lists = (std::max)(0, (std::min)(lists, 1024));
     if (g_immediateLists.exchange(lists) != lists && g.finalizeInstalled)
         Log("[alloc] immediate allocator reuse: %s", lists > 1 ? "on" : "off (a new allocator for every list, as the game does)");
+}
+
+// CmdMemPregrow (cmd_pregrow.cpp): the direct pool, past the counting hooks.
+void* CmdMemPopDirect(void* device) { return PopFree(PoolOf(device, 0)); }
+void* CmdMemObtainDirect(void* device) { return g.obtainOrig(device, 0); }
+void CmdMemReleaseDirect(void* device, void* wrapper) { g.releaseOrig(device, wrapper); }
+void* CmdMemD3dOf(void* wrapper) { return D3dOf(wrapper); }
+int64_t CmdMemDirectCreated() { return g_q[0].created.load(); }
+uint64_t CmdMemLastObtainMs() { return g_lastObtainMs.load(std::memory_order_relaxed); }
+uint64_t CmdMemDeviceAgeMs() { return GetTickCount64() - g_deviceSinceMs.load(); }
+bool AllocatorTrimFailed() { return g_failed.load(); }
+void CmdMemDirectStats(int64_t* real, int64_t* inFlight, int64_t* peakEver)
+{
+    const QueueStats& s = g_q[0];
+    *real = s.created.load() - s.trimmed.load();
+    *inFlight = s.inFlight.load();
+    *peakEver = s.peakEver.load();
+}
+// The give-back's one pass on the direct pool: the trim's own (monitor thread, the only one that runs it). 1 done, -1 an exception (then off, as after any trim's).
+int CmdMemTrimDirect(void* device, int64_t keepFree, int maxSwap, CmdMemTrimOut* out)
+{
+    TrimResult r;
+    const int ok = TrimQueue(device, 0, keepFree, maxSwap > kMaxPop ? kMaxPop : maxSwap, g_held, g_standIn, g_toRelease, &r);
+    g_trimPasses.fetch_add(1);
+    if (ok < 0) {
+        NoteTrimException(0);
+        return ok;
+    }
+    g_q[0].trimmed.fetch_add(r.swapped);
+    if (r.releaseMs > g_longestReleaseMs) g_longestReleaseMs = r.releaseMs;
+    out->swapped = r.swapped;
+    out->freeReal = r.real;
+    out->releaseMs = r.releaseMs;
+    out->longestOneMs = r.longestOneMs;
+    return ok;
 }
 
 // Called once a second (MemoryRelief's sampler). The over-budget mode needs 10 seconds over in a row and ends after 10 seconds
@@ -659,15 +739,18 @@ void SetAllocatorTrimPressure(bool over, bool tight)
 void AllocatorTrimTick()
 {
     if (!g.installed) return;
+    CmdMemPregrowTick(g_device.load(), GetTickCount64() - g_deviceSinceMs.load());
     const int next = g_bucketIndex.load() + 1;
     for (auto& s : g_q) s.bucket[next % kBuckets].store(0);
     g_bucketIndex.store(next);
+    CmdMemGiveBackTick(g_device.load());  // its own key: not CommandAllocatorTrim's
     if (!g_enabled.load()) return;
     void* const device = g_device.load();
-    // Only while the RHI is active (obtains in the last two seconds) and its device has been the same for 30 seconds:
-    // never near device creation or shutdown.
+    // Only while the RHI is active (an obtain in the last 250 ms) and its device has been the same for 30 seconds: never
+    // near device creation or shutdown. A quit from a world deletes the device 0.84-1.22 s after the last obtain, so this
+    // must stay well under that. Obtains come every frame; a miss (a stall over 250 ms) just retries next second.
     const ULONGLONG now = GetTickCount64();
-    if (!device || now - g_lastObtainMs.load() > 2000 || now - g_deviceSinceMs.load() < 30000) return;
+    if (!device || now - g_lastObtainMs.load() > 250 || now - g_deviceSinceMs.load() < 30000) return;
     const bool pressure = g_pressure.load() != 0;
     const int window = pressure ? 3 : g_windowSeconds.load();
     for (int q = 0; q < kQueues; ++q) {

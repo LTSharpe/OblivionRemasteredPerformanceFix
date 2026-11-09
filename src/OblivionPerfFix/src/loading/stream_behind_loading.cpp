@@ -46,6 +46,20 @@
 //  - UWorld::GetGameViewport (exe+0x385EE90) and the switch's tail (exe+0x31D86CA): call GetGameViewport; ...;
 //    and ecx,~2 / xor edx,1 / add edx,edx / or edx,ecx / mov [rax+6Ch],edx.
 //
+// DrawBehindLoadingScreen (worker loadreveal 2026-11-02, findings "loadreveal", "loadprep"; public since 1.3.0, port130k;
+// review rev130f; default 3). When the streaming above starts (the area's loading idle), the world is still frozen and
+// hidden; the bit is cleared for N frames (2..10) so the frozen world is drawn behind the opaque loading screen (render
+// thread, texture streaming, Lumen and the temporal history get their first frames of the new area), then set back to the
+// game's value; the game's own fade-to-game shows it again as stock. Nothing else changes: the world never ticks for it (only
+// the viewport's bDisableWorldRendering bit is touched; UE 5.3 GameViewportClient.cpp:1706-1770: the bit selects
+// BeginRenderingViewFamily vs PerFrameCleanupIfSkipRenderer; views, streaming views and the HUD run either way), the freeze,
+// the gate, the fade and the player's control are the game's. Equivalent: the first fade-in frame continues the temporal
+// history of those N frames at the same camera instead of resetting it (SceneVisibility.cpp:4420-4433; a camera that moved
+// in between resets as stock). Starts and undoes only while the transition's loading flag (+0x200) is set: once the game
+// unfreezes (its level-loaded handler after an interior entry) it shows the world itself and it is left so (rev130f D-S1);
+// never starts without the fade-to-game hook (D-S2: the undo needs its counter). Cost: rarely one more gate tick (0.5 s) of
+// loading screen; on average the loading picture went 76-500 ms sooner (loadreveal).
+//
 // Prototype UnfreezeBehindLoadingScreen (off by default; a TRADE-OFF: the world runs before it is seen).
 // After an interior entry the game unfreezes the world behind the loading screen as soon as the interior has loaded
 // (its level-loaded handler, exe+0x48354B0, calls the transition's SetLoadingFreeze(off)), so the player stands in an
@@ -123,6 +137,7 @@ constexpr char kGetViewport[] =
 constexpr char kEnableWorldRendering[] =
     "E8 ?? ?? ?? ?? 48 85 C0 74 ?? 8B 48 ?? 40 0F B6 D6 83 E1 FD 83 F2 01 03 D2 0B D1 89 50";
 constexpr uint32_t kDrawOffBit = 2;           // bDisableWorldRendering
+constexpr int kDrawBehindMax = 10;            // DrawBehindLoadingScreen: most frames drawn behind the loading screen
 constexpr uint64_t kHoldCapUs = 3000000;      // the gate is never held longer than this per transition
 constexpr uint64_t kRunFrameCapUs = 50000;    // UnfreezeBehindLoadingScreen: one frame counts at most this much run time
 // UnfreezeBehindLoadingScreen: VLevelChangeData::SetLoadingFreeze(bool) (exe+0x4887110), whole body
@@ -224,6 +239,22 @@ struct State {
     uint64_t doneUs = 0;
     std::atomic<uint32_t> saveLoads{0};
     std::atomic<uint32_t> fastTravels{0};
+    // DrawBehindLoadingScreen (loadreveal; public since 1.3.0, port130k): the frozen world drawn behind the loading screen for
+    // a few frames, nothing else changed. Needs only the viewport getter and the switch's bit (viewFound), not the gate slots.
+    bool viewFound = false;
+    uint32_t freezeFlagOffset = 0;   // the transition's loading-freeze flag (+0x200, from the fade hook's search; rev130f D-S1)
+    std::atomic<int> drawBehind{0};
+    // per transition (game thread); kept apart from g.drawing (UnfreezeBehindLoadingScreen's) on purpose
+    bool drawOnly = false;           // our clear of the hide bit is in effect
+    uint32_t* drawFlag = nullptr;    // the viewport field we changed
+    uint32_t drawWritten = 0;        // the value we wrote (the game's value with the hide bit cleared)
+    uint32_t drawFrames = 0;         // frames drawn so far
+    uint32_t drawFades = 0;          // the fade-to-game call count when we started (FadeToGameCalls)
+    const uint8_t* drawLcd = nullptr;  // the transition we started on
+    bool drawLoading = false;        // its loading-freeze flag when last read
+    bool drawNoFadeLogged = false;
+    std::atomic<uint32_t> drawOnlyTransitions{0}, drawOnlyRestored{0}, drawOnlyGameChanged{0}, drawOnlyAtFade{0},
+        drawOnlyUnfrozen{0}, drawOnlyNoFade{0};
 };
 State g;
 
@@ -289,6 +320,7 @@ bool Find(const GameModule& game)
     FadeHookSites fade{};
     if (!FadeHookInfo(&fade)) { Log("[streamload] the fade-to-game hook's layout is not available: not installed"); return false; }
     g.timerOffset = fade.timerOffset;
+    g.freezeFlagOffset = fade.flagOffset;
     const auto arms = FindAll(game.text, ParsePattern(kArm));
     g.arm = arms.size() == 1 ? arms[0] : nullptr;
     bool armsGate = false;  // it uses the gate timer handle's offset
@@ -346,13 +378,18 @@ bool Find(const GameModule& game)
         const auto sws = FindAll(game.text, ParsePattern(kEnableWorldRendering));
         uint8_t* const vp = vps.size() == 1 ? vps[0] : nullptr;
         uint8_t* const sw = sws.size() == 1 ? sws[0] : nullptr;
-        if (es && ess && ess == es + 1 && vp && sw && RipTarget(sw, 1, 5) == vp && sw[0x1D] == sw[0x0C] && sw[0x0C] < 0x400) {
+        // The viewport getter and the switch's bit alone serve DrawBehindLoadingScreen (rev130f nit: a gate-slot mismatch must
+        // not switch it off); UnfreezeBehindLoadingScreen also needs the gate delegate's two slots.
+        if (vp && sw && RipTarget(sw, 1, 5) == vp && sw[0x1D] == sw[0x0C] && sw[0x0C] < 0x400) {
+            g.gameViewport = reinterpret_cast<GameViewportFn>(vp);
+            g.drawFlagOffset = sw[0x0C];
+            g.viewFound = true;
+        }
+        if (es && ess && ess == es + 1 && g.viewFound) {
             g.execSlot = es;
             g.execIfSafeSlot = ess;
             g.origExec = reinterpret_cast<ExecFn>(exec);
             g.origExecIfSafe = reinterpret_cast<ExecIfSafeFn>(execIfSafe);
-            g.gameViewport = reinterpret_cast<GameViewportFn>(vp);
-            g.drawFlagOffset = sw[0x0C];
             g.drawFound = true;
             Log("[streamload] world drawing behind the loading screen: gate slots exe+0x%X/+0x%X, viewport getter exe+0x%X, world drawing switch "
                 "bit 1 of viewport+0x%X (exe+0x%X)", Rva(es), Rva(ess), Rva(vp), g.drawFlagOffset, Rva(sw));
@@ -615,11 +652,155 @@ bool PatchEntry(uint8_t* fn, uint8_t* stub, bool beforeGameCode)
     return beforeGameCode && WriteCode(fn, insn);
 }
 
+// DrawBehindLoadingScreen helpers (game thread; SEH-guarded reads/writes of the viewport field and the loading flag)
+bool ReadU32(const uint32_t* p, uint32_t* v)
+{
+    if (!p) return false;
+    __try {
+        *v = *p;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+bool WriteU32IfSame(uint32_t* p, uint32_t expect, uint32_t value)
+{
+    if (!p) return false;
+    __try {
+        if (*p != expect) return false;
+        *p = value;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// The transition's loading-freeze flag (+0x200: set while the game keeps the world frozen behind the loading screen; the
+// game clears it when it unfreezes, e.g. its level-loaded handler after an interior entry, and then shows the world itself).
+bool ReadLoadingFlag(const uint8_t* lcd, bool* on)
+{
+    if (!lcd || !g.freezeFlagOffset) return false;
+    __try {
+        *on = lcd[g.freezeFlagOffset] != 0;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// The flag of the transition we started on: read again while that transition is still the tracked one, else its last value.
+bool DrawLoadingNow()
+{
+    bool on = false;
+    if (g.drawLcd && g.drawLcd == g.lcd && ReadLoadingFlag(g.drawLcd, &on)) g.drawLoading = on;
+    return g.drawLoading;
+}
+
+uint32_t (*g_fadeCalls)(bool* hooked) = &FadeToGameCalls;  // the self-test replaces it
+
+// Ends a draw-only period. Our change is undone (the hide bit set back) only if the field still holds exactly the value we
+// wrote, the game's fade-to-game has not run since we started (that shows the world itself, so the value is then the
+// game's own) and the transition is still in its loading freeze (rev130f D-S1: once the game unfreezes, it shows the world
+// itself with the same value, so the value is the game's). If the game changed the field meanwhile, it stays as the game set it.
+void EndDrawOnly(const char* why)
+{
+    if (!g.drawOnly) return;
+    g.drawOnly = false;
+    bool hooked = false;
+    const bool fadeRan = g_fadeCalls(&hooked) != g.drawFades;
+    uint32_t v = 0;
+    const char* what;
+    if (!ReadU32(g.drawFlag, &v)) {
+        what = "viewport not readable, left as it is";
+    } else if (v != g.drawWritten) {
+        what = "changed by the game meanwhile, left as the game set it";
+        g.drawOnlyGameChanged.fetch_add(1, std::memory_order_relaxed);
+    } else if (fadeRan || !hooked) {
+        what = fadeRan ? "the game's fade-to-game ran: the world is shown by the game itself" : "fade hook not in: left as it is";
+        g.drawOnlyAtFade.fetch_add(1, std::memory_order_relaxed);
+    } else if (!DrawLoadingNow()) {
+        what = "the game ended the loading freeze: the world is shown by the game itself";
+        g.drawOnlyUnfrozen.fetch_add(1, std::memory_order_relaxed);
+    } else if (WriteU32IfSame(g.drawFlag, g.drawWritten, g.drawWritten | kDrawOffBit)) {
+        what = "hidden again (the game's value)";
+        g.drawOnlyRestored.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        what = "changed just now, left as it is";
+    }
+    Log("[streamload] DrawBehindLoadingScreen: %u frame(s) drawn behind the loading screen in %.0f ms; ended (%s): %s",
+        g.drawFrames, (NowUs() - g.drawStartUs) / 1000.0, why, what);
+    g.drawFlag = nullptr;
+    g.drawLcd = nullptr;
+}
+
+// One frame of a draw-only period (game thread, frame end). The game's own changes of the field always win (it is never
+// cleared again); after N drawn frames our change is undone until the game's own fade-to-game.
+void DrawOnlyFrame()
+{
+    if (!g.drawOnly) return;
+    uint32_t v = 0;
+    if (!ReadU32(g.drawFlag, &v) || v != g.drawWritten) {
+        EndDrawOnly("the game changed the world drawing");
+        return;
+    }
+    if (!DrawLoadingNow()) {
+        EndDrawOnly("the game unfroze the world");
+        return;
+    }
+    ++g.drawFrames;
+    const int mode = g.drawBehind.load(std::memory_order_relaxed);
+    if (mode == 0 || g.drawFrames >= static_cast<uint32_t>(mode)) EndDrawOnly("its frames are drawn");
+}
+
+// A new transition is armed: anything left of the last one is ended first (an aborted load never reached its done path)
+void DrawOnlyArmReset()
+{
+    EndDrawOnly("a new transition armed before the last one ended");  // no-op unless one is still in effect
+    g.drawOnly = false;
+    g.drawFlag = nullptr;
+    g.drawLcd = nullptr;
+    g.drawFrames = 0;
+}
+
+// Starts a draw-only period on this viewport field if the game has the world hidden, the transition is still in its loading
+// freeze (D-S1) and the fade-to-game hook is in (D-S2: without it the undo could not tell the game's own fade-in from ours,
+// so the world would stay drawn until the fade-in, the variant measured slower in loadreveal); false = nothing changed.
+bool DrawOnlyStart(uint32_t* flag, const uint8_t* lcd, uint64_t startUs)
+{
+    bool hooked = false;
+    const uint32_t fades = g_fadeCalls(&hooked);
+    if (!hooked) {
+        g.drawOnlyNoFade.fetch_add(1, std::memory_order_relaxed);
+        if (!g.drawNoFadeLogged) {
+            g.drawNoFadeLogged = true;
+            Log("[streamload] DrawBehindLoadingScreen: the fade-to-game hook is not in (PrepareCollisionBehindLoadingScreen off "
+                "at start-up?): not used");
+        }
+        return false;
+    }
+    bool loading = false;
+    if (!ReadLoadingFlag(lcd, &loading) || !loading) return false;
+    uint32_t v = 0;
+    if (g.drawOnly || !flag || !ReadU32(flag, &v) || !(v & kDrawOffBit) || !WriteU32IfSame(flag, v, v & ~kDrawOffBit)) return false;
+    g.drawOnly = true;
+    g.drawFlag = flag;
+    g.drawWritten = v & ~kDrawOffBit;
+    g.drawFrames = 0;
+    g.drawFades = fades;
+    g.drawStartUs = startUs;
+    g.drawLcd = lcd;
+    g.drawLoading = true;
+    g.drawOnlyTransitions.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
 // The gate-arming function: the game's own work first, then remember the transition (game thread).
 uint64_t ArmHook(void* transition)
 {
     const uint64_t result = g.origArm(transition);
     if (g.on.load(std::memory_order_relaxed) && transition && transition != g.lcd) {
+        DrawOnlyArmReset();
         g.lcd = static_cast<uint8_t*>(transition);
         g.started = g.seenArmed = false;
         g.updates = 0;
@@ -753,9 +934,23 @@ void SetUnfreezeBehindLoadingFastTravel(int ms)
             ms, ms ? " (after a fast travel or a save load, instead of UnfreezeBehindLoadingScreen's value)" : " (UnfreezeBehindLoadingScreen's value)");
 }
 
+// DrawBehindLoadingScreen (live): 0 = off, 2..10 = frames drawn (rev130f D-S3: the lab's "until the fade-in" value 1 and
+// values up to 60 are gone; more hidden draws = more chance of one more gate tick). 1 counts as off.
+int CleanDrawBehind(int mode) { return mode < 2 ? 0 : (mode > kDrawBehindMax ? kDrawBehindMax : mode); }
+
+void SetDrawBehindLoading(int mode)
+{
+    mode = CleanDrawBehind(mode);
+    if (g.drawBehind.exchange(mode) != mode && g.installed)
+        Log(g.viewFound && g.freezeFlagOffset ? "[streamload] DrawBehindLoadingScreen %d%s"
+                                              : "[streamload] DrawBehindLoadingScreen %d%s (not available: world drawing switch not found)",
+            mode, mode ? " (the frozen world is drawn for this many frames behind the loading screen once its loading is idle)" : " (off)");
+}
+
 void StreamBehindLoadingFrameEnd()
 {
     if (g.installed && !g.loadHookTried) InstallLoadGameHook();
+    if (g.drawOnly && !g.lcd) EndDrawOnly("the transition was left to the game");
     if (!g.installed || !g.lcd) return;
     if (Armed(g.lcd)) {
         g.seenArmed = true;
@@ -768,6 +963,8 @@ void StreamBehindLoadingFrameEnd()
             Log("[streamload] fade-in %.0f ms after streaming started (%u updates, %.2f ms each)", lead / 1000.0, g.updates,
                 g.updates ? g.updateUs / 1000.0 / g.updates : 0.0);
         }
+        EndDrawOnly(g.seenArmed ? "the transition ended" : "the transition was given up");
+        g.drawFrames = 0;
         if (g.drawing) {
             Log("[streamload] UnfreezeBehindLoadingScreen: world drawn %.0f ms behind the loading screen before the fade-in; "
                 "gate held %u tick(s) (%.0f ms); hidden again by the game %u time(s)", (NowUs() - g.drawStartUs) / 1000.0,
@@ -787,6 +984,9 @@ void StreamBehindLoadingFrameEnd()
         return;  // armed a moment later
     }
     // UnfreezeBehindLoadingScreen: keep the running world drawn behind the loading screen (it starts below)
+    // DrawBehindLoadingScreen: one more frame drawn. The game's own changes of the field always win (it is never cleared
+    // again); after N drawn frames our change is undone until the game's own fade-to-game.
+    DrawOnlyFrame();
     if (g.drawing) {
         if (SetWorldHidden(g.lcd, false)) ++g.reHidden;
         if (g.unfrozen) {  // count the frames the world really runs (see the comment at the top)
@@ -830,6 +1030,11 @@ void StreamBehindLoadingFrameEnd()
                 Log("[streamload] UnfreezeBehindLoadingScreen: the transition could not be unfrozen: left to the game");
             }
         }
+        // DrawBehindLoadingScreen: only the world drawing (the bit the game clears itself right after fade-to-game) is
+        // switched on now; the world stays frozen, the gate is not held, the fade and the unfreeze run as before
+        // (only when the game has hidden the world already: the bit is set back afterwards, so it must have been set)
+        if (!g.drawing && !g.drawOnly && g.viewFound && g.drawBehind.load(std::memory_order_relaxed) > 0)
+            DrawOnlyStart(DrawFlag(g.lcd), g.lcd, g.startUs);
     }
     void* const mgr = Manager();
     if (!mgr) return;
@@ -847,8 +1052,138 @@ void LogStreamBehindLoadingStats()
     Log("[streamload] %s: %u transitions (%u fast travels, %u save loads), streamed early in %u (%.0f ms before the fade-in "
         "on average)", g.on.load() ? "on" : "off", g.transitions.load(), g.fastTravels.load(), g.saveLoads.load(), n,
         n ? g.leadUs.load() / 1000.0 / n : 0.0);
+    if (g.drawBehind.load() || g.drawOnlyTransitions.load())
+        Log("[streamload] DrawBehindLoadingScreen %d: frozen world drawn behind %u loading screens (hidden again by us %u, shown by "
+            "the game's fade-to-game %u, changed by the game %u, unfrozen by the game %u; not started without the fade hook %u)",
+            g.drawBehind.load(), g.drawOnlyTransitions.load(), g.drawOnlyRestored.load(), g.drawOnlyAtFade.load(),
+            g.drawOnlyGameChanged.load(), g.drawOnlyUnfrozen.load(), g.drawOnlyNoFade.load());
 }
 
 uint8_t* FindExecByName(const char* name, const char* shape) { return ExecByName(name, shape); }
+
+namespace {
+uint32_t g_testFades = 0;
+bool g_testHooked = true;
+uint32_t TestFadeCalls(bool* hooked)
+{
+    if (hooked) *hooked = g_testHooked;
+    return g_testFades;
+}
+}  // namespace
+
+// Self-test of DrawBehindLoadingScreen's bookkeeping on a fake viewport field and a fake transition (its loading flag; no
+// game code): start, per-frame count, undo, the game's own changes winning, the fade-to-game, an aborted transition, live
+// switch-off; D-S1 (no start once the game unfroze, no undo after it unfroze), D-S2 (no start without the fade hook),
+// D-S3 (values 0, 2..10).
+bool DrawBehindLoadingSelfTest(char* err, size_t n)
+{
+    const auto oldFade = g_fadeCalls;
+    const int oldMode = g.drawBehind.load();
+    const uint32_t oldFlagOff = g.freezeFlagOffset;
+    uint8_t* const oldLcd = g.lcd;
+    g_fadeCalls = &TestFadeCalls;
+    g_testFades = 0;
+    g_testHooked = true;
+    alignas(8) static uint8_t lcd[0x400];
+    memset(lcd, 0, sizeof lcd);
+    g.freezeFlagOffset = 0x200;
+    g.lcd = lcd;
+    bool ok = true;
+    auto fail = [&](const char* what) {
+        if (ok) snprintf(err, n, "%s", what);
+        ok = false;
+    };
+    const uint32_t hidden = 0x10u | kDrawOffBit, shown = 0x10u;
+    uint32_t field = shown;
+    lcd[0x200] = 1;  // the transition is in its loading freeze
+    // 1. the game has not hidden the world: nothing starts
+    g.drawBehind = 3;
+    if (DrawOnlyStart(&field, lcd, 0) || field != shown) fail("started although the world was shown");
+    // 2. three frames, then the game's value again
+    field = hidden;
+    if (!DrawOnlyStart(&field, lcd, 0) || field != shown) fail("did not start on a hidden world");
+    DrawOnlyFrame();
+    DrawOnlyFrame();
+    if (!g.drawOnly || field != shown) fail("ended before its frames");
+    DrawOnlyFrame();
+    if (g.drawOnly || field != hidden) fail("not undone after its frames");
+    // 3. the game hides the world itself: never cleared again, left as the game set it
+    field = hidden;
+    DrawOnlyStart(&field, lcd, 0);
+    field = hidden | 0x100u;  // the game wrote the field (hide bit set, another bit changed)
+    DrawOnlyFrame();
+    if (g.drawOnly || field != (hidden | 0x100u)) fail("the game's re-hide was overridden");
+    // 4. the game shows the world itself meanwhile (other bits differ): left shown at the end
+    field = hidden;
+    DrawOnlyStart(&field, lcd, 0);
+    field = shown | 0x200u;
+    DrawOnlyFrame();
+    DrawOnlyFrame();
+    DrawOnlyFrame();
+    if (g.drawOnly || field != (shown | 0x200u)) fail("the game's own show was undone");
+    // 5. the fade-to-game ran (the game shows the world itself, same value): left shown
+    field = hidden;
+    DrawOnlyStart(&field, lcd, 0);
+    ++g_testFades;
+    EndDrawOnly("test: the transition ended");
+    if (g.drawOnly || field != shown) fail("hidden after the game's fade-to-game");
+    // 6. aborted transition (no fade-to-game), then a new one arms: the game's hidden value is restored, state cleared
+    field = hidden;
+    DrawOnlyStart(&field, lcd, 0);
+    DrawOnlyFrame();
+    DrawOnlyArmReset();
+    if (g.drawOnly || g.drawFlag || g.drawFrames || field != hidden) fail("aborted transition: world left drawn or state kept");
+    // 7. the transition is given up / left (done path without fade-to-game): restored
+    field = hidden;
+    DrawOnlyStart(&field, lcd, 0);
+    EndDrawOnly("test: the transition was given up");
+    if (g.drawOnly || field != hidden) fail("given-up transition: world left drawn");
+    // 8. switched off live mid-period: undone at the next frame
+    field = hidden;
+    DrawOnlyStart(&field, lcd, 0);
+    g.drawBehind = 0;
+    DrawOnlyFrame();
+    if (g.drawOnly || field != hidden) fail("switched off: world left drawn");
+    g.drawBehind = 3;
+    // 9. D-S2: the fade hook is not in: nothing starts
+    g_testHooked = false;
+    field = hidden;
+    if (DrawOnlyStart(&field, lcd, 0) || g.drawOnly || field != hidden) fail("D-S2: started without the fade hook");
+    g_testHooked = true;
+    // 10. D-S1: the game already ended the loading freeze (it shows the world itself): nothing starts
+    lcd[0x200] = 0;
+    field = hidden;
+    if (DrawOnlyStart(&field, lcd, 0) || g.drawOnly || field != hidden) fail("D-S1: started after the game unfroze");
+    // 11. D-S1: the game unfreezes and shows the world (same value) inside our frames: never hidden again
+    lcd[0x200] = 1;
+    field = hidden;
+    DrawOnlyStart(&field, lcd, 0);
+    DrawOnlyFrame();
+    lcd[0x200] = 0;  // its level-loaded handler: unfrozen, the world shown by the game (the bit stays clear)
+    DrawOnlyFrame();
+    if (g.drawOnly || field != shown) fail("D-S1: the world hidden again after the game unfroze it");
+    // 12. the transition is no longer tracked (left to the game): its last flag seen (still loading) decides: hidden again
+    lcd[0x200] = 1;
+    field = hidden;
+    DrawOnlyStart(&field, lcd, 0);
+    DrawOnlyFrame();
+    g.lcd = nullptr;
+    lcd[0x200] = 0;  // not read any more (the object may be gone)
+    EndDrawOnly("test: the transition was left to the game");
+    g.lcd = lcd;
+    if (g.drawOnly || field != hidden) fail("untracked transition: not hidden again by its last loading flag");
+    // 13. D-S3: values
+    if (CleanDrawBehind(0) != 0 || CleanDrawBehind(1) != 0 || CleanDrawBehind(-5) != 0 || CleanDrawBehind(3) != 3 ||
+        CleanDrawBehind(60) != kDrawBehindMax || CleanDrawBehind(2) != 2)
+        fail("D-S3: public values are 0 or 2..10");
+    g_fadeCalls = oldFade;
+    g.drawBehind = oldMode;
+    g.freezeFlagOffset = oldFlagOff;
+    g.lcd = oldLcd;
+    g.drawFlag = nullptr;
+    g.drawLcd = nullptr;
+    g.drawOnly = false;
+    return ok;
+}
 
 }  // namespace opf

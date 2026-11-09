@@ -250,6 +250,7 @@ void RequestCaptureHook(void* self)
 
 bool ProcessShotsHook(void* self, void* viewport)
 {
+    if (OnGameThread()) GpuMenuShotGameThreadFrame();  // GpuMenuShot: the screenshot service's picture, once read back
     const bool r = g_shotsOrig(self, viewport);
     if (!g_gtId.load(std::memory_order_relaxed)) g_gtId.store(GetCurrentThreadId());
     if (OnGameThread()) {

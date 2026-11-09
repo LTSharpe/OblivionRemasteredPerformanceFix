@@ -27,7 +27,9 @@ Config LoadConfig(const wchar_t* iniPath)
     c.editorIdLookupGuard = get(L"Fixes", L"NameLookupCrashGuard", c.editorIdLookupGuard) != 0;
     c.trapCrashGuard = get(L"Fixes", L"TrapCrashGuard", c.trapCrashGuard) != 0;
     c.bowSneakAttackFix = get(L"Fixes", L"BowSneakAttackFix", c.bowSneakAttackFix) != 0;
+    c.pairReleaseOnce = get(L"Fixes", L"PairReleaseOnce", c.pairReleaseOnce);
     c.autosaveFollowsMenu = get(L"Fixes", L"AutosaveFollowsMenu", c.autosaveFollowsMenu) != 0;
+    c.saveThumbLeftoverFix = get(L"Fixes", L"SaveThumbLeftoverFix", c.saveThumbLeftoverFix) != 0;
     c.havokPickWarningGuard = get(L"Fixes", L"HavokPickWarningGuard", c.havokPickWarningGuard) != 0;
     c.frameGenCrashGuard = get(L"Fixes", L"FrameGenCrashGuard", c.frameGenCrashGuard) != 0;
     c.objectReplaceGuard = get(L"Fixes", L"ObjectReplaceCrashGuard", c.objectReplaceGuard);
@@ -53,6 +55,9 @@ Config LoadConfig(const wchar_t* iniPath)
     c.hdrSaveThumbnail = get(L"Fixes", L"HdrSaveThumbnail", c.hdrSaveThumbnail) != 0;
     c.restoreFsrAfterAltTab = get(L"Fixes", L"RestoreFsrAfterAltTab", c.restoreFsrAfterAltTab) != 0;
     c.lumenKeepArrayCapacity = get(L"Fixes", L"LumenKeepArrayCapacity", c.lumenKeepArrayCapacity) != 0;
+    c.lumenGroupsPrior = get(L"Fixes", L"LumenGroupsPrior", c.lumenGroupsPrior);
+    if (c.lumenGroupsPrior < 0) c.lumenGroupsPrior = 0;
+    if (c.lumenGroupsPrior > 16 * 1024 * 1024) c.lumenGroupsPrior = 16 * 1024 * 1024;  // the grow policy's sanity cap
     c.uploadMemoryKeep = get(L"Fixes", L"UploadMemoryKeep", c.uploadMemoryKeep) != 0;
     c.uploadMemoryKeepFrames = get(L"Fixes", L"UploadMemoryKeepFrames", c.uploadMemoryKeepFrames);
     c.uploadPagesToKeep = get(L"Fixes", L"UploadPagesToKeep", c.uploadPagesToKeep);
@@ -78,6 +83,32 @@ Config LoadConfig(const wchar_t* iniPath)
     c.physicsQueueShrinkOnce = get(L"Fixes", L"PhysicsQueueShrinkOnce", c.physicsQueueShrinkOnce) != 0;
     c.physicsDestroyBatch = get(L"Fixes", L"PhysicsDestroyBatch", c.physicsDestroyBatch);
     c.physicsDestroyBatchMin = get(L"Fixes", L"PhysicsDestroyBatchMin", c.physicsDestroyBatchMin);
+    c.bodyRemovalSpread = get(L"Fixes", L"BodyRemovalSpread", c.bodyRemovalSpread);
+    c.bodyRemovalSpreadPerFrame = get(L"Fixes", L"BodyRemovalSpreadPerFrame", c.bodyRemovalSpreadPerFrame);
+    c.bodyRemovalSpreadMaxFrames = get(L"Fixes", L"BodyRemovalSpreadMaxFrames", c.bodyRemovalSpreadMaxFrames);
+    c.bodyRemovalSpreadMin = get(L"Fixes", L"BodyRemovalSpreadMin", c.bodyRemovalSpreadMin);
+    c.bodyRemovalSpreadNearM = get(L"Fixes", L"BodyRemovalSpreadNearM", c.bodyRemovalSpreadNearM);
+    c.streamRegisterGranularity = get(L"Fixes", L"StreamRegisterGranularity", c.streamRegisterGranularity);
+    c.lumenCardsNarrow = get(L"Fixes", L"LumenCardsNarrow", c.lumenCardsNarrow);
+    c.repathParallel = get(L"Fixes", L"RepathParallel", c.repathParallel);
+    c.waterInfoSkip = get(L"Fixes", L"WaterInfoSkip", c.waterInfoSkip);
+    c.waterInfoSpread = get(L"Fixes", L"WaterInfoSpread", c.waterInfoSpread);
+    c.waterInfoSpreadNearM = get(L"Fixes", L"WaterInfoSpreadNearM", c.waterInfoSpreadNearM);
+    c.waterInfoSpreadPerFrame = get(L"Fixes", L"WaterInfoSpreadPerFrame", c.waterInfoSpreadPerFrame);
+    c.waterInfoSpreadMaxFrames = get(L"Fixes", L"WaterInfoSpreadMaxFrames", c.waterInfoSpreadMaxFrames);
+    c.waterInfoSpreadMergeMs = get(L"Fixes", L"WaterInfoSpreadMergeMs", c.waterInfoSpreadMergeMs);
+    c.repathParallelMin = get(L"Fixes", L"RepathParallelMin", c.repathParallelMin);
+    c.repathParallelThreads = get(L"Fixes", L"RepathParallelThreads", c.repathParallelThreads);
+    c.farPawnMoveHalfRate = get(L"Fixes", L"FarPawnMoveHalfRate", c.farPawnMoveHalfRate);
+    c.farPawnMoveHz = get(L"Fixes", L"FarPawnMoveHz", c.farPawnMoveHz);
+    c.farHorseMove = get(L"Fixes", L"FarHorseMove", c.farHorseMove);
+    c.farPawnMoveMinDistance = get(L"Fixes", L"FarPawnMoveMinDistance", c.farPawnMoveMinDistance);
+    c.farPawnMoveMaxStepMs = get(L"Fixes", L"FarPawnMoveMaxStepMs", c.farPawnMoveMaxStepMs);
+    c.createPreload = get(L"Fixes", L"CreatePreload", c.createPreload);
+    c.createPreloadNear = get(L"Fixes", L"CreatePreloadNear", c.createPreloadNear);
+    c.otFrameTrim = get(L"Fixes", L"OtFrameTrim", c.otFrameTrim);
+    c.looseMissCache = get(L"Fixes", L"LooseMissCache", c.looseMissCache);
+    c.instanceBufferFloor = get(L"Fixes", L"InstanceBufferFloor", c.instanceBufferFloor);
     c.npcBodiesOneLock = get(L"Fixes", L"NpcBodiesOneLock", c.npcBodiesOneLock);
     c.clothRegisterLite = get(L"Fixes", L"ClothRegisterLite", c.clothRegisterLite);
     c.rigVmHashMemo = get(L"Fixes", L"RigVmHashMemo", c.rigVmHashMemo);
@@ -114,6 +145,7 @@ Config LoadConfig(const wchar_t* iniPath)
     c.physAnimNoEmptyLock = get(L"Fixes", L"PhysAnimNoEmptyLock", c.physAnimNoEmptyLock) != 0;
     c.rigTraceReuse = get(L"Fixes", L"RigTraceReuse", c.rigTraceReuse);
     if (c.rigTraceReuse < 0 || c.rigTraceReuse > 2) c.rigTraceReuse = 1;  // 0 off, 1 on, 2 verify; anything else = on
+    c.rigImportTemplate = get(L"Fixes", L"RigImportTemplate", c.rigImportTemplate);  // 0 off, else on (lab: 2 verify)
     c.chaosMaxPayloadSize = get(L"Fixes", L"ChaosMaxPayloadSize", c.chaosMaxPayloadSize);
     c.osPageCache = get(L"Fixes", L"OsPageCache", c.osPageCache);
     c.osPageCacheMB = get(L"Fixes", L"OsPageCacheMB", c.osPageCacheMB);
@@ -124,6 +156,7 @@ Config LoadConfig(const wchar_t* iniPath)
     c.psoPrecompileColdQueue = get(L"Fixes", L"PsoPrecompileColdQueue", c.psoPrecompileColdQueue);
     c.animTeardownParallel = get(L"Fixes", L"AnimTeardownParallel", c.animTeardownParallel);
     c.cellBufferPacedEvict = get(L"Fixes", L"CellBufferPacedEvict", c.cellBufferPacedEvict);
+    c.cellBufferEvictDelayMs = get(L"Fixes", L"CellBufferEvictDelayMs", c.cellBufferEvictDelayMs);
     c.physicsPushParallel = get(L"Fixes", L"PhysicsPushParallel", c.physicsPushParallel);
     c.physicsPushMin = get(L"Fixes", L"PhysicsPushMin", c.physicsPushMin);
     c.physicsPushThreads = get(L"Fixes", L"PhysicsPushThreads", c.physicsPushThreads);
@@ -139,6 +172,9 @@ Config LoadConfig(const wchar_t* iniPath)
     c.streamBehindLoading = get(L"Fixes", L"StreamBehindLoadingScreen", c.streamBehindLoading) != 0;
     c.unfreezeBehindLoading = get(L"Fixes", L"UnfreezeBehindLoadingScreen", c.unfreezeBehindLoading);
     c.unfreezeBehindLoadingFastTravel = get(L"Fixes", L"UnfreezeBehindLoadingScreenFastTravel", c.unfreezeBehindLoadingFastTravel);
+    c.drawBehindLoading = get(L"Fixes", L"DrawBehindLoadingScreen", c.drawBehindLoading);
+    c.mapPopupSpread = get(L"Fixes", L"MapPopupSpread", c.mapPopupSpread);
+    c.gpuMenuShot = get(L"Fixes", L"GpuMenuShot", c.gpuMenuShot);
     c.npcCreationPacing = get(L"Fixes", L"NpcCreationPacing", c.npcCreationPacing) != 0;
     c.pacingBudgetMs = get(L"Fixes", L"PacingBudgetMs", c.pacingBudgetMs);
     c.pacingMinDistance = get(L"Fixes", L"PacingMinDistance", c.pacingMinDistance);
@@ -148,6 +184,7 @@ Config LoadConfig(const wchar_t* iniPath)
     c.pacingUseSlack = get(L"Fixes", L"PacingUseSlack", c.pacingUseSlack) != 0;
     c.pacingFlowWait = get(L"Fixes", L"PacingFlowWait", c.pacingFlowWait) != 0;
     c.pacingFlowWaitFrames = get(L"Fixes", L"PacingFlowWaitFrames", c.pacingFlowWaitFrames);
+    c.pacingOwnerWalk = get(L"Fixes", L"PacingOwnerWalk", c.pacingOwnerWalk) != 0;
     c.pacingLeanFlowDrain = get(L"Fixes", L"PacingLeanFlowDrain", c.pacingLeanFlowDrain) != 0;
     c.pacingFadeAware = get(L"Fixes", L"PacingFadeAware", c.pacingFadeAware);
     if (c.pacingFadeAware > 1) c.pacingFadeAware = 1;  // lab modes 2 / 3 read as on
@@ -161,11 +198,18 @@ Config LoadConfig(const wchar_t* iniPath)
     c.busyWaitFlagCheck = get(L"Fixes", L"BusyWaitFlagCheck", c.busyWaitFlagCheck) != 0;
     c.gpuSceneKeepCapacity = get(L"Fixes", L"GpuSceneKeepCapacity", c.gpuSceneKeepCapacity) != 0;
     c.commandAllocatorTrim = get(L"Fixes", L"CommandAllocatorTrim", c.commandAllocatorTrim) != 0;
+    c.cmdMemPregrow = get(L"Fixes", L"CmdMemPregrow", c.cmdMemPregrow);
+    if (c.cmdMemPregrow < 0) c.cmdMemPregrow = 0;
+    if (c.cmdMemPregrow > 1024) c.cmdMemPregrow = 1024;
+    c.cmdMemGiveBackHeadroomMB = get(L"Fixes", L"CmdMemGiveBackHeadroomMB", c.cmdMemGiveBackHeadroomMB);
+    if (c.cmdMemGiveBackHeadroomMB < 0) c.cmdMemGiveBackHeadroomMB = 0;
+    if (c.cmdMemGiveBackHeadroomMB > 8192) c.cmdMemGiveBackHeadroomMB = 8192;
     c.allocatorTrimWindowSeconds = get(L"Fixes", L"AllocatorTrimWindowSeconds", c.allocatorTrimWindowSeconds);
     c.immediateAllocatorLists = get(L"Fixes", L"ImmediateAllocatorLists", c.immediateAllocatorLists);
     c.allocatorTrimHeadroomMB = get(L"Fixes", L"AllocatorTrimHeadroomMB", c.allocatorTrimHeadroomMB);
     c.logFile = get(L"General", L"LogFile", c.logFile) != 0;
     c.gpuCrashReport = get(L"General", L"GpuCrashReport", c.gpuCrashReport) != 0;
+    c.gpuPassMarkers = get(L"General", L"GpuPassMarkers", c.gpuPassMarkers);
     c.statsIntervalSeconds = get(L"General", L"StatsIntervalSeconds", c.statsIntervalSeconds);
     return c;
 }

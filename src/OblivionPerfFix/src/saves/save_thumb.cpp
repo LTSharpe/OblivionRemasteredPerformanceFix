@@ -216,6 +216,8 @@ struct Job {
     std::atomic<int> state{0};           // 0 enqueued, 1 copy recorded (readback), 2 fallback read done, 3 failed
     void* readback = nullptr;
     uint64_t tEnqueue = 0, tRender = 0;
+    bool gpuShot = false;                  // GpuMenuShot: the picture also goes to Altar's screenshot service (game thread)
+    uint32_t gpuShotGen = 0;               // ... for this service capture (GpuMenuShotServiceArm's generation)
 };
 std::atomic<Job*> g_job{nullptr};
 HANDLE g_wake = nullptr;
@@ -272,7 +274,8 @@ int SaveListeners(Listener* out, uint64_t* handles, void** holders, int* saveCou
             if (fn != g_callbackSeen) {
                 if (!MatchesAt(fn, ParsePattern(kSaveCallback))) { g_why = "a raw listener that is not the save's callback"; return -1; }
                 if (RipTarget(fn + kCbDelegateLea, 3, 7) != g_delegate) { g_why = "callback for another delegate"; return -1; }
-                uint8_t* const remove = RipTarget(fn + kCbRemoveCall, 1, 5);
+                // SaveThumbLeftoverFix may have pointed the Remove at its hook: the game's Remove behind it
+                uint8_t* const remove = SaveThumbLeftoverResolve(RipTarget(fn + kCbRemoveCall, 1, 5));
                 // HdrSaveThumbnail may have pointed the copy at its stub: the game's copy behind it
                 uint8_t* const copy = HdrSaveThumbnailResolve(RipTarget(fn + kCbCopyCall, 1, 5));
                 if (!InText(remove) || !InText(copy)) { g_why = "unexpected Remove"; return -1; }
@@ -393,19 +396,29 @@ DWORD WINAPI Worker(void*)
         uint32_t* pixels = nullptr;
         uint32_t* own = nullptr;  // the buffer this thread allocated (freed after the delivery)
         double waitMs = 0, convertMs = 0;
+        bool gpuTimedOut = false;
         if (st == 1) {
             uint8_t* const rb = static_cast<uint8_t*>(j->readback);
             void* const fence = *reinterpret_cast<void**>(rb + kReadbackFence);
             void* const staging = *reinterpret_cast<void**>(rb + kReadbackStaging);
+            // Bounded: a GPU that never finishes (device removed) must not hold the game (the broadcast waits for this
+            // delivery): after 10 s the picture is black and the read-back is left alone (not unmapped or destroyed, the GPU
+            // could still write it). The game then fails in its own way (and leaves its crash dump).
             int spins = 0;
             for (;;) {
                 if (*reinterpret_cast<volatile int32_t*>(static_cast<uint8_t*>(fence) + kFencePending) == 0 && VSlot<PollFn>(fence, kFencePoll)(fence)) break;
+                if (Ms(Ticks() - t0) > 10000.0) { gpuTimedOut = true; break; }
                 Sleep(1);
                 ++spins;
             }
             const uint64_t t1 = Ticks();
             waitMs = Ms(t1 - t0);
             pixels = own = AllocPixels(count * 4);  // before the map, so the mapped readback is never held while waiting for memory
+            if (gpuTimedOut) {
+                Log("[savethumb] the GPU copy did not finish within 10 s: a black picture is delivered and the read-back is left alone");
+                FillBlack(pixels, count);
+                j->readback = nullptr;  // deliberately not destroyed
+            } else {
             void* const rhi = *g_rhiGlobal;
             void* data = nullptr;
             int32_t pitchPx = 0, rows = 0;
@@ -438,6 +451,7 @@ DWORD WINAPI Worker(void*)
             reinterpret_cast<DtorFn>((*reinterpret_cast<void***>(rb))[0])(rb, 0);
             _aligned_free(rb);
             j->readback = nullptr;
+            }
             convertMs = Ms(Ticks() - t1);
         } else if (st == 2 && j->hdr && j->marker.data && static_cast<size_t>(j->marker.num) == count) {
             pixels = own = AllocPixels(count * 4);
@@ -463,6 +477,15 @@ DWORD WINAPI Worker(void*)
         const ScriptArray arr{pixels, static_cast<int32_t>(count), static_cast<int32_t>(count)};
         Deliver(j->listeners, j->listenerCount, j->w, j->h, &arr);
         const double deliverMs = Ms(Ticks() - t2);
+        if (j->gpuShot && !gpuTimedOut) {  // GpuMenuShot: the service's copy is made on the game thread (it hands it to the menus)
+            uint32_t* keep = own;
+            if (!keep || pixels != own) {
+                keep = AllocPixels(count * 4);
+                memcpy(keep, pixels, count * 4);
+            }
+            GpuMenuShotServicePixels(j->gpuShotGen, keep, j->w, j->h);
+            if (keep == own) own = nullptr;
+        }
         if (own) VirtualFree(own, 0, MEM_RELEASE);
         Log("[savethumb] the save's %dx%d picture (%s route, %s) delivered off the game thread: GPU copy wait %.1f ms, "
             "conversion %.1f ms, the save's callbacks %.1f ms", j->w, j->h, j->hdr ? "HDR" : "SDR",
@@ -511,6 +534,10 @@ void LambdaFor(void* ctx, void* cmdList, LambdaFn orig, bool hdr)
 {
     Job* const j = g_job.load(std::memory_order_acquire);
     void** const c = static_cast<void**>(ctx);
+    if (GpuMenuShotIsMarker(c[1])) {  // GpuMenuShot: its render-thread step in place of the read
+        GpuMenuShotRenderThread(c, cmdList);
+        return;
+    }
     if (!j || j->hdr != hdr || c[1] != &j->marker || j->state.load(std::memory_order_relaxed) != 0) {
         orig(ctx, cmdList);
         return;
@@ -545,7 +572,8 @@ void BroadcastHook(void* delegate, int32_t w, int32_t h, const void* bitmap)
 {
     if (g_job.load(std::memory_order_acquire)) {
         const uint64_t t0 = Ticks();
-        WaitForSingleObject(g_done, INFINITE);
+        // Bounded (10 s): the delivery itself is bounded too; a GPU that never finishes must not turn a crash into a freeze.
+        if (WaitForSingleObject(g_done, 10000) != WAIT_OBJECT_0) Log("[savethumb] the screenshot broadcast waited 10 s for the save's picture: going on");
         s_broadcastWaits.fetch_add(1, std::memory_order_relaxed);
         Log("[savethumb] a screenshot broadcast waited %.1f ms for the save's picture to be delivered first", Ms(Ticks() - t0));
     }
@@ -675,6 +703,208 @@ bool InstallHdrRoute(uint8_t* readBackCall, uint8_t* flushThunk)
     return true;
 }
 
+// GpuMenuShot (menus/gpu_menu_shot.cpp; public since 1.3.0): a menu's screenshot, when the engine delegate's listeners are
+// exactly Altar's screenshot service (which caches the picture and broadcasts it to the menus' backdrop handlers) and,
+// optionally, the save system's screenshot cache. Mode 1/3: the service's delegate is called as the engine's broadcast would
+// (under its lock) but with an empty picture: the handlers make their textures (ImageResize skipped), which the GPU pass
+// fills; the service gets the read-back picture on the game thread a few frames later, the save cache from the helper (as a
+// save's). Mode 3 (compare test) also makes the game's own picture and compares. Lab mode 2: only the GPU pass is recorded
+// (compute, no texture), the game's own read and broadcast follow and are compared. false = the game's way for the rest.
+uint8_t* g_rawExecSeen = nullptr;  // the raw delegate's ExecuteIfSafe, once matched
+
+void FreeArray(ScriptArray& a)
+{
+    if (a.data) g_free(a.data);
+    a = {nullptr, 0, 0};
+}
+
+bool GpuShotTakeOver(void* viewport, const void* rect, bool hdr)
+{
+    const int mode = GpuMenuShotMode();
+    if (!g_installed || mode == 0 || !*g_delegateCvar || **g_delegateCvar == 0) return false;
+    uint8_t* const d = g_delegate;
+    if (*reinterpret_cast<const int32_t*>(d + 0x14) != 0) return false;
+    if (GpuMenuShotServiceDelegate() != g_delegate) return false;
+    const auto* const list = *reinterpret_cast<uint8_t* const*>(d);
+    const int32_t num = *reinterpret_cast<const int32_t*>(d + 8);
+    uint8_t* const serviceFn = GpuMenuShotServiceFn();
+    uint8_t* svcInst = nullptr;
+    Listener cache{nullptr, nullptr, false};
+    for (int32_t i = 0; i < num; ++i) {
+        const uint8_t* const e = list + 16ll * i;
+        uint8_t* const inst = *reinterpret_cast<uint8_t* const*>(e);
+        if (*reinterpret_cast<const int32_t*>(e + 8) == 0 || !inst) continue;
+        uint8_t* const exec = VSlot<uint8_t*>(inst, kDelegateExecuteIfSafe);
+        uint8_t* const fn = *reinterpret_cast<uint8_t**>(inst + kInstanceFn);
+        if (!InText(exec) || !InText(fn)) return false;
+        if (fn == serviceFn) {
+            if (svcInst || !GpuMenuShotIsAdjustingExec(exec)) return false;
+            svcInst = inst;
+        } else if (MatchesAt(exec, ParsePattern(kExecuteIfSafeUObject)) && (fn == g_cacheSeen || MatchesAt(fn, ParsePattern(kCacheCallback)))) {
+            uint8_t* const obj = reinterpret_cast<WeakGetFn>(RipTarget(exec + kWeakGetCall, 1, 5))(inst + kInstanceObject);
+            if (cache.fn || !obj) return false;
+            g_cacheSeen = fn;
+            cache = {reinterpret_cast<CallbackFn>(fn), obj, false};
+        } else {
+            return false;  // a save's callback or anything else: not a menu screenshot
+        }
+    }
+    if (!svcInst) return false;
+    // Every handler bound on the service must be the backdrop handler (it alone is known to take the empty picture: any
+    // other could read pixels, resize to another size or keep the picture), or a leftover save-thumbnail binding whose call
+    // would only rewrite the idle save system's holder (GpuMenuShotLeftover; a game bug leaves one after each save made in a
+    // menu, shot130q): it is held out of the placeholder call and gets the picture with the service's delivery. Else the
+    // game's way.
+    uint64_t hWeak[4] = {};
+    int32_t hAdj[4] = {};
+    int handlers = 0;
+    GpuMenuShotHeld leftovers{};
+    {
+        void* const weakGetSvc = RipTarget(VSlot<uint8_t*>(svcInst, kDelegateExecuteIfSafe) + kWeakGetCall, 1, 5);
+        uint8_t* const so = reinterpret_cast<WeakGetFn>(weakGetSvc)(svcInst + kInstanceObject);
+        if (!so) return false;
+        uint8_t* const svcObj = so + *reinterpret_cast<const int32_t*>(svcInst + 0x28);
+        const auto* const hl = *reinterpret_cast<uint8_t* const*>(svcObj + 0x370);
+        const int32_t hn = *reinterpret_cast<const int32_t*>(svcObj + 0x378);
+        uint8_t* const handlerFn = GpuMenuShotHandlerFn();
+        for (int32_t i = 0; i < hn; ++i) {
+            const uint8_t* const e = hl + 16ll * i;
+            uint8_t* const inst = *reinterpret_cast<uint8_t* const*>(e);
+            if (*reinterpret_cast<const int32_t*>(e + 8) == 0 || !inst) continue;
+            uint8_t* const exec = VSlot<uint8_t*>(inst, kDelegateExecuteIfSafe);
+            if (!InText(exec) || !GpuMenuShotIsAdjustingExec(exec) || *reinterpret_cast<uint8_t**>(inst + kInstanceFn) != handlerFn) {
+                uint8_t* const hf = *reinterpret_cast<uint8_t* const*>(inst + kInstanceFn);
+                const bool raw = InText(exec) && (exec == g_rawExecSeen || MatchesAt(exec, ParsePattern(kExecuteIfSafe)));
+                if (raw) g_rawExecSeen = exec;
+                const char* leftWhy = nullptr;
+                if (InText(hf) && GpuMenuShotLeftover(hf, *reinterpret_cast<uint8_t* const*>(inst + kInstanceObject), raw, &leftWhy)) {
+                    if (!GpuMenuShotHeldAdd(leftovers, inst)) {
+                        // More than 16: the game's way (logged once a session; the count only grows).
+                        static bool logged = false;
+                        if (!logged) GpuMenuShotDeclined("more than 16 leftover save bindings on the screenshot service (from now on the game's way)");
+                        logged = true;
+                        return false;
+                    }
+                    continue;
+                }
+                // Which one: its function and delegate kind as exe offsets (0 = outside the exe).
+                const uint8_t* const base = Game().base;
+                char why[300];
+                _snprintf_s(why, _TRUNCATE, "%s (handler exe+0x%llX, delegate exe+0x%llX)", leftWhy ? leftWhy : "?",
+                            static_cast<unsigned long long>(InText(hf) ? hf - base : 0),
+                            static_cast<unsigned long long>(InText(exec) ? exec - base : 0));
+                GpuMenuShotDeclined(why);
+                return false;
+            }
+            if (handlers == 4) {
+                GpuMenuShotDeclined("more than 4 backdrop handlers");
+                return false;
+            }
+            hWeak[handlers] = *reinterpret_cast<const uint64_t*>(inst + kInstanceObject);
+            hAdj[handlers] = *reinterpret_cast<const int32_t*>(inst + 0x28);
+            ++handlers;
+        }
+        if (handlers == 0) return false;  // nothing to draw: the game's way
+    }
+    const int32_t* const r = static_cast<const int32_t*>(rect);
+    const int32_t w = r[2] - r[0], h = r[3] - r[1];
+    if (r[0] < 0 || r[1] < 0 || w <= 0 || h <= 0 || w > 16384 || h > 16384) {
+        GpuMenuShotDeclined("unusual rectangle");
+        return false;
+    }
+    if (g_job.load(std::memory_order_acquire)) {
+        GpuMenuShotDeclined("a save picture is still being delivered");
+        return false;
+    }
+    void* const weakGet = RipTarget(VSlot<uint8_t*>(svcInst, kDelegateExecuteIfSafe) + kWeakGetCall, 1, 5);
+    if (!reinterpret_cast<WeakGetFn>(weakGet)(svcInst + kInstanceObject)) return false;
+    const char* why = nullptr;
+    const int job = GpuMenuShotPrepare(r[0], r[1], w, h, hdr, &why);
+    if (!job) {
+        GpuMenuShotDeclined(why);
+        if (void* const probe = GpuMenuShotProbeMarker()) {  // the back buffer's format, recorded on the render thread
+            t_skipFlush = true;
+            g_getShot(viewport, probe, rect);
+            t_skipFlush = false;
+        }
+        return false;
+    }
+    const uint64_t t0 = Ticks();
+    // 1. The service, as the engine's broadcast calls it (inside the broadcast lock), with an empty picture.
+    const uint64_t weak = *reinterpret_cast<const uint64_t*>(svcInst + kInstanceObject);
+    const int32_t adj = *reinterpret_cast<const int32_t*>(svcInst + 0x28);
+    using ExecFn = bool (*)(void* inst, int32_t w, int32_t h, const ScriptArray* pixels);
+    const ScriptArray empty{nullptr, 0, 0};
+    ++*reinterpret_cast<int32_t*>(d + 0x14);
+    GpuMenuShotSetHandlers(job, hWeak, hAdj, handlers);
+    GpuMenuShotNoteLeftovers(job, leftovers);
+    // The leftovers held out of the placeholder call: for this one call their raw delegate's function is a no-op of ours
+    // (the raw ExecuteIfSafe calls [instance+20h] and returns 1), restored right after. The service's handlers' delegate
+    // is only used on the game thread (the service, the save function, our delivery), so nothing else sees it.
+    GpuMenuShotHeldSwap(leftovers, true);
+    GpuMenuShotBeginCapture(job);
+    VSlot<ExecFn>(svcInst, kDelegateExecuteIfSafe)(svcInst, w, h, &empty);
+    const int textures = GpuMenuShotEndCapture();
+    GpuMenuShotHeldSwap(leftovers, false);
+    --*reinterpret_cast<int32_t*>(d + 0x14);
+    const uint32_t gen = GpuMenuShotServiceArm(job, weak, adj, weakGet, w, h);
+    // 2. The asynchronous read-back of the same back buffer: the save cache's picture and the service's.
+    Job* const j = new Job;
+    j->w = w;
+    j->h = h;
+    j->hdr = hdr;
+    j->gpuShot = true;
+    j->gpuShotGen = gen;
+    if (cache.fn) {
+        j->listeners[0] = cache;
+        j->listenerCount = 1;
+    }
+    ResetEvent(g_done);
+    j->tEnqueue = Ticks();
+    g_job.store(j, std::memory_order_release);
+    t_skipFlush = true;
+    (hdr ? g_getShotHdr : g_getShot)(viewport, &j->marker, rect);
+    t_skipFlush = false;
+    s_deferred.fetch_add(1, std::memory_order_relaxed);
+    SetEvent(g_wake);
+    // 3. The GPU pass into the handlers' textures.
+    if (textures >= 1 && textures <= 4) {
+        t_skipFlush = true;
+        g_getShot(viewport, GpuMenuShotMarker(job), rect);
+        t_skipFlush = false;
+    } else {
+        Log("[gpushot] the handlers made %d textures: no GPU pass for them", textures);
+    }
+    const uint64_t gt = Ticks() - t0;
+    if (mode == 3) {
+        // The game's picture, synchronously (after our GPU pass in the command stream, so its wait covers it).
+        ScriptArray ref{nullptr, 0, 0};
+        uint32_t* refPx = nullptr;
+        uint32_t* own = nullptr;
+        const size_t n = static_cast<size_t>(w) * h;
+        if (!hdr) {
+            g_getShot(viewport, &ref, rect);
+            if (ref.data && static_cast<size_t>(ref.num) == n) {
+                refPx = static_cast<uint32_t*>(ref.data);
+                for (size_t i = 0; i < n; ++i) refPx[i] |= 0xFF000000u;
+            }
+        } else if (g_getShotHdr && g_toFColorSrgb) {
+            g_getShotHdr(viewport, &ref, rect);
+            if (ref.data && static_cast<size_t>(ref.num) == n) {
+                own = AllocPixels(n * 4);
+                ConvertLinearToSrgb(0, n, static_cast<const float*>(ref.data), own);
+                refPx = own;
+            }
+        }
+        if (refPx && textures >= 1 && textures <= 4) GpuMenuShotVerify(job, refPx, w, h);
+        else Log("[gpushot] compare: nothing to compare");
+        FreeArray(ref);
+        if (own) VirtualFree(own, 0, MEM_RELEASE);
+    }
+    GpuMenuShotTaken(job, gt);
+    return true;
+}
+
 }  // namespace
 
 // readBackCall: the call of GetViewportScreenShot in ProcessScreenShots (already redirected by save_bytes.cpp).
@@ -775,6 +1005,7 @@ void SetSaveThumbAsync(int mode, bool timers)
 // picture"); false = the caller does the game's read-back.
 bool SaveThumbTakeOver(void* viewport, const void* rect, bool hdr)
 {
+    if (GpuShotTakeOver(viewport, rect, hdr)) return true;  // GpuMenuShot (a menu backdrop's screenshot)
     const int mode = g_mode.load(std::memory_order_relaxed);
     if (!g_installed || mode == 0) return false;
     if (g_job.load(std::memory_order_acquire)) { s_skipped.fetch_add(1, std::memory_order_relaxed); return false; }
@@ -812,6 +1043,18 @@ bool SaveThumbTakeOver(void* viewport, const void* rect, bool hdr)
     t_skipFlush = false;
     s_deferred.fetch_add(1, std::memory_order_relaxed);
     SetEvent(g_wake);
+    return true;
+}
+
+bool SaveThumbInternals(SaveThumbRhi* out)
+{
+    if (!g_installed) return false;
+    out->readbackCtor = reinterpret_cast<void*>(g_readbackCtor);
+    out->readbackVtable = g_readbackVtable;
+    out->executeAndReset = reinterpret_cast<void*>(g_executeAndReset);
+    out->initContexts = reinterpret_cast<void*>(g_initContexts);
+    out->rhiGlobal = g_rhiGlobal;
+    out->hdrRoute = g_hdrCall != nullptr;
     return true;
 }
 

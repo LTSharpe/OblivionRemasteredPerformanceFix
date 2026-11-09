@@ -547,6 +547,20 @@ default since 1.2.4 (a game bug fix, user decision 2026-10-31).
   Result: no grow copies on the route in a fresh session (stock: one of 44-48 ms right at the NPC burst), one instead of
   four at a door exit (9 ms of copying instead of 64 ms).
 
+- **Size prior (`LumenGroupsPrior`, same fix, next release):** in a session's first dense exterior there is no peak
+  yet, so the doubling runs 15-17 times and its last steps copy 50 MB (629k -> 1.26M entries) and 100 MB (1.26M ->
+  2.5M) inside `UpdateLumenScenePrimitives`; the render thread waits 20-63 ms for it at the start of `UpdateLumenScene`
+  (the Imperial City flight's worst frame, 3.6 s in). The stock game makes the same kind of copies, more of them
+  (+37.5 % per grow, and again after each shrink). Peak entry counts in 507 of our session logs: median 1.15M, 99th
+  percentile 1.89M, largest 2.40M; so the prior is 2.6M entries (198 MiB). Once a scene holds 1/32 of it
+  (81k entries) the grow goes straight to it (a ~6.5 MB copy); it never gives a smaller block than the doubling, and a
+  grow past it doubles as before. The block is committed at once but its pages take RAM only as entries are written;
+  it is taken only while the memory monitor's last sample shows commit room (available + page file growth) of the
+  block + 2 GB (twice MemoryRelief's commit level) and the block available without page file growth (Windows never
+  grows the page file inside the Lumen task), else that grow doubles; the decision is logged. Result (8 fresh
+  games, A B B A twice, bridge scene at 4K with frame generation): the 20-63 ms wait gone in every run with it, the bridge
+  frame 33-86 ms (mean 57) -> 30-42 ms (mean 36); pictures the same within run-to-run variation.
+
 - **Result:** the Lumen spots disappear (hitch time per spot, stock / fix: 73 / 0, 22 / 0 ms; mixed spot 64 / 34);
   no visible change (visual pass, four scenes).
 
@@ -2510,6 +2524,26 @@ Game bugs (they also happen without OblivionPerfFix). Bugs in our own fixes are 
   minutes over an ~8.2 GB budget, where each new one took fresh chunks from a paging driver and two scenes ran 9-19%
   slower than the stock game: direct and compute pools are never trimmed. (3) A second process patching the constructor entry first makes the fix stand
   down ("the constructor is not the expected one").
+
+<a id="cmdmempregrow"></a>
+
+### Command memory made ahead of time (`CmdMemPregrow`)
+
+[Explanation](how-it-works.md#cmdmempregrow).
+
+- **Driver rule (headless study, nothing submitted):** an allocator gets 1 MB at its 1st, 17th, 33rd list since its last Reset, empty lists too; per such group 64 KB on the first RT clear and 256 KB on the first texture copy; chunks survive Reset; a second round makes no allocation.
+- **In the game (held view, one PC):** 300 allocators (204 new): video memory +503 MB, non-local +19 MB (DRED breadcrumbs), RAM free -45 MB. A headless device on the same PC places the 1 MB chunks in non-local memory instead, so the headless figure is not the game's.
+- **Results (ours; RX 9070 XT, 4K, FSR Performance, frame generation, 60 cap; fresh games, interleaved, scripted flights):**
+
+  | scene | runs each | frames >= 33 ms | ms over 16.7 per run | command chunks of a new size in the flight | peak VRAM GB |
+  |---|---|---|---|---|---|
+  | Imperial City bridge slice | 6 | 21 -> 5 | 607 -> 437 | 150 -> 4 | 10.8-11.0 -> 11.1-11.5 |
+  | Imperial City west slice | 6 | 9 -> 2 | 363 -> 332 | 16 -> 0 | same runs |
+  | Road to Bravil | 3 | 13 -> 1 | 789 -> 524 | 224 -> 4 | 9.6-9.9 -> 9.9-10.0 |
+
+  Not a claim about real play. One bridge run with it on had a 133 ms game-thread frame with no driver wait in it, unexplained; the longest frame in that tick group in the other 11 runs was 37 ms. Launch to first world is unchanged (27.3 vs 27.6 s); the background shader precompile finishes about 6 s later (no slower frames).
+- **Give-back (ours, same PC, "card as if full" forced in a lab build, nothing overfilled):** releasing the allocators really returns the memory: 164-190 allocators: video memory -368 to -432 MB (about 2.3 MB each), non-local and RAM free unchanged, about 1.1 s in all, longest single release 0.2-4.4 ms; in a held view frames during it at most 20.3 ms against 19.5-20.0 in controls, in a flight's first seconds at most 27.3 ms against 26-40. A give-back shortly before a burst makes that burst worse than the stock game's (Imperial City bridge slice, 4 runs: 9 hitches, worst 84-144 ms; stock, 9 runs: 5 hitches, worst 31-73 ms), probably because the part to remake is larger. So it fires only within 512 MB of the budget: on this PC normal sessions stay above about 0.54 GB, while the copy pool's 2 GB line is reached in every 4K flight. At that 2 GB line, after the peak, it gave back only 16-17 allocators. Not measured: a real over-budget give-back, or a sudden arrival.
+- **Not established:** behaviour on other AMD GPUs and drivers, small cards, a saturated CPU during the pass.
 
 <a id="hitchledger"></a>
 

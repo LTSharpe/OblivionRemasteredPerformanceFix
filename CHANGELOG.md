@@ -9,14 +9,368 @@ Downloads, checksums and build attestations: https://github.com/LTSharpe/Oblivio
 Bug fixes say whose bug it was: **game bug** = also happens without OblivionPerfFix (in the game, its engine or a
 driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 
-## Unreleased
+## 1.3.0-beta
+For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). 1.2.5 was announced but never released: its
+changes are in this version. Thanks to luisAzcuaga for pull request #45 (issue #44), to mkusm for the code behind
+`PacingOwnerWalk` (from his pull request #25), and to everyone who reported results and problems. Numbers marked "ours"
+are from our test PC (Ryzen 7 5800X, RX 9070 XT); the contributors' own measurements are in their pull requests.
 
-- **Benchmark:** a run now says when your own `Engine.ini` (`Documents\My Games\Oblivion Remastered\Saved\Config\Windows`)
-  holds settings the game does not write itself, usually an engine-tweak mod's file, which stays there after an
-  uninstall: a warning in the report (and the stock-vs-fix report) with how many settings, in which sections, and the
-  file's first comment, and `engineIni` in `result.json`. Every benchmark game runs with those settings, so such results
-  are not the stock game's. With a read-only `Engine.ini`, `-IniCvars` now stops with a clear message instead of
-  "access denied".
+**Against 1.2.4**, all switches at their defaults (ours: 4K, FSR Performance, frame generation, ray tracing, Ultra with
+Shadows High, 60 cap before frame generation; the public save-free flights `showcase` and `bravil-road`, profile
+`native-cap60`, 3 fresh games each, 1.2.4 and 1.3.0 taken in turn; frame times from the fix's own `HitchLedger` with
+`HitchLedgerMs=1`, read with `tools/stutter_ledger.py`): Imperial City flight frames of 33 ms or more 23 -> 8 per
+flight, time over 16.7 ms -14 % (7.5 -> 6.5 s per flight), 99th percentile frame 27.7 -> 26.3 ms; road to Bravil time
+over 16.7 ms -30 % (4.6 -> 3.2 s per run), 99th percentile frame 21.4 -> 20.0 ms (its frames of 33 ms or more are too
+few to compare: 2.0 and 1.7 per run). The numbers below are each for that switch alone; each says where it comes from:
+a public scenario of the benchmark (re-measurable), a lab measurement (a route or tool not in the public benchmark),
+or play.
+
+**In short:** fewer stutters while travelling (land loading and unloading around you, route searches, water, the
+graphics driver's command memory), less main-thread work when characters appear and in big fights, faster menus and
+loading screens, one rare crash fixed, and menus no longer slower after every fast travel. Every new fix is on by
+default, and setting it to 0 in `OblivionPerfFix.ini` gives 1.2.4's behaviour (most of them live, while the game runs).
+Most do the same work more cheaply with the same result. These are **equivalent, not identical** (the same result a
+little later or reached another way; each paragraph says how): `BodyRemovalSpread`, `StreamRegisterGranularity`,
+`WaterInfoSpread`, `CellBufferEvictDelayMs`, `RigImportTemplate`, `CreatePreload`, `PacingOwnerWalk`, `OtFrameTrim`,
+`WaterInfoSkip`, `DrawBehindLoadingScreen`, `MapPopupSpread` and, in one detail, `GpuMenuShot`. `FarPawnMoveHalfRate`
+and `FarHorseMove` are **not identical**: far-away calm characters and horses move in 30 steps a second. If you keep
+your own ini from an earlier version, the new switches take their defaults (on).
+
+### Performance improvements
+
+#### Travelling
+- **New: on AMD graphics cards with 16 GB of video memory or more, fewer stutters when a busy moment needs new command
+  memory** (`CmdMemPregrow`, on by default; a performance improvement, not a bug fix): AMD's driver gives each of the
+  game's command allocators its memory on first use, and when the game's stock of them runs out at a busy moment, tens
+  of new ones take their memory in one go and the frame waits on the driver (the stock game too). Now the stock is made
+  once before the first area is up, on its own thread, in about 3 s: lists are recorded and never sent to the card, so
+  the picture can't change, and no game logic runs. Ours, on one PC (RX 9070 XT, 4K, FSR Performance, frame generation,
+  60 cap), fresh games, scripted flights: Imperial City bridge slice (lab: a cut of the public `showcase` flight; 6 runs
+  each) frames >= 33 ms 21 -> 5, ms over 16.7 per run 607 -> 437; road to Bravil (the public `bravil-road`; 3 runs each)
+  frames >= 33 ms 13 -> 1, ms over 16.7 per run 789 -> 524. Other stutters stay, and one bridge run with it on had a 133
+  ms game-thread frame we can't explain (no driver wait in it). Costs: up to about 0.8 GB of video memory from the start
+  of the session (ours: the session's peak 0.2-0.3 GB higher in those flights); the shader precompile in the background
+  finishes about 6 s later, with no slower frames. **The risk:** that memory is taken early, nothing at the start can
+  tell that another program will fill the card later, and going over the video memory Windows gives the game is what
+  came before the rare graphics driver hangs on our test PC. If the game gets within 0.5 GB of that memory for 3 s, it
+  hands back once what the session has not used so far (ours, lab: about 0.4 GB, no slow frame while it does in a test
+  that only pretends the card is full; a really full card is untested); a card that fills up quickly can get there
+  first, and a busy moment right after it stutters more than in the stock game. Not tested on any other PC. It runs only
+  on an AMD card with its own memory and at least 16 GB of it (no handhelds, no Wine or Proton); it stays off, with a
+  log line saying why, on other cards, without `RdgParallelTranslate`, under 6 GB of RAM or 4 GB of commit free, or once
+  the first area is up, and it stops if memory gets short. Smaller cards may gain too, but going over their video memory
+  would cost more, and we have not tried them. If another program fills your card while you play, or you get graphics
+  driver hangs, set `CmdMemPregrow=0`: as in 1.2.4.
+
+- **New: fewer red frames when the area behind you unloads** (`BodyRemovalSpread`, on; a performance improvement, not a
+  bug fix; the engine's behaviour, also without the mod): when you ride away from a stretch of land, the game removes
+  its rock and plant fields' invisible collision bodies (7,000-26,000 at one place on the Bravil and Kvatch roads) in a
+  few frames, and the physics step then takes them apart while the main thread waits. Now they are taken down over the
+  next frames instead, with the game's own code, at the end of a frame: at least 500 a frame, every one within 30 frames
+  (half a second at 60 fps); only those at least 50 m from you, only while you play (loading screens as before). Ours,
+  one PC, lab measurement (the Kvatch road from a play session and cuts of `bravil-road`, not in the public benchmark),
+  scripted rides at low resolution, the moments of removal only: Kvatch road frames >= 30 ms about 2 per pass ->
+  0, worst 35-36 -> 20-24 ms, ms over 16.7 -62..-88 %; Bravil road places 72 -> 15-33, 69 -> 27-41 and 30 -> 12-16 ms
+  over 16.7; after a teleport no worse than the game. **Equivalent, not identical:** nothing you see changes, but for up
+  to half a second those far, out-of-reach bodies are still in the physics world (something far away could still touch
+  one in that time). Costs: none we could measure (the same work, ~1 us of main thread per body, spread out). Needs
+  `NpcCreationPacing`. `BodyRemovalSpread=0`: the game's way (live).
+
+- **New: fewer red frames when a wooded slope or rock field streams in** (`StreamRegisterGranularity`, on with 1; a
+  performance improvement, not a bug fix; the engine's behaviour, also without the mod): the engine adds a new area's
+  objects a few ms per frame but checks the time only after every 10 objects, and 4-5 of those can be grass or rock
+  fields of ~1,000 collision bodies each: one 9-14 ms piece of work, then a slow physics step. Now it checks after every
+  object (the engine's own `s.LevelStreamingComponentsRegistrationGranularity` 10 -> 1, while you play; loading screens
+  keep the game's 10). Ours, one PC, lab measurement (the Kvatch road from a play session, not in the public benchmark),
+  its arrivals: frames >= 30 ms 8 -> 0, ms over 16.7 -42 % at your kind of settings and -50 % at low resolution; door
+  loading screens as before. **Equivalent, not identical:** the same objects in the same order, but a newly streamed-in
+  cell appears about 0.1-0.3 s later than in the game (what the game itself shows at about 40 fps). If your Engine.ini
+  or the console sets that variable, yours is kept. `StreamRegisterGranularity=0`: the game's 10 (live).
+
+- **New: no route-search spikes when the navigation data changes around you** (`RepathParallel`, on; a performance
+  improvement, not a bug fix; the engine's behaviour, also without the mod): when cells stream in on a road, the engine
+  searches the routes of every walking character again, one after another on the game thread (from play: 29-34 ms in one
+  frame near Skingrad in a ride). Now those searches run at the start of that frame on four helper threads with the
+  engine's own search, and a result is handed over only when every input of the engine's own search is byte for byte the
+  same, every door, ladder or jump link the helper's search asked about still gives the same answer, and nothing in the
+  navigation data changed in between; otherwise the game searches as before. **Identical:** the same routes (lab proof
+  build: 27 of 27 compared results identical, 13 of them searches through door, ladder or jump links; 0 mismatches; two
+  play sessions: 47 and 38 searches served). Ours, one PC, from play (not re-measurable with the benchmark): the
+  Skingrad bursts 29-34 ms -> 8-9 ms. Costs four idle helper threads; off below 8 usable logical processors
+  (`ParallelMinProcessors`). `RepathParallel=0`: as in 1.2.4 (live once installed; installed at start-up).
+
+- **New: no hitch from Lumen's object list in the first outdoor area after starting the game** (`LumenGroupsPrior`, part
+  of `LumenKeepArrayCapacity`, on; a performance improvement, not a bug fix): Lumen's list of every tree and grass
+  instance (1 to 2.4 million entries outdoors) grew in steps, each a copy of the whole list while the frame waited. The
+  stock game makes these copies too, more of them in smaller steps (+37.5 % each, and again after every shrink);
+  `LumenKeepArrayCapacity` (since 0.12.0) made them one series of doublings per session, but the last doublings in the
+  first big outdoor area still copied 50-100 MB at once (20-63 ms, the worst frame of our Imperial City flight, under
+  the stone bridge; rarely a second one much later in a denser area). Now the list gets room for 2.6 million entries in
+  one small step as soon as it holds 1/32 of that. Ours, the public `showcase` flight, 8 fresh games at 4K with frame
+  generation: that frame 33-86 ms (mean 57) -> 30-42 ms (mean 36). Same entries, same picture. Cost: 198 MiB counted
+  against Windows' commit (RAM plus page file) from the first outdoor area on, taking RAM only as the list fills
+  (outdoors it ends near that size anyway); it is only done while Windows has that much commit available and 2 GB more
+  to spare, never while `MemoryRelief` is giving memory back, and never on graphics that share system RAM.
+  `LumenGroupsPrior=0`: as in 1.2.4.
+
+- **New: on graphics cards with 16 GB or more, one fewer driver wait on a first ride** (`InstanceBufferFloor`, on; a
+  performance improvement, not a bug fix; the engine's behaviour, also without the mod): the graphics card's list of
+  object instances grows from 96 to 192 MB once in most sessions, and making that block waited on the driver mid-ride
+  (lab traces: median about 5 ms, up to 24 ms; one 14.7 ms render-thread wait in a ride trace from play). Now the first
+  time it needs 96 MB (mostly while a load ends) it is made 192 MB at once. The same picture. Small: once per session at
+  most. Costs up to 96 MB of video memory in a session that would have stayed at 96 MB. Only when Windows' video memory
+  budget for the game is at least 14000 MB with 1 GB free at that moment (decided once per session); needs
+  `GpuSceneKeepCapacity`. `InstanceBufferFloor=0`: as in 1.2.4 (start-up).
+
+- **New: water redraws while you travel are spread over frames** (`WaterInfoSpread=3`, `WaterInfoSpreadNearM=-1`, on; a
+  performance improvement, not a bug fix; the game's behaviour, also without the mod): when areas stream in or out the
+  game redraws the water picture of the lakes and rivers they touch, often several in the same frame or a few frames
+  apart (5 ms or more of the render thread each at 4K, lab traces). Now at most one is redrawn per frame, oldest first,
+  and a water redrawn less than a quarter of a second ago waits out that time so the requests in between become one
+  redraw. Every redraw still happens, with the ground and water of the moment it is drawn, at most 4 frames or 250 ms
+  after it was asked for. **Equivalent, not identical:** a lake's water picture can follow a change of the ground around
+  it that much later. Ours, one PC, lab measurements: in a scripted bridge slice (a cut of `showcase`) the render-thread
+  excess from water updates went down 28 % with peaks unchanged within noise; at cuts of `bravil-road` at the spots the
+  maintainer marked in play no difference was measurable; from play, in the maintainer's own rides the longest wait was
+  15 frames / 249 ms. On by the maintainer's choice although the gain is small. `WaterInfoSpread=0`: as in 1.2.4 (live
+  once installed; installed at start-up).
+
+- **New: the cells behind you are unloaded a little later after a crossing** (`CellBufferEvictDelayMs=1500`, on; part of
+  `CellBufferPacedEvict`; a performance improvement, not a bug fix): `CellBufferPacedEvict` unloads the cells that fall
+  out of the old engine's cell buffer one per frame right after a crossing, when the game is busiest bringing in the new
+  row. Now that starts 1.5 seconds after the crossing. **Equivalent:** the same cells, in the same order, on the same
+  thread; until then the cells about 150 m behind you stay loaded, as with a bigger `uExterior Cell Buffer`. A second
+  crossing within those 1.5 s (moving diagonally near a cell corner) can make the game unload some of them inside that
+  crossing frame, as the game always does; the log counts it. Ours, lab analysis of play rides: the cell unload is about
+  1.5-2 % of a ride's time over 16.7 ms; no frame-level gain was measurable. On by the maintainer's choice.
+  `CellBufferEvictDelayMs=0`: as in 1.2.4 (live).
+
+#### Characters and crowds
+- **New: less main-thread work when characters appear** (`RigImportTemplate`, on; a performance improvement, not a bug
+  fix): each new character's, creature's or horse's Control Rig (the animation rig that, among other things, places the
+  feet) first builds its bone list from the skeleton, one bone at a time: 0.75-1.5 ms per rig (lab timings). Now the
+  first rig of each kind with a given skeleton is built by the game as before and kept as a template; later rigs of that
+  kind with exactly the same skeleton (bone names, parents and reference pose compared) get a copy of it in about 0.2
+  ms, and only while the same listeners are attached as when the template was made. **Equivalent, not identical:** a lab
+  build compared the copy with the game's own build over the whole bone data: 33 of 33 rigs the same, apart from how the
+  memory is laid out (a copy's bones sit in one block instead of one block each). Ours, one PC, the public `ic-spots`
+  Waterfront pass with lab counters: the main-thread time of character creation -1.0 to -1.1 ms (-14 %; 8 fresh passes,
+  ABBA). **Whose bug the guard prevents: ours.** Because a copy's bones share one block, removing the first bone of a
+  copied rig later would free the block under the bones still in use (the game's own build allocates each bone alone, so
+  without our copy there is no such block). The game never did that in our tests (0 times in all our lab sessions, up to
+  3,752 later re-imports per session); if it ever does, that block is kept instead of freed (about 0.3 MB at most per
+  rig; after 8 such blocks the copies switch off until the game restarts) and the log counts it. The stock engine has
+  the same latent weakness for rigs that copy their hierarchy themselves (an engine bug that also exists without the
+  mod, not seen to fire); the fix leaves those as they are and only counts them (`stock batch-owner removes`). Costs:
+  one stored copy per kind of rig and skeleton (at most 64, a few hundred KB each). `RigImportTemplate=0`: as in 1.2.4
+  (live once installed; installed at start-up).
+
+- **New: far-away calm characters and horses move in 30 steps a second** (`FarPawnMoveHalfRate=1`, `FarPawnMoveHz=30`,
+  `FarHorseMove=2`, on; a performance improvement, not a bug fix). **Not identical to the game:** a calm character or
+  horse at least 100 m from you (walking, wandering, travelling, eating, sleeping, waiting; at walking pace) runs its
+  movement update every second frame at 60 fps, with both frames' time in one step: what every character gets on a PC
+  that runs the game at 30 fps. Far away such characters move in small steps; routes, speeds and arrival points stay the
+  same. Everyone near you, and anyone fighting, fleeing, following, talking, swimming, running, mounted, or playing an
+  animation that moves the character (root motion), moves every frame as before. Inputs added in the skipped frame reach
+  the next step as their average, and a character that stops qualifying (comes near, starts a fight) moves at once with
+  all its waiting time. Ours, one PC, lab routes not in the public benchmark: the movement update of far calm characters
+  on a gallop route 64 -> 52 us per character and frame (-0.17 ms per frame in total); a first held-game pair on a
+  walking route with many far wanderers: game-thread ms 12.75 -> 11.82 (-7 %, one pair, small profile). Also: a far
+  character standing on or pushing a loose physics object pushes it with about half the force. `FarPawnMoveHalfRate=0`
+  and `FarHorseMove=0`: as in 1.2.4 (live once installed; installed at start-up when either is on; needs
+  `NpcCreationPacing`).
+
+- **New: no hitch when the first horse, creature or item of its kind is created far away** (`CreatePreload`,
+  `CreatePreloadNear=12`, on; a performance improvement, not a bug fix): creating a character, creature or object whose
+  model or kind is not loaded yet (the first horse, rat or skeleton of a trip, a book next to a ruin, or one the game
+  has unloaded since) made the main thread wait for the disk: 4-72 ms for a horse at 4K, up to 160 ms next to a ruin
+  (lab traces). A far one that `NpcCreationPacing` may let wait now waits at the head of the queue while the same files
+  load in the background, then is created as before. **Equivalent, not identical:** the same files, loaded by the same
+  loader, a few frames earlier; the character is created a few frames later, far away, in the same order; at most as
+  long as `PacingMaxLagFrames` (then the game loads the rest itself, as in 1.2.4). Ours, one PC, lab routes not in the
+  public benchmark, 4K traversal (ABBA): the synchronous loads inside creates 4 / 42 ms -> 0 / 0, no create over 25 ms
+  (about one frame of 33 ms or more less per pass by the Chorrol stable); cold Imperial City Waterfront (480p): 39 ms ->
+  0. `CreatePreloadNear`: a character created near you may also wait, at most 12 frames, while its spot is more than 75
+  degrees off the camera's view direction (a fixed angle, not tied to the field of view); created at once when it comes
+  into view; only with frame generation (it needs its camera). Ours, lab: the Crucible dog's create 40-47 ms -> 6.6-8.1
+  ms. `CreatePreload=0`: as in 1.2.4 (live once installed; installed at start-up; needs `NpcCreationPacing`).
+
+- **New: far characters' equipment and hair wait their turn** (`PacingOwnerWalk`, on; part of `NpcCreationPacing`; pull
+  request #25 by mkusm, thank you): equipment and hair steps of a character far away and out of view now wait their turn
+  like its other steps; before, a read fault on a small object in the owner chain made them count as near (so they ran
+  at once, as in the stock game: a gap in our pacing, not a game bug). mkusm wrote it in the first version of pull
+  request #25 and later left it out after his NVIDIA runs showed no measurable gain; we kept it after testing it on AMD
+  (lab counters on the public `ic-spots` Waterfront pass: equipment steps with an unknown owner 12 -> 2 per pass, now
+  paced; whole passes within our noise). Timing only, in the game's order. `PacingOwnerWalk=0`: as in 1.2.4 (live).
+
+#### Fights
+- **New: less waiting for the old engine in big fights** (`OtFrameTrim=3`, on; a performance improvement, not a bug
+  fix): in a big fight the main thread waits each frame for the old engine's own thread. Bit 1: that thread started each
+  frame with a 1-2 ms sleep so its path finder could run; the sleep now ends as soon as the path finder is done (or at
+  once when it has nothing to do), never later than before, and the old engine sees the same result (**equivalent**:
+  thread timing only). Bit 2: a timer the old engine reads only for its own profiling (66 calls, nothing reads the
+  result: checked in the code and with hardware watches in fights; not covered: menus, saving and loading, the console)
+  is no longer read (**identical** by that audit). Ours, one PC, the public `actors` scenario's 36-character fight
+  (`actors-battle`) at 4K with frame generation, 3 fresh games, 6 ABBA pairs: -1.2 ms per rendered frame (the main
+  thread's wait for the old engine 6.6 -> 4.9 ms), about -5 % of the time over 16.7 ms. `OtFrameTrim=0`: as in 1.2.4
+  (live once installed; installed at start-up).
+
+- **New: no disk checks for missing voice files in fights** (`LooseMissCache`, on; a performance improvement, not a bug
+  fix): every spoken combat line made the old engine check twice whether a loose voice file exists on disk (it never
+  does: the voices are in the game's archives), on the thread the game waits for. A voice path found missing once is now
+  answered from memory as missing. **Identical** while no loose voice file appears under `Data\Sound\Voice` while the
+  game runs; anything else, and anything found, is checked as before. Ours: ~0.24 ms of that thread per rendered frame
+  in the `actors-battle` fight (lab timers; too small to show in whole-frame numbers). Costs: the remembered paths (a
+  few thousand, at most 65,536). `LooseMissCache=0`: as in 1.2.4 (live once installed; installed at start-up).
+
+#### Menus and loading screens
+- **New: no water redraws when you open or close a menu** (`WaterInfoSkip`, on; a performance improvement, not a bug
+  fix; the game's behaviour, also without the mod): opening or closing the map, the inventory or saving makes the game
+  redraw the water picture of every loaded lake and river (8 at once, 20-40 ms of the render thread, lab traces) with
+  nothing changed. Now a redraw whose inputs (the water, the ground pieces, their positions and sizes, the picture's
+  height) are exactly those of that water's last redraw, and whose inputs last changed at least 2 seconds ago, is
+  skipped. **Equivalent, not identical:** in our checks the skipped redraws were bit for bit the same picture (32 of 32
+  after map opens, map closes and saves; 144 of 144 in three test sessions), but content the inputs can't show (finer
+  ground detail or a river's own data arriving after its last redraw) is refreshed at the water's next real change, not
+  at the next menu as in the game. One such case was seen in testing: right after a teleport a zone redrew with the same
+  inputs 0.15 s later and 138 of its 65,536 pixels differed; the 2-second wait keeps such redraws. Ours, one PC, lab
+  menu test (not in the public benchmark), small profile: the 26-40 ms frame after closing the map is gone (7 of 9 below
+  18 ms). It does nothing for riding: those redraws really change the picture. `WaterInfoSkip=0`: as in 1.2.4 (live once
+  installed; installed at start-up).
+
+- **New: the area you arrive in appears sooner after a loading screen** (`DrawBehindLoadingScreen=3`, on; a performance
+  improvement, not a bug fix; the game's behaviour, also without the mod): after a door, gate, fast travel or save load
+  the game draws nothing of the new area until the loading screen fades out, so its first frame does all the first-time
+  work at once while the loading picture stays on screen. Now, once the area has loaded, the frozen area is drawn for 3
+  frames behind the opaque loading screen (nothing moves or runs; only drawing), then hidden again until the game's own
+  fade-in. Ours, one PC, lab door and fast-travel tests (not in the public benchmark): 55-72 % of what was left after a
+  load removed; the loading picture went away 76 ms (small window) to 350-500 ms (4K) sooner on average. **Equivalent:**
+  the first visible frame builds on those frames' image history instead of starting fresh. Cost: rarely the loading
+  screen stays up one more half second (1 of 28 test arrivals at 4K). Needs `StreamBehindLoadingScreen`,
+  `PrepareCollisionBehindLoadingScreen` and `NpcCreationPacing`. `DrawBehindLoadingScreen=0`: as in 1.2.4 (live).
+
+- **New: the map opens faster** (`MapPopupSpread=5`, on; a performance improvement, not a bug fix; the game's behaviour,
+  also without the mod): opening the map, the game builds all its markers (a few hundred small widgets) three to five
+  times in the same frame, each time removing the ones it built before anything has drawn or looked at them, and builds
+  them again from an equal list in the next frames. Now the lists removed unseen are not built, and an equal rebuild
+  keeps the markers already there with the new list's data. **Equivalent:** the markers shown come from the same final
+  list; any marker that is shown, hovered or looked up is built first; every map open starts fresh. Ours, one PC, a lab
+  menu test at Cheydinhal's chapel square (the map opened by a lab script, not in the public benchmark), small window
+  (854x480), this release's DLL: later map opens 338 -> 207 ms for the open frame and 179 -> 61 ms for the next (the
+  time over 16.7 ms around an open 549 -> 279 ms, -49 %); a session's first map open 413 -> 297 ms (one launch each).
+  `MapPopupSpread=0`: as in 1.2.4 (live once installed; installed at start-up).
+
+- **New: menus open without waiting for the screen picture** (`GpuMenuShot`, on; a performance improvement, not a bug
+  fix): the picture behind an open menu (inventory, magic, map, pause, character) is a filtered copy of the screen, and
+  even with `ScreenshotReadbackConvert` and `ScreenshotParallel` the game stopped until that copy came back from the
+  graphics card. Now the same picture is made on the graphics card itself, in the same frame, with the game's own colour
+  conversion and filter. **Identical:** the same bytes (every byte compared in our lab tests, SDR). Ours, one PC (RX
+  9070 XT), 4K, a lab menu test (the menus opened by a lab script, not in the public benchmark): inventory, magic, pause
+  and character open frames 42-56 ms (31-45 %) shorter. Costs: two screen-sized buffers in video memory from the first
+  menu on (about 63 MB at 4K). Tested on AMD only; any picture it can't make (another screenshot in flight, an unusual
+  screen format) is left to the game. It also keeps working after fast travels: a save made while a menu is open (the
+  fast-travel autosave, a save from the System menu) leaves its thumbnail handler bound to the menus' screenshot for the
+  rest of the session (a game bug, also without the mod; `SaveThumbLeftoverFix` below removes them, so they remain only
+  with `SaveThumbLeftoverFix=0` or with the OBSE package). Those handlers only copy each menu picture into the finished
+  save's buffer, which nothing reads before the next save resets it; they now get the same picture a few frames later
+  (or, if that picture is dropped, keep the older one): **equivalent** for this part, not identical. While a save is in
+  progress the shot is left to the game. `GpuMenuShot=0`: as in 1.2.4 (live once installed; installed at start-up).
+
+#### Rendering
+- **New: less render-thread work when Lumen's object table changes** (`LumenCardsNarrow`, on; a performance improvement,
+  not a bug fix; the engine's behaviour, also without the mod): when one instance of a big object (a tree of a forest
+  object) gets or loses its Lumen surface cards, the engine sends the Lumen table entries of every instance of that
+  object to the graphics card again. Now only the changed entries are sent; the table on the card holds the same values
+  in the same frame. **Identical:** checked against the game's own values in a lab proof build, 0 differences in 272.5
+  million instances. Ours, one PC, a 37 s lab cut of `bravil-road` (the cut is not in the public benchmark): the step
+  took 0.85 ms per rendered frame before and 0.08 ms after (about 0.8 ms of the render thread a frame; 0.23 ms on a
+  second pass of the same road); at a 60 fps cap the frame times don't show it on their own. Costs up to about 35 MB of
+  memory (bookkeeping, used only as far as the table goes). `LumenCardsNarrow=0`: as in 1.2.4 (live once installed;
+  installed at start-up).
+
+### Game bug fixes
+- **A rare crash when arriving somewhere new** (`PairReleaseOnce`, on; a game bug that our `NpcCreationPacing` exposes):
+  the game hands each buffer of its old engine's "pairing" sessions back twice, which is harmless on its own; but when
+  another session takes the buffer in between, the second hand-back frees it under that session and two sessions share
+  one buffer (the crash at `exe+0x4590F5C`). The double release is the game's own code; in our tests it only collided
+  with our NPC pacing on (a lab stress test: 10 of 44 widened teardowns with it on, 0 of 44 with it off), and we have
+  not seen it without the mod. Now each buffer is handed back once, by the game's own last release; the log counts the
+  skipped early ones (`[pairrace] PairReleaseOnce: N early releases skipped`). Nothing else changes.
+  `PairReleaseOnce=0`: as in 1.2.4 (start-up). What it does not do: our pacing still lets the end of a pairing session
+  overlap with the old engine starting another one; a second, unlocked look-up of the session table in that overlap
+  could in theory still fail (not seen in any test or play session; a review finding we are still working on).
+- **Game bug fixed: menus open slower after every fast travel** (`SaveThumbLeftoverFix`, on; a game bug, also without
+  the mod): a save made while a menu is open (the fast-travel autosave, a save from the System menu) attaches its
+  thumbnail handler to the menus' screenshot; the game meant to remove it once the save had its picture, but removes it
+  from the wrong list, so it stays until you quit, one more per such save. Every later menu then copies its background
+  picture once more per leftover handler (our estimate from timing a 33 MB copy on one PC: about 1.5-3.5 ms each at 4K,
+  so after ten fast travels a menu would open 15-35 ms slower). Now each handler is removed once its save has the picture, as the game intended. Saves,
+  thumbnails and gameplay stay the same. `SaveThumbLeftoverFix=0`: as in 1.2.4 (installed at start-up, then live).
+
+### Other
+- **Writing the log no longer holds up the game** (our bug, in every version since 1.0.0-beta; not a game bug): each
+  line of `OblivionPerfFix.log` was written to disk by the thread that logged it, so a slow disk write (Windows
+  sometimes takes tens of ms) stopped that thread, which can be the game's own; in our test build, which logs a lot
+  more, one such write made a 50 ms frame. Lines are now handed to a background thread that writes them in order: the
+  same lines, order and time stamps. At a crash, and when the game ends, every waiting line is written first, so crash
+  reports stay complete. `LogFile=0` is unchanged.
+
+- **The fix no longer runs without a log and without saying so** (our bug, in every version since 1.0.0-beta): if
+  `OblivionPerfFix.log` could not be opened (a game process that did not fully close still holding it, a folder the game
+  may not write to), nothing was logged at all while the fix kept running, and the README's "no log means the fix was
+  not loaded" was wrong for that case. The log now falls back to `OblivionPerfFix.<process id>.log` in the same folder,
+  then to the same name in `%TEMP%`; its first lines say which file failed and why. These are new file names you may
+  see, only when the normal log fails. At most three stay in each folder (the new one and the two newest others; older
+  ones are deleted when a new one is created); a normal start touches none of them. `LogFile=0` still writes nothing,
+  except a GPU crash report as before, which takes the same fallback.
+
+- **The log now says when the game's exe is not a build we know** (not a bug; a message that was missing; issue #43):
+  one plain start-up line, `game build not recognised`, with the exe's TimeDateStamp and SizeOfImage, saying that fixes
+  that can't find their code stay off, which is safe. The line switches nothing off.
+
+- **A fuller report when the game dies with "GPU crashed or D3D device removed"** (diagnostics, not a bug fix;
+  `GpuCrashReport`, on): besides what each graphics queue had reached (now per queue, with the passes still open and the
+  memory page a fault hit), the log holds the last minute of memory use and frame times, one line per second (video
+  memory against its budget, free RAM and commit, the game thread's longest frame and the GPU's frame time), the
+  settings of this fix in effect and where in the world the player was (coordinates). The report names no other program.
+  Nothing is drawn or paced differently. Please include that part of the log in a crash report. One new key under
+  `[General]`:
+  - `GpuPassMarkers` (**0**; 1 = pass names in the crash report, 2 = AMD's own markers for Radeon GPU Detective and
+    Profiler, 3 = both; AMD graphics cards only, nothing changes elsewhere): names the render pass the GPU stopped in.
+    It costs a little CPU time on the threads that record the GPU's work (about 0.25-0.5 ms per presented frame on the
+    render hardware thread in our lab test with frame generation on, only while on), and draws nothing differently. For
+    people who are asked to switch it on when hunting a crash.
+
+- **Save pictures can no longer wait forever on a crashed graphics card** (our own `SaveThumbnailAsync` code, not a game
+  bug; not seen in play): the helper's wait for the graphics card's copy of the save picture and the screenshot
+  broadcast's wait for the helper stop after 10 seconds (the picture is then black, a line is logged) instead of never,
+  so a crash cannot turn into a freeze there. No change while the graphics card works.
+
+- **A narrower safety window when the game quits** (`CommandAllocatorTrim`; our bug, latent: not seen in any log): the
+  once-a-second trim of the copy queue's spare command memory runs only while the game has asked for that memory
+  recently. "Recently" was 2 seconds, but when the game quits it deletes its graphics device 0.84-1.22 s after its last
+  request (ours, lab, 6 quits), so a trim in that gap could have touched freed memory (it also needs video memory to be
+  tight at that moment). The window is now 250 ms. The game asks every frame, so play is unaffected; a trim that misses
+  the window waits for the next second.
+
+- **Benchmark report: the upscaler was named wrongly** (our bug in the report, not in the fix; issues #24 and #28): the
+  value 3 of the game's upscaling method is XeSS and 1 is DLSS, but the "settings (the player's)" line printed 3 as DLSS
+  and 1 as TSR (an Arc B580 with XeSS showed "DLSS"). Only the text of the report changed.
+
+- **Benchmark:** a run now says when your own `Engine.ini` (`Documents\My Games\Oblivion
+  Remastered\Saved\Config\Windows`) holds settings the game does not write itself, usually an engine-tweak mod's file,
+  which stays there after an uninstall: a warning in the report (and the stock-vs-fix report) with how many settings, in
+  which sections, and the file's first comment, and `engineIni` in `result.json`. Every benchmark game runs with those
+  settings, so such results are not the stock game's. With a read-only `Engine.ini`, `-IniCvars` now stops with a clear
+  message instead of "access denied". Pull request #45 by luisAzcuaga, thanks (issue #44).
+
+- **Benchmark: a run that stopped during its set-up could leave your saved resolution changed** (our bug in the
+  benchmark, not in the fix or the game): with a fixed profile such as the default `small`, a stop while the run
+  prepared its config (for example `-IniCvars` with a read-only `Engine.ini`) left the 854x480 window in
+  `GameUserSettings.ini` and `AltarGameUserSetting.ini`, and `-Close` reported them as restored. What can refuse is now
+  checked before anything is written, every file is on record before it changes, so any later stop restores it, and
+  `-Close` says what it really did. A run with your own settings (`-Profile own`, `user`) warns if the saved size is
+  that of the small window.
 
 ## 1.2.4-beta
 For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Thanks to Mishu117 for pull requests #33, #34,

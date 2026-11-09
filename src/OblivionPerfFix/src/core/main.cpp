@@ -61,6 +61,7 @@ std::atomic<bool> g_clearHooked{false};      // InstanceClearReserve installed
 std::atomic<bool> g_gpuSceneHooked{false};   // GpuSceneKeepCapacity installed
 std::atomic<bool> g_allocTrimHooked{false};  // CommandAllocatorTrim installed
 std::atomic<bool> g_navLinkHooked{false};    // NavLinkFast installed
+std::atomic<bool> g_lumenNarrowHooked{false}; // LumenCardsNarrow installed
 std::atomic<bool> g_saveBytesHooked{false};  // SaveBytesBulk / SaveThumbnailAsync (lab: and SaveStallTimers) installed
 std::atomic<bool> g_saveRefIdHooked{false};  // SaveRefIdIndex installed
 std::atomic<bool> g_physAnimHooked{false};   // PhysAnimNoEmptyLock installed (start-up)
@@ -123,6 +124,14 @@ bool TranslateWanted(const Config& cfg, bool sharedGpu, unsigned seconds)
     return on;
 }
 
+// LumenGroupsPrior's commit margin: twice MemoryReliefCommitMB (where MemoryRelief gives memory back again), kept within
+// 1-64 GB so an odd hidden value can neither overflow nor take the margin away.
+int LumenPriorSpareMB(const Config& cfg)
+{
+    const int mb = cfg.memoryReliefCommitMB < 512 ? 512 : cfg.memoryReliefCommitMB > 32768 ? 32768 : cfg.memoryReliefCommitMB;
+    return 2 * mb;
+}
+
 DWORD WINAPI MonitorThread(LPVOID)
 {
     for (unsigned seconds = 1;; ++seconds) {
@@ -131,6 +140,12 @@ DWORD WINAPI MonitorThread(LPVOID)
         // MemoryRelief: while Windows is short of memory, the fixes that keep memory on purpose give it back.
         MemoryRelief relief;
         UpdateMemory(cfg, &relief);
+        {
+            // GPU crash report extras: pass markers once the game's device exists (lab: video memory per process)
+            uint64_t vram = 0, budget = 0;
+            const bool deviceReady = LatestGameVram(&vram, &budget);
+            GpuPassMarkersTick(cfg.gpuPassMarkers, deviceReady);
+        }
         SetAtmosphereDirtyFilterEnabled(cfg.atmosphereDirtyFilter);
         SetAtmosphereLightFastPathEnabled(cfg.atmosphereLightFastPath);
         SetAtmosphereLightCloudPathEnabled(cfg.atmosphereLightCloudPath);
@@ -150,6 +165,7 @@ DWORD WINAPI MonitorThread(LPVOID)
         SetTrapTargetGuardEnabled(cfg.trapCrashGuard);
         SetBowSneakAttackFixEnabled(cfg.bowSneakAttackFix);  // BowSneakAttackFix: no-op unless installed at start-up
         SetAutosaveFollowsMenuEnabled(cfg.autosaveFollowsMenu);  // AutosaveFollowsMenu: no-op unless installed at start-up
+        SetSaveThumbLeftoverFix(cfg.saveThumbLeftoverFix);  // SaveThumbLeftoverFix: no-op unless installed at start-up
         SetHavokPickWarningGuardEnabled(cfg.havokPickWarningGuard);
         SetFrameGenCrashGuardEnabled(cfg.frameGenCrashGuard);
         SetObjectReplaceGuardMode(cfg.objectReplaceGuard);
@@ -174,7 +190,14 @@ DWORD WINAPI MonitorThread(LPVOID)
         SetMenuOpenFlashFix(cfg.menuOpenFlashFix);  // MenuOpenFlashFix: no-op unless installed at start-up
         if (g_physAnimHooked) SetPhysAnimNoEmptyLock(cfg.physAnimNoEmptyLock);
         SetRigTraceReuse(cfg.rigTraceReuse);  // RigTraceReuse: no-op unless installed at start-up
+        SetRigImportTemplate(cfg.rigImportTemplate);  // RigImportTemplate: no-op unless installed at start-up
+        SetFarPawnMove(cfg.farPawnMoveHalfRate, cfg.farPawnMoveHz, cfg.farHorseMove);  // FarPawnMove: no effect unless installed
+        SetCreatePreload(cfg.createPreload);          // CreatePreload: no effect unless installed at start-up
+        SetCreatePreloadNear(cfg.createPreloadNear);
+        SetOtFrameTrim(cfg.otFrameTrim);              // OtFrameTrim: no effect unless installed at start-up
+        SetLooseMissCache(cfg.looseMissCache);        // LooseMissCache: no effect unless installed at start-up
         if (g_lumenHooked) SetLumenKeepCapacityEnabled(cfg.lumenKeepArrayCapacity && !relief.lumen);
+        if (g_lumenHooked) SetLumenGroupsPrior(cfg.lumenGroupsPrior, LumenPriorSpareMB(cfg));  // also logs its decisions
         if (g_uploadHooked)
             SetUploadMemoryKeep(cfg.uploadMemoryKeep && !relief.upload, cfg.uploadMemoryKeepFrames, cfg.uploadPagesToKeep,
                                cfg.uploadReleaseRampFrames);
@@ -188,6 +211,7 @@ DWORD WINAPI MonitorThread(LPVOID)
             SetNpcPacing(cfg.npcCreationPacing, cfg.pacingBudgetMs, cfg.pacingMinDistance, cfg.pacingMaxLagFrames, cfg.pacingUseSlack,
                          cfg.pacingFlowWait, cfg.pacingFlowWaitFrames);
         if (g_pacingHooked) SetNpcPacingFadeAware(cfg.pacingFadeAware);
+        if (g_pacingHooked) SetNpcPacingOwnerWalk(cfg.pacingOwnerWalk);  // PacingOwnerWalk (mkusm, PR #25): live
         if (g_pacingHooked) SetNpcPacingLeanFlowDrain(cfg.pacingLeanFlowDrain);  // PacingLeanFlowDrain: live
         SetHitchLedger(cfg.hitchLedger, cfg.hitchLedgerMs);  // diagnostic: no-op unless installed at start-up
         SetTickSplit(cfg.hitchLedger && cfg.hitchLedgerTickSplit);  // diagnostic: no-op unless installed at start-up
@@ -196,6 +220,9 @@ DWORD WINAPI MonitorThread(LPVOID)
         SetStreamBehindLoading(cfg.streamBehindLoading);     // StreamBehindLoadingScreen: no-op unless installed at start-up
         SetUnfreezeBehindLoading(cfg.unfreezeBehindLoading); // prototype UnfreezeBehindLoadingScreen (trade-off; 0 = off)
         SetUnfreezeBehindLoadingFastTravel(cfg.unfreezeBehindLoadingFastTravel);  // ... its own hold after a fast travel (0 = the same)
+        SetDrawBehindLoading(cfg.drawBehindLoading);  // DrawBehindLoadingScreen (loadreveal; public 1.3.0): live
+        SetMapPopupSpread(cfg.mapPopupSpread);        // MapPopupSpread (mapspread; public 1.3.0): live once installed
+        SetGpuMenuShot(cfg.gpuMenuShot, cfg.hdrMenuBackground);  // GpuMenuShot (gpushot; public 1.3.0): live once installed
         HitchLedgerDrain();                                  // ... its slow-frame records into OblivionPerfFix-ledger.csv
         if (g_clothRegHooked) SetClothRegisterLite(cfg.clothRegisterLite);  // ClothRegisterLite: live once installed
         SetClothBuildDefer(cfg.clothBuildDefer, cfg.clothDeferQuietFrames);  // ClothBuildDefer: live once installed (no-op otherwise)
@@ -210,6 +237,14 @@ DWORD WINAPI MonitorThread(LPVOID)
         SetBulkIndexInsert(cfg.bulkIndexInsert, cfg.bulkIndexInsertMin, cfg.physicsInternalFlushParallel);  // BulkIndexInsert: no-op unless installed
         SetPhysicsQueueShrinkOnce(cfg.physicsQueueShrinkOnce);  // PhysicsQueueShrinkOnce: no-op unless installed with BulkIndexInsert
         if (g_destroyBatch) SetPhysicsDestroyBatch(cfg.physicsDestroyBatch, cfg.physicsDestroyBatchMin);  // PhysicsDestroyBatch: live once installed
+        SetBodyRemovalSpread(cfg.bodyRemovalSpread, cfg.bodyRemovalSpreadPerFrame, cfg.bodyRemovalSpreadMaxFrames,
+                             cfg.bodyRemovalSpreadMin, cfg.bodyRemovalSpreadNearM);  // BodyRemovalSpread: no-op unless installed
+        SetStreamRegisterGranularity(cfg.streamRegisterGranularity);  // the key (live); applied on the game thread at AddToWorld
+        if (g_lumenNarrowHooked) SetLumenCardsNarrow(cfg.lumenCardsNarrow);  // LumenCardsNarrow: live once installed (render thread forgets on a change)
+        SetWaterInfoSkip(cfg.waterInfoSkip);  // WaterInfoSkip: live once installed (no-op otherwise)
+        SetWaterInfoSpread(cfg.waterInfoSpread, cfg.waterInfoSpreadNearM, cfg.waterInfoSpreadPerFrame, cfg.waterInfoSpreadMaxFrames,
+                           cfg.waterInfoSpreadMergeMs);  // WaterInfoSpread: live once installed (no-op otherwise)
+        SetRepathParallel(cfg.repathParallel, cfg.repathParallelMin, ParallelHelpersAllowed(cfg));  // RepathParallel: live once installed
         if (g_rigSetup) SetRigSetup(cfg.rigVmHashMemo, cfg.rigLogicMapCache);  // RigVmHashMemo / RigLogicMapCache: live once installed
         if (g_npcBodies) SetNpcBodiesOneLock(cfg.npcBodiesOneLock);  // NpcBodiesOneLock: live once installed
         SetRtSceneKeep(relief.shared && cfg.rtSceneBufferKeep ? 2 : cfg.rtSceneBufferKeep);  // RtSceneBufferKeep: live once installed (no-op otherwise); 2 = the game's way
@@ -222,6 +257,7 @@ DWORD WINAPI MonitorThread(LPVOID)
         PsoPrecompileWatchDriver();  // the cold-cache guard's driver-thread reading (no-op unless installed and precompiling)
         SetAnimTeardownParallel(ParallelHelpersAllowed(cfg) ? cfg.animTeardownParallel : 0);    // AnimTeardownParallel: no-op unless installed at start-up
         SetCellBufferPacedEvict(cfg.cellBufferPacedEvict);    // CellBufferPacedEvict: no-op unless installed at start-up
+        SetCellBufferEvictDelay(cfg.cellBufferEvictDelayMs);  // CellBufferEvictDelayMs (otunload; public 1.3.0): live
         HdrMenuMonitorTick();                                 // HdrMenuRows: reads Save_Settings.sav once (no-op unless installed)
         SetHdrGamma22(cfg.hdrGamma22, cfg.hdrGamma22White);   // HdrGamma22 (trade-off): live (no-op unless installed)
         HdrGammaMonitorTick();                                // ... fits a curve the game thread asked for
@@ -253,16 +289,26 @@ DWORD WINAPI MonitorThread(LPVOID)
             if (g_fadeInHooked) LogNpcFadeInStats();
             LogCollisionPrepareStats();
             if (g_destroyBatch) LogPhysicsDestroyBatchStats();
+            LogBodyRemovalSpreadStats();  // no-op unless installed (the lab logs every 5 s instead)
+            StreamGranLogStats();         // StreamRegisterGranularity (no-op unless active)
+            if (g_lumenNarrowHooked) LogLumenCardsNarrowStats();  // LumenCardsNarrow (no line when nothing ran)
+            LogRepathParallelStats();     // RepathParallel (no line when nothing ran)
+            LogPairReleaseOnceStats();    // PairReleaseOnce (no line unless the count changed)
             if (g_rigSetup) LogRigSetupStats();
             if (g_npcBodies) LogNpcBodiesOneLockStats();
             LogRtSceneKeepStats();
             LogRayTracingBuildBatchStats();
             LogWaterCaptureStats();
+            LogWaterInfoSkipStats();  // WaterInfoSkip (no line unless the count changed)
+            LogWaterInfoSpreadStats();  // WaterInfoSpread (no line unless the count changed)
+            LogMapPopupSpreadStats();   // MapPopupSpread (no line unless a map list was seen since the last one)
+            LogGpuMenuShotStats();      // GpuMenuShot (no line unless something happened)
             if (g_navLinkHooked) LogNavLinkFastStats();
             LogEditorIdLookupGuardStats();
             LogTrapTargetGuardStats();
             LogBowSneakAttackFixStats();
             LogAutosaveFollowsMenuStats();
+            LogSaveThumbLeftoverStats();
             LogHavokPickWarningGuardStats();
             LogFrameGenCrashGuardStats();
             LogObjectReplaceGuardStats();
@@ -289,6 +335,11 @@ DWORD WINAPI MonitorThread(LPVOID)
             LogMenuOpenFlashStats();
             if (g_physAnimHooked) LogPhysAnimNoEmptyLockStats();
             LogRigTraceReuseStats();
+            LogRigImportTemplateStats();
+            LogFarPawnMoveStats();  // FarPawnMoveHalfRate / FarHorseMove (no line when nothing qualified)
+            LogCreatePreloadStats();  // CreatePreload (no line when nothing waited)
+            LogOtFrameTrimStats();    // OtFrameTrim (no line when the frame-start sleep did not run)
+            LogLooseMissCacheStats(); // LooseMissCache (no line when nothing was answered from memory)
             LogChaosMaxPayloadSizeLive();
             LogStreamChurnStats();
             LogAllocatorTrimStats();
@@ -305,6 +356,7 @@ DWORD WINAPI MonitorThread(LPVOID)
             LogPhysicsFlushStats();
             LogInstanceClearStats();
             LogMemoryStats();
+            LogGpuPassMarkersStats();
             LogViewRenameGuardStats();
             LogDoorDiagStats();
             LogFadeVtFlushStats();
@@ -349,20 +401,35 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
         return;
     }
     Log("game exe: TimeDateStamp 0x%08X, SizeOfImage 0x%X", game.timeDateStamp, game.sizeOfImage);
+    NoteGameBuild(game);
     // Diagnostics only: an exception handler that writes UE's GPU crashes (DRED and memory) to the log.
     if (cfg.gpuCrashReport) InstallGpuCrashReport();
     else if (LogEnabled()) Log("[gpucrash] GPU crash report disabled in OblivionPerfFix.ini (takes a restart to switch on)");
+    SetGpuCrashIniPath(g_iniPath.c_str());
+    {
+        // GpuPassMarkers: render pass names for DRED / AMD's tools (two call sites; the variable is set once the device exists)
+        wchar_t ctl[MAX_PATH] = L"";
+        if (cfg.gpuPassMarkers || ctl[0]) InstallGpuPassMarkers(cfg.gpuPassMarkers ? cfg.gpuPassMarkers : 1, ctl);
+    }
     const bool waterProbe = false;
+    // WaterInfoSkip (and the lab's WaterInfoProbe) need the water-info render's game-thread detour.
+    const bool waterGt = waterProbe || cfg.waterInfoSkip != 0;
     // WaterCaptureFsrSkip / NoRhiFlush / NoOcclusionWait / FastMeshScan: the water-info render's entry and the four sites,
     // written only before game code runs, when any key is on (lab: or WaterInfoProbe); then live.
-    if (waterProbe || cfg.waterCaptureFsrSkip || cfg.waterCaptureNoRhiFlush || cfg.waterCaptureNoOcclusionWait || cfg.waterCaptureFastMeshScan) {
-        if (InstallWaterCapture(beforeGameCode, waterProbe)) {
+    if (waterGt || cfg.waterCaptureFsrSkip || cfg.waterCaptureNoRhiFlush || cfg.waterCaptureNoOcclusionWait || cfg.waterCaptureFastMeshScan) {
+        if (InstallWaterCapture(beforeGameCode, waterGt)) {
+            // WaterInfoSkip (waterinfo; public 1.3.0): checks its layout reads in the detoured UpdateWaterInfoRendering; then live.
+            InstallWaterInfoSkip(beforeGameCode, cfg.waterInfoSkip, WaterInfoGtSite(), g_iniPath.c_str());
             SetWaterCaptureFsrSkip(cfg.waterCaptureFsrSkip);
             SetWaterCaptureNoRhiFlush(cfg.waterCaptureNoRhiFlush);
             SetWaterCaptureNoOcclusionWait(cfg.waterCaptureNoOcclusionWait);
             SetWaterCaptureFastMeshScan(cfg.waterCaptureFastMeshScan);
         }
     } else Log("[water] water-info capture keys off in OblivionPerfFix.ini (takes a restart to switch on)");
+    // WaterInfoSpread (waterspread; public 1.3.0, port130k): water-info updates spread over frames / merged (its own call site in
+    // UWaterSubsystem::Tick, independent of the capture keys); start-up only, then live.
+    InstallWaterInfoSpread(beforeGameCode, cfg.waterInfoSpread, cfg.waterInfoSpreadNearM, cfg.waterInfoSpreadPerFrame,
+                           cfg.waterInfoSpreadMaxFrames, cfg.waterInfoSpreadMergeMs);
     // ViewRenameGuard: the view rename guard (UE-217692). Placed before the game's code runs (two entry detours), then switched
     // live by the ini; RdgParallelTranslate's frame fence is only used while it repairs.
     if (const int mode = ViewGuardMode(cfg); mode > 0) {
@@ -439,6 +506,11 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
         if (!beforeGameCode) Log("[autosave] can only be installed at start-up (version.dll), not installed");
         else if (ApplyAutosaveFollowsMenu()) SetAutosaveFollowsMenuEnabled(true);
     } else Log("[autosave] AutosaveFollowsMenu off in OblivionPerfFix.ini (takes a restart to switch on)");
+    // SaveThumbLeftoverFix (a game bug fix: a save made in a menu leaves its thumbnail binding on the menus' screenshot
+    // service): two calls redirected, only before game code runs and only if on at start-up; afterwards the ini switches it live.
+    if (cfg.saveThumbLeftoverFix) {
+        if (InstallSaveThumbLeftoverFix(beforeGameCode)) SetSaveThumbLeftoverFix(true);
+    } else Log("[thumbleft] SaveThumbLeftoverFix off in OblivionPerfFix.ini (takes a restart to switch on)");
     // MonitorNativeFromWindows / FullscreenAllResolutions: one call redirected / one jump changed, only if on at
     // startup (before the game first reads its display metrics on the version.dll route).
     if (cfg.monitorNativeFromWindows) InstallMonitorNativeFromWindows();
@@ -529,7 +601,10 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
     // LumenKeepArrayCapacity and UploadMemoryKeep (traversal stutter): installed only if enabled at startup; afterwards the ini switches them live.
     if (cfg.lumenKeepArrayCapacity) {
         g_lumenHooked = ApplyLumenKeepCapacityFix(beforeGameCode);
-        if (g_lumenHooked) SetLumenKeepCapacityEnabled(true);
+        if (g_lumenHooked) {
+            SetLumenKeepCapacityEnabled(true);
+            SetLumenGroupsPrior(cfg.lumenGroupsPrior, LumenPriorSpareMB(cfg));
+        }
     } else Log("[lumen] disabled in OblivionPerfFix.ini (takes a restart to switch on)");
     if (cfg.uploadMemoryKeep) {
         g_uploadHooked = ApplyUploadMemoryKeepFix(beforeGameCode);
@@ -544,6 +619,8 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
         SetAllocatorTrim(cfg.commandAllocatorTrim, cfg.allocatorTrimWindowSeconds);
         SetImmediateAllocatorLists(cfg.commandAllocatorTrim ? cfg.immediateAllocatorLists : 0);
     }
+    // CmdMemPregrow: uses those hooks' pool access; runs later, from their once-a-second tick (the key: start-up only).
+    SetCmdMemPregrow(cfg.cmdMemPregrow, g_allocTrimHooked, beforeGameCode, cfg.cmdMemGiveBackHeadroomMB, g_iniPath.c_str());
     // PhysicsFlushParallel and PhysicsTreeTimeSlicing's adaptive copy slice: two entry detours (the flush and the physics step), placed if either fix is
     // enabled at startup (or when switched on later); the ini switches both live.
     if (cfg.physicsFlushParallel || cfg.physicsTreeTimeSlicing) {
@@ -570,6 +647,7 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
             SetNpcPacing(true, cfg.pacingBudgetMs, cfg.pacingMinDistance, cfg.pacingMaxLagFrames, cfg.pacingUseSlack, cfg.pacingFlowWait,
                          cfg.pacingFlowWaitFrames);
         if (g_pacingHooked) SetNpcPacingFadeAware(cfg.pacingFadeAware);
+        if (g_pacingHooked) SetNpcPacingOwnerWalk(cfg.pacingOwnerWalk);  // PacingOwnerWalk (mkusm, PR #25): live
         if (g_pacingHooked) SetNpcPacingLeanFlowDrain(cfg.pacingLeanFlowDrain);  // PacingLeanFlowDrain: live
     } else Log("[pacing] disabled in OblivionPerfFix.ini (takes a restart to switch on)");
     // ClothRegisterLite: installed only if != 0 at startup and only as version.dll (the cloth component's native function table is
@@ -637,7 +715,10 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
     // NpcCreationPacing's frame hook); afterwards the ini switches it live.
     if (cfg.streamBehindLoading) {
         if (!g_pacingHooked) Log("[streamload] NpcCreationPacing's frame hook is not installed: not installed");
-        else if (InstallStreamBehindLoading(beforeGameCode, cfg.unfreezeBehindLoading != 0)) SetStreamBehindLoading(true);
+        else if (InstallStreamBehindLoading(beforeGameCode, cfg.unfreezeBehindLoading != 0)) {
+            SetStreamBehindLoading(true);
+            SetDrawBehindLoading(cfg.drawBehindLoading);  // DrawBehindLoadingScreen: from the first transition (then live)
+        }
     } else Log("[streamload] StreamBehindLoadingScreen off in OblivionPerfFix.ini (takes a restart to switch on)");
     // AnimTeardownParallel: three calls redirected, only if not 0 at startup; afterwards the ini switches it live.
     if (cfg.animTeardownParallel && ParallelHelpersAllowed(cfg)) {
@@ -739,12 +820,32 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
     // (acts once, at its first switch on).
     if (cfg.frameRateLimitAtStart) InstallFrameCapStart(beforeGameCode, cfg.frameRateLimitAtStart);
     else Log("[fpscap] FrameRateLimitAtStart off in OblivionPerfFix.ini (takes a restart to switch on)");
+    const uint8_t* labAddHook = nullptr;  // lab: BodyAddProbe's AddToWorld hook, shared by StreamRegisterGranularity
+    // RepathParallel (repathfix; public 1.3.0): a TickActor's queued path re-searches' A* on helper threads, served only on
+    // identical inputs; start-up install when != 0, then live. Lab: RepathProbe rides on its detours (installed for it too).
+    InstallRepathParallel(beforeGameCode, cfg.repathParallel, cfg.repathParallelMin, cfg.repathParallelThreads, ParallelHelpersAllowed(cfg),
+                          false);
+    // MapPopupSpread (mapspread; public 1.3.0): the map menu's icon build (its native tables are patched before the classes
+    // register them, so start-up only; needs NpcCreationPacing's pairing hooks); then live. After the lab's menu probes.
+    InstallMapPopupSpread(beforeGameCode, cfg.mapPopupSpread, g_pacingHooked);
+    // GpuMenuShot (gpushot; public 1.3.0): the menu backdrop's screenshot on the GPU; after SaveThumbnailAsync's read-back hooks
+    // and MenuScreenshotFilter's resize hook (it needs both, and MenuOpenFlashFix's per-frame hook); start-up when != 0, then live.
+    if (cfg.gpuMenuShot) {
+        if (InstallGpuMenuShot()) SetGpuMenuShot(cfg.gpuMenuShot, cfg.hdrMenuBackground);
+    } else Log("[gpushot] GpuMenuShot off in OblivionPerfFix.ini (takes a restart to switch on)");
+    // StreamRegisterGranularity: an AddToWorld entry detour (found from the console variable's only read), only if != 0 at
+    // start-up, then live 0..9 (after the lab's BodyAddProbe: shares its hook when both are on).
+    if (cfg.streamRegisterGranularity) InstallStreamRegisterGranularity(beforeGameCode, labAddHook);
+    else Log("[streamgran] StreamRegisterGranularity off in OblivionPerfFix.ini (takes a restart to switch on)");
     // HitchLedger's OblivionThread grid-change timer: last (the lab's CellRowDiag times the same entry and wins there).
     if (cfg.hitchLedger) InstallHitchLedgerGrid(beforeGameCode);
     // CellBufferPacedEvict: the TES constructor's buffer clamp, the grid change's entry (chained after CellRowDiag's and
     // HitchLedger's detours of the same entry, so last) and the ini writer, only if not 0 at startup; then live.
     if (cfg.cellBufferPacedEvict) {
-        if (InstallCellBufferPacedEvict(beforeGameCode)) SetCellBufferPacedEvict(cfg.cellBufferPacedEvict);
+        if (InstallCellBufferPacedEvict(beforeGameCode)) {
+            SetCellBufferPacedEvict(cfg.cellBufferPacedEvict);
+            SetCellBufferEvictDelay(cfg.cellBufferEvictDelayMs);  // CellBufferEvictDelayMs: from the first crossing (then live)
+        }
     }
     // PhysicsDestroyBatch: three call sites in the step's DestroyPendingProxies path, only if != 0 at start-up (then
     // live); before the lab's PhysWaitProbe, whose entry detours would fail this code's entry check.
@@ -770,9 +871,57 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
     if (rigTraceInstall) {
         if (InstallRigTraceReuse(beforeGameCode, g_iniPath.c_str())) SetRigTraceReuse(cfg.rigTraceReuse);
     } else Log("[rigtrace] RigTraceReuse disabled in OblivionPerfFix.ini (takes a restart to switch on)");
+    // RigImportTemplate (Altar's Control Rig: the first bone import of a new rig): the RemoveElement guard, then entry detours
+    // of the node's CacheBones and ImportBones; written only before the game's code runs (version.dll route), installed only if
+    // on at start-up, then live.
+    bool rigTmplHooked = false;
+    const bool rigTmplInstall = cfg.rigImportTemplate != 0;
+    if (rigTmplInstall) {
+        rigTmplHooked = InstallRigImportTemplate(beforeGameCode);
+        if (rigTmplHooked) SetRigImportTemplate(cfg.rigImportTemplate);
+    } else if (!cfg.rigImportTemplate) Log("[rigtmpl] RigImportTemplate off in OblivionPerfFix.ini (takes a restart to switch on)");
+    (void)rigTmplHooked;
     // ChaosMaxPayloadSize: p.MaxPayloadSize before the engine reads its settings and before any physics scene (start-up,
     // both routes; only over the game's 100000; an Engine.ini value applied later wins).
     SetChaosMaxPayloadSize(cfg.chaosMaxPayloadSize, beforeGameCode);
+    // FarPawnMoveHalfRate / FarHorseMove (farmove; public 1.3.0): calm far pawns' and horses' movement tick at FarPawnMoveHz with
+    // the summed step (not identical); slot 127 of both movement components' vtables, start-up install when either key != 0
+    // (needs NpcCreationPacing), then live. After the lab's HorseMoveProbe (same horse slot: horses then not covered).
+    if (cfg.farPawnMoveHalfRate || cfg.farHorseMove) {
+        if (g_pacingHooked)
+            InstallFarPawnMove(beforeGameCode, cfg.farPawnMoveHalfRate, cfg.farPawnMoveHz, cfg.farHorseMove, cfg.farPawnMoveMinDistance,
+                               cfg.farPawnMoveMaxStepMs);
+        else Log("[farmove] FarPawnMoveHalfRate: needs NpcCreationPacing, not installed");
+    } else Log("[farmove] FarPawnMoveHalfRate and FarHorseMove off in OblivionPerfFix.ini (takes a restart to switch on)");
+    // CreatePreload (bigcreate; public 1.3.0): deferrable creates wait while their form asset / class loads asynchronously;
+    // the form-asset lookup's entry detour, start-up install when != 0 (needs NpcCreationPacing: asked from its create hook).
+    if (cfg.createPreload) {
+        if (g_pacingHooked && InstallCreatePreload(beforeGameCode)) {
+            SetCreatePreload(cfg.createPreload);
+            SetCreatePreloadNear(cfg.createPreloadNear);
+        } else if (!g_pacingHooked) Log("[createpreload] CreatePreload: needs NpcCreationPacing, not installed");
+    } else Log("[createpreload] CreatePreload off in OblivionPerfFix.ini (takes a restart to switch on)");
+    // OtFrameTrim (fightcost; public 1.3.0): the OT frame-start sleep's call and the node profiler timer's entry; start-up
+    // install when != 0, then live 0..3.
+    if (cfg.otFrameTrim) InstallOtFrameTrim(beforeGameCode, cfg.otFrameTrim);
+    else Log("[otframe] OtFrameTrim off in OblivionPerfFix.ini (takes a restart to switch on)");
+    // LooseMissCache (fightot2; public 1.3.0): the file finder's two _access calls; start-up install when != 0, then live.
+    if (cfg.looseMissCache) InstallLooseMissCache(beforeGameCode, cfg.looseMissCache);
+    else Log("[loosemiss] LooseMissCache off in OblivionPerfFix.ini (takes a restart to switch on)");
+    // LumenCardsNarrow (lumenfixa; public 1.3.0): the Lumen mapping upload narrowed to the changed instances (identical); start-up
+    // install when != 0, then live. Before the lab's LumenCardsProbe: it reads the call the probe redirects.
+    if (InstallLumenCardsNarrow(beforeGameCode, cfg.lumenCardsNarrow)) g_lumenNarrowHooked = true;
+    // BodyRemovalSpread: a streamed-out level's instance bodies terminated over frames; three call sites and the physics
+    // scene's deleting-destructor slot, installed at start-up when != 0 (lab: always) and NpcCreationPacing's frame hooks
+    // are in (it drains at their post-actor tick), then live. After the lab's probes (as in the lab, where it was first run).
+    InstallBodyRemovalSpread(beforeGameCode, cfg.bodyRemovalSpread, cfg.bodyRemovalSpreadPerFrame, cfg.bodyRemovalSpreadMaxFrames,
+                             cfg.bodyRemovalSpreadMin, cfg.bodyRemovalSpreadNearM, g_pacingHooked, g_iniPath.c_str());
+    // InstanceBufferFloor: the GPU scene instance buffer at 192 MiB at its first large need (inside GpuSceneKeepCapacity's reserve;
+    // no patch of its own; the lab build also patches lab SceneBufferFloorMiB and times the buffer's creations); start-up only.
+    InstallBufferFloor(beforeGameCode, cfg.instanceBufferFloor, g_gpuSceneHooked, g_iniPath.c_str());
+    // PairReleaseOnce (game bug fix): RunSession's and the drain's early release of a pairing session's buffer ids go to
+    // counting stubs (each id released once, by the destructor); start-up only. Lab: also PairRaceProbe (own key).
+    InstallPairRace(beforeGameCode, cfg.pairReleaseOnce, g_iniPath.c_str());
 
     {
         // Start-up cost: the whole Init and its pattern searches (OBSE route: the game's main thread waits for it).
@@ -792,6 +941,9 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
             sinceStart, scan.calls, scan.bytes >> 20, scan.microseconds / 1000,
             scan.mismatches ? " (ScanVerify: MISMATCHES, see above)" : "");
     }
+    // From here on a background thread writes the log (before: the thread that logged, often the game thread, waited for
+    // each line's disk write); start-up above stays synchronous. Also guards the exe's TerminateProcess import.
+    LogGoAsync(game.base);
     if (HANDLE t = CreateThread(nullptr, 0, MonitorThread, nullptr, 0, nullptr)) CloseHandle(t);
 }
 
@@ -827,7 +979,7 @@ struct OBSEPluginVersionData {
 extern "C" {
 __declspec(dllexport) OBSEPluginVersionData OBSEPlugin_Version = {
     OBSEPluginVersionData::kVersion,
-    0x010204,  // plugin version 1.2.4
+    0x010300,  // plugin version 1.3.0
     "OblivionPerfFix",
     "OblivionPerfFix",
     // Addresses come from byte-pattern scans and we use no OBSE game structures,
@@ -849,8 +1001,13 @@ __declspec(dllexport) bool OBSEPlugin_Load(const OBSEInterface* obse)
 }
 }
 
-BOOL WINAPI DllMain(HMODULE module, DWORD reason, LPVOID)
+BOOL WINAPI DllMain(HMODULE module, DWORD reason, LPVOID reserved)
 {
+    if (reason == DLL_PROCESS_DETACH) {
+        // the game's normal end (ExitProcess, reserved != null: every other thread has ended): the log's last lines
+        opf::LogProcessExit(reserved != nullptr);
+        return TRUE;
+    }
     if (reason == DLL_PROCESS_ATTACH) {
         opf::g_self = module;
         DisableThreadLibraryCalls(module);

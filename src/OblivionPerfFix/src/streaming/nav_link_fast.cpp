@@ -117,7 +117,16 @@ struct TileInfo {
     uint8_t exact = 0;    // bit s: an edge with neis == 0x8000 | s
     std::vector<uint16_t> list[8];  // per s: the polygons with such an edge, ascending
 };
-thread_local std::unordered_map<const uint8_t*, TileInfo> t_cache;  // valid for one chunk attach or one connect call
+// The per-thread tile cache, valid for one chunk attach or one connect call. A function-local thread_local, built on a
+// thread's first use: a namespace-scope one with an allocating constructor is built in every thread's TLS callback, also
+// in threads that start or end outside the C runtime's lifetime (in an exe: a thread an injected DLL starts before
+// mainCRTStartup has set up the heap; the self-test then ended in abort() 0xC0000409, or in an ntdll access violation at
+// exit: worker selfabort, 2026-11-03).
+std::unordered_map<const uint8_t*, TileInfo>& Cache()
+{
+    thread_local std::unordered_map<const uint8_t*, TileInfo> cache;
+    return cache;
+}
 thread_local int t_connectDepth = 0;
 thread_local int t_chunkDepth = 0;
 
@@ -154,7 +163,7 @@ template <class T> T* Ptr(const uint8_t* p) { T* v; memcpy(&v, p, sizeof v); ret
 
 const TileInfo& Info(const uint8_t* tile)
 {
-    TileInfo& t = t_cache[tile];
+    TileInfo& t = Cache()[tile];
     uint32_t salt;
     memcpy(&salt, tile, 4);
     const uint8_t* header = Ptr<uint8_t>(tile + 8);
@@ -287,7 +296,7 @@ void ConnectHook(void* nav, uint8_t* tile, uint8_t* target, uint64_t side, uint6
     if (skip) (skip == 1 ? s_skipNoEdge : s_skipNoCand).fetch_add(1, std::memory_order_relaxed);
     if (!skip) g_connect(nav, tile, target, side, updateCLinks);
     --t_connectDepth;
-    if (t_connectDepth == 0 && t_chunkDepth == 0) t_cache.clear();
+    if (t_connectDepth == 0 && t_chunkDepth == 0) Cache().clear();
 }
 
 void AddChunkHook(void* navSys, void* chunkActor)
@@ -298,7 +307,7 @@ void AddChunkHook(void* navSys, void* chunkActor)
     const uint64_t t1 = Now(), dt = t1 - t0;
     --t_chunkDepth;
     if (!outer) return;
-    if (t_connectDepth == 0) t_cache.clear();
+    if (t_connectDepth == 0) Cache().clear();
     s_chunks.fetch_add(1, std::memory_order_relaxed);
     s_chunkTicks.fetch_add(dt, std::memory_order_relaxed);
     Max(s_chunkMax, dt);
@@ -488,7 +497,7 @@ int NavLinkFastTestFind(int mode, void* nav, const double* va, const double* vb,
     ++t_connectDepth;
     const int r = FindHook(nav, va, vb, fromTile, static_cast<uint32_t>(fromPolyIdx), tile, static_cast<uint32_t>(side), cons);
     --t_connectDepth;
-    t_cache.clear();
+    Cache().clear();
     g_mode = keep;
     return r;
 }
@@ -500,7 +509,7 @@ int NavLinkFastTestOriginal(void* nav, const double* va, const double* vb, void*
 int NavLinkFastTestSkip(const uint8_t* tile, const uint8_t* target, int side)  // the skip rule (0 = the call is made)
 {
     const int r = SkipClass(tile, target, static_cast<uint32_t>(side));
-    t_cache.clear();
+    Cache().clear();
     return r;
 }
 uint8_t* NavLinkFastTestSite(int which) { return which < 0 ? g_findSite : which < 4 ? g_connectSites[which] : nullptr; }

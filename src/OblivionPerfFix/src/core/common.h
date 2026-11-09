@@ -11,7 +11,7 @@
 #include <string_view>
 #include <vector>
 
-#define OPF_VERSION "1.2.4"
+#define OPF_VERSION "1.3.0"
 // The release label after the version (the tag is v<OPF_VERSION><OPF_RELEASE_SUFFIX>): in the log's first line and the DLL's
 // version resource (build.ps1 reads both lines; CI checks the tag against OPF_VERSION).
 #define OPF_RELEASE_SUFFIX "-beta"
@@ -63,6 +63,15 @@ void LogOpen(const wchar_t* path, int keepPrevious = 0, bool enabled = true);  /
 bool LogEnabled();  // false with LogFile=0
 void LogClose();    // self-test only
 void Log(const char* fmt, ...);
+void LogGoAsync(uint8_t* exeBase);  // end of Init: a background thread writes the lines from here on; exeBase: guard the exe's TerminateProcess import
+void LogFlush();                    // everything queued so far is in the file when this returns (crash dumps, self-test)
+void LogCrashMode();                // a crash: flush, and every later line is written by its caller at once
+void LogBeforeExit();               // the game ends now (TerminateProcess): the same as LogCrashMode
+void LogProcessExit(bool otherThreadsEnded);  // DLL_PROCESS_DETACH; true (ExitProcess): no locks, writes the rest of an ended write too
+void LogTestHoldWriter(bool hold);  // self-test: the writer thread takes nothing while held
+void LogTestSetCapacity(size_t bytes);  // self-test: a smaller queue (0 = the default)
+bool LogTestAsync();                // self-test: lines go through the writer thread
+bool LogTestEndedMidWrite(size_t written);  // self-test: the queue becomes a write that ExitProcess cut after `written` bytes
 
 // ---- config.cpp ----
 struct Config {
@@ -85,8 +94,12 @@ struct Config {
     bool prepareCollisionBehindLoadingScreen = true;   // PrepareCollisionBehindLoadingScreen: hand a transition's new area to physics while still frozen (A-B clean, 2026-10-05)
     bool editorIdLookupGuard = true;   // NameLookupCrashGuard: name lookups skip freed name-table entries instead of crashing (game bug)
     bool trapCrashGuard = true;        // TrapCrashGuard: traps drop actors that no longer exist instead of crashing (game bug)
+    int pairReleaseOnce = 1;           // PairReleaseOnce (game bug fix, on; findings crash4590f5c): guards/pair_race.cpp, a pairing
+                                       // session's buffer ids released once (the destructor's), not twice; start-up only
     bool bowSneakAttackFix = true;     // BowSneakAttackFix (game bug fix, on; user 2026-10-31): one hit per player arrow, the old engine's with the Unreal side's sneak
                                        // multiplier (game bug: bow sneak attacks at 1x or hit twice)
+    bool saveThumbLeftoverFix = true;  // SaveThumbLeftoverFix (game bug fix, on; user 2026-11-09, shot130q): saves/save_thumb_leftover.cpp,
+                                       // a save's thumbnail binding on the menus' screenshot service removed once its callback ran
     bool autosaveFollowsMenu = false;  // AutosaveFollowsMenu (game bug fix, OFF by default, user 2026-10-31: it removes the level-up
                                        // and quest autosaves while all four menu options are off): no level-up or scripted
                                        // autosave while every autosave option in the menu is off (game bug)
@@ -122,6 +135,7 @@ struct Config {
                                        // ImageResize's zero fill skipped (same bytes; start-up install, then live): 0 off, 1 on
     bool restoreFsrAfterAltTab = true; // RestoreFsrAfterAltTab: FSR (and frame generation) back on when a menu up at focus gain closes
     bool lumenKeepArrayCapacity = true; // LumenKeepArrayCapacity: Lumen scene arrays keep their capacity instead of shrink/grow copies
+    int lumenGroupsPrior = 2600000;     // LumenGroupsPrior (entries of 80 B; 0 = off): PrimitiveGroups grows straight to it from 1/32 of it (live)
     bool uploadMemoryKeep = true;      // UploadMemoryKeep: keep empty D3D12 upload pools/pages between streaming bursts
     int uploadMemoryKeepFrames = 0;    // not in the shipped ini: frames empty upload pools are kept; 0 = the whole session (game: 20)
     int uploadPagesToKeep = 24;        // not in the shipped ini: fast-allocator pages kept (4 MB each; game: 5)
@@ -157,6 +171,55 @@ struct Config {
                                        // 1 proxies deleted by a helper, 2 one UpdateViews, 3 both, 4 installed but off; 0 = not
                                        // installed (start-up), then live
     int physicsDestroyBatchMin = 256;  // not in the shipped ini: PhysicsDestroyBatch acts only from this many pending bodies
+    int bodyRemovalSpread = 1;         // BodyRemovalSpread: physics/body_spread.cpp, a streamed-out level's instance bodies
+                                       // terminated over <= MaxFrames frames at the post-actor tick (equivalent, user
+                                       // 2026-11-07); start-up install when != 0 (needs NpcCreationPacing), then live 0/1
+    int bodyRemovalSpreadPerFrame = 500;   // not in the shipped ini: at least this many bodies a frame
+    int bodyRemovalSpreadMaxFrames = 30;   // not in the shipped ini: no body waits longer (public 2..120)
+    int bodyRemovalSpreadMin = 1;          // not in the shipped ini: components with fewer bodies stay stock
+    int bodyRemovalSpreadNearM = 50;       // not in the shipped ini: components nearer the player (m, bounds box) stay stock
+    int instanceBufferFloor = 1;       // InstanceBufferFloor: render/buffer_floor.cpp, the GPU scene instance buffer made 192 MiB at the
+                                       // session's first need of 2^21 slots (16 GB-class cards: budget >= 14000 MiB, 1 GiB free;
+                                       // decided once a session; needs GpuSceneKeepCapacity); start-up only
+    int streamRegisterGranularity = 1; // StreamRegisterGranularity: streaming/stream_granularity.cpp, 1..9 sets
+                                       // s.LevelStreamingComponentsRegistrationGranularity (game 10) outside loading
+                                       // screens (equivalent, user 2026-11-07); AddToWorld hook at start-up (key on), then live
+    int lumenCardsNarrow = 1;          // LumenCardsNarrow: render/lumen_cards_narrow.cpp, the Lumen mapping upload sends only the
+                                       // instances whose mesh cards changed (identical); start-up install when != 0, then live 0/1
+                                       // (lab: 2 = with proof, needs 2 at start-up)
+    int waterInfoSkip = 1;             // WaterInfoSkip: render/water_info_skip.cpp, a water zone's water-info redraw skipped when its
+                                       // inputs equal its last redraw's (equivalent); start-up install when != 0 (with the water-info
+                                       // render's game-thread detour), then live 0/1 (lab: 2 proof)
+    int waterInfoSpread = 3;           // WaterInfoSpread: render/water_spread.cpp, water-info updates spread (bit 1) and merged (bit 2)
+                                       // within max(4 frames, 250 ms) (equivalent); start-up install when != 0, then live 0-3
+                                       // (lab: bit 4 logs each request)
+    int waterInfoSpreadNearM = -1;     // WaterInfoSpreadNearM: zones this close (m) are never deferred (0 = the player's own, -1 none)
+    int waterInfoSpreadPerFrame = 1;   // WaterInfoSpreadPerFrame / MaxFrames / MergeMs (not in the shipped ini): its limits
+    int waterInfoSpreadMaxFrames = 4;
+    int waterInfoSpreadMergeMs = 250;
+    int repathParallel = 1;            // RepathParallel: npcs/repath_parallel.cpp, a TickActor's queued path re-searches' A* on
+                                       // helper threads, served only on identical inputs (identical); start-up install when != 0,
+                                       // then live 0/1 (lab: 2 proof); off while ParallelHelpersAllowed is false
+    int repathParallelMin = 2;         // not in the shipped ini: queued re-searches needed for a batch (live)
+    int repathParallelThreads = 4;     // not in the shipped ini: helper threads, 0..8 (start-up)
+    int farPawnMoveHalfRate = 1;       // FarPawnMoveHalfRate: npcs/far_pawn_move.cpp, a calm pawn >= 100 m away moves at FarPawnMoveHz
+                                       // with the summed step (NOT identical: small steps far away): 1 at walking pace, 2 any speed,
+                                       // 0 off; start-up install when this or FarHorseMove != 0 (needs NpcCreationPacing), then live
+    int farPawnMoveHz = 30;            // FarPawnMoveHz: its movement rate, 1..59 (60 = every frame) (live)
+    int farHorseMove = 2;              // FarHorseMove: 0 off, 1 far riderless calm horses, 2 also far horses with a calm NPC rider (live)
+    int farPawnMoveMinDistance = 10000;  // not in the shipped ini: FarPawnMove's distance in UE units (>= 1000; start-up)
+    int farPawnMoveMaxStepMs = 400;      // not in the shipped ini: the longest carried step, 20..1000 ms (start-up)
+    int createPreload = 1;             // CreatePreload: npcs/create_preload.cpp, a far create whose form asset or actor class is not
+                                       // loaded waits (pacing's deferral, bounded) while it loads asynchronously (equivalent);
+                                       // start-up install when != 0 (needs NpcCreationPacing), then live 0/1
+    int createPreloadNear = 12;        // CreatePreloadNear: with CreatePreload=1, a near create may also wait, at most this many
+                                       // frames (0..30), while its spot is > 75 deg off the camera's forward (frame generation's
+                                       // camera: no wait without frame generation); 0 = off; live
+    int otFrameTrim = 3;               // OtFrameTrim: npcs/ot_frame_trim.cpp, bit 1 the OT frame-start path-builder sleep wakes on
+                                       // the path thread's completion (equivalent), bit 2 the node profiler timer off (identical by
+                                       // audit); start-up install when != 0, then live 0..3
+    int looseMissCache = 1;            // LooseMissCache: npcs/loose_miss_cache.cpp, a missing loose voice file's failed check is
+                                       // answered from memory (identical); start-up install when != 0, then live 0/1
     int npcBodiesOneLock = 1;          // NpcBodiesOneLock: npcs/npc_bodies.cpp, a character's physics bodies and constraints
                                        // (InitArticulated's InstantiatePhysicsAsset_Internal) made under one hold of the scene's
                                        // write lock (start-up install, then live): 0 off, 1 on
@@ -211,6 +274,9 @@ struct Config {
     int rigTraceReuse = 1;               // RigTraceReuse: npcs/rig_trace_reuse.cpp, a Control Rig sphere trace repeated with identical
                                          // inputs inside one rig execution reuses its result (equivalent): 1 on, 2 verify (runs and
                                          // compares), 0 off; installed only if not 0 at start-up (version.dll route), then live
+    int rigImportTemplate = 1;           // RigImportTemplate: npcs/rig_import_template.cpp, the first bone import of a new rig is a copy
+                                         // of a stored identical import (equivalent), RemoveElement guard; 1 on, 0 off (lab: 2 verify);
+                                         // installed only if not 0 at start-up (version.dll route), then live
     int chaosMaxPayloadSize = 10000000;  // ChaosMaxPayloadSize: physics/chaos_payload.cpp, p.MaxPayloadSize raised (cm) at start-up so
                                          // the ~730 bodies over 1 km stay in the Chaos trees (equivalent); only over the game's 100000;
                                          // an Engine.ini value wins; 0 = the game's value; both routes; start-up only
@@ -224,6 +290,8 @@ struct Config {
     int cellBufferPacedEvict = 1;        // CellBufferPacedEvict: spare exterior cell buffer slots
                                          // (start-up install when not 0) and the overflow torn down one cell per OT frame
                                          // after a crossing (live): 0 in the crossing frame (as the game), 1 paced
+    int cellBufferEvictDelayMs = 1500;   // CellBufferEvictDelayMs (otunload; public 1.3.0): the paced drain starts this many ms after
+                                         // a crossing (live, 0..3000; 0 = right after it); needs CellBufferPacedEvict
     bool psoPrecompileFast = true;       // PsoPrecompileFast: the start-up PSO precompile at UE's Fast pace outside play (identical: timing
                                          // only; start-up install, then live)
     int psoPrecompileFastBudgetMs = 4;   // PsoPrecompileFastBudgetMs: render-thread ms per frame at the faster pace (16 = UE's Fast,
@@ -259,6 +327,16 @@ struct Config {
                                        // interior entry (0 = off; live; needs StreamBehindLoadingScreen)
     int unfreezeBehindLoadingFastTravel = 0;  // the same after a fast travel, in ms (0 = UnfreezeBehindLoadingScreen's
                                               // value; on only while UnfreezeBehindLoadingScreen is on; live)
+    int gpuMenuShot = 1;               // GpuMenuShot (gpushot; public 1.3.0): menus/gpu_menu_shot.cpp, the menu backdrop's screenshot made
+                                       // on the GPU; start-up install when != 0, then live 0/1; 3 = compare the next 4 with the
+                                       // game's own picture (slow; lab: 2 = compute only + compare)
+    int mapPopupSpread = 5;            // MapPopupSpread (mapspread; public 1.3.0): menus/map_spread.cpp, the map's icon lists cleared
+                                       // unseen are not built (1) and an equal rebuild keeps the icons (4); start-up install when
+                                       // != 0 (needs NpcCreationPacing), then live 0, 1, 4, 5
+    int drawBehindLoading = 3;         // DrawBehindLoadingScreen (loadreveal; public 1.3.0): the still-frozen world is drawn for
+                                       // this many frames behind the opaque loading screen from StreamBehindLoadingScreen's
+                                       // start (no unfreeze, no gate hold; 0 off, 2..10; live; needs StreamBehindLoadingScreen,
+                                       // PrepareCollisionBehindLoadingScreen's fade hook and NpcCreationPacing's frame hook)
     bool hdrMenuRows = false;          // HdrMenuRows (off by default): an HDR section on the PC Graphics page (HDR,
                                        // peak, paper white, black floor, mid-tone; start-up only; needs NpcCreationPacing)
     bool hudAspectRow = false;          // HudAspectRow (off by default): a "HUD Aspect Ratio" row (4:3 / 16:9 /
@@ -289,6 +367,9 @@ struct Config {
     int clothDeferQuietFrames = 6;     // not in the shipped ini: ... frames without a new request before it is built
     bool pacingUseSlack = true;        // not in the shipped ini: under a frame-rate cap, use the cap's sleep as budget
     bool pacingFlowWait = true;        // not in the shipped ini: a level flow waits for the main queue instead of draining it
+    bool pacingOwnerWalk = true;       // PacingOwnerWalk (mkusm, first version of public PR #25): a non-actor in a delegate's owner
+                                       // chain (equipment, hair) does not end the walk to its actor, so a far unseen character's
+                                       // equipment / hair steps are paced like its other steps (live)
     bool pacingLeanFlowDrain = true;   // PacingLeanFlowDrain: a level flow at its wait bound drains the owed main queue only;
                                        // the waiting delegates stay queued (live; PR #25)
     int pacingFlowWaitFrames = 8;      // not in the shipped ini: ... up to this many frames while the queue progresses (3 = 0.17)
@@ -310,11 +391,14 @@ struct Config {
                                         // first): tasks that must not run inside busy waits (NavmeshBuildNoBusyWait's tiles) never do; live
     bool gpuSceneKeepCapacity = true;  // GpuSceneKeepCapacity: GPU scene buffers keep their capacity instead of shrink/grow re-creations
     bool commandAllocatorTrim = true;  // CommandAllocatorTrim: D3D12 command allocator pools shrink back to recent need
+    int cmdMemPregrow = 1;             // CmdMemPregrow: direct allocators pre-grown before the first world: 0 off, 1 automatic size, else the size (start-up)
+    int cmdMemGiveBackHeadroomMB = 512; // not in the shipped ini: CmdMemPregrow gives back what the session has not used, once, when within this much of the budget for 3 s; 0 = never (start-up)
     int allocatorTrimWindowSeconds = 20; // not in the shipped ini: the window whose peak of allocators in flight is kept
     int allocatorTrimHeadroomMB = 2048; // not in the shipped ini: CommandAllocatorTrim trims the copy pool only within this much of the budget (0 = always)
     int immediateAllocatorLists = 0;   // not in the shipped ini: CommandAllocatorTrim part 2, lists the immediate context records per allocator
     bool logFile = true;               // [General] LogFile: 0 = no OblivionPerfFix.log except a GPU crash report (start-up only; lab builds ignore it)
     bool gpuCrashReport = true;        // [General] GpuCrashReport: DRED + memory report in the log at a GPU crash
+    int gpuPassMarkers = 0;            // [General] GpuPassMarkers: 1 pass names in DRED, 2 AMD markers (RGD/RGP), 3 both (installed at start-up when not 0, then live)
     int statsIntervalSeconds = 60;     // 0 = no periodic stats in the log
 };
 Config LoadConfig(const wchar_t* iniPath);
@@ -343,7 +427,7 @@ bool FindNaniteStreamBuffers();                   // ProcessNewResources' three 
 int32_t* FindNaniteRootPagesVar();                // r.Nanite.Streaming.NumInitialRootPages' value (nullptr if not found)
 bool SetNaniteInitialRootPages(int pages, bool beforeGameCode);  // NaniteInitialRootPages (start-up only, both routes)
 // ---- render/water_info.cpp (WaterCaptureFsrSkip / NoRhiFlush / NoOcclusionWait / FastMeshScan) ----
-bool InstallWaterCapture(bool beforeGameCode, bool probe);  // start-up only (version.dll route); probe = lab WaterInfoProbe's game-thread part
+bool InstallWaterCapture(bool beforeGameCode, bool gtDetour);  // start-up only (version.dll route); gtDetour = UpdateWaterInfoRendering too (WaterInfoSkip, lab WaterInfoProbe)
 void SetWaterCaptureFsrSkip(bool on);
 void SetWaterCaptureNoRhiFlush(bool on);
 void SetWaterCaptureNoOcclusionWait(bool on);
@@ -408,6 +492,9 @@ struct GameModule {
 };
 // module = nullptr: the process exe. Tests pass a mapped copy of the game exe.
 bool InitGameModule(GameModule& out, HMODULE module = nullptr);
+// Whether this exe is a build we know. An unknown one gets one plain log line; nothing is switched off because of it
+// (each fix checks its own code).
+bool NoteGameBuild(const GameModule& game);
 bool ParseModule(GameModule& out, HMODULE module);  // another module's sections (Game unchanged)
 const GameModule& Game();
 
@@ -599,6 +686,7 @@ void LogCollisionPrepareStats();
 bool CollisionPrepareInfo(CollisionPrepareFixInfo* out);
 void CollisionPrepareTestFunctions(void* fakeDispatch, void* fakeCopy, void* fakeRecycle, const int32_t* fakeSimEnable,
                                    const int32_t* fakeForceDisableAsync);  // self-test only
+uint32_t FadeToGameCalls(bool* hooked);       // fade_hook.cpp: fade-to-game calls seen so far (CmdMemPregrow, DrawBehindLoadingScreen)
 
 // name_lookup_guard.cpp (NameLookupCrashGuard: crash guard for the old engine's name table)
 struct EditorIdGuardInfo {
@@ -737,6 +825,19 @@ struct AutosaveMenuInfo {
     void* scriptedHook;
     uint64_t skippedLevelUp, skippedScripted, made;
 };
+// saves/save_thumb_leftover.cpp (SaveThumbLeftoverFix, shot130q; a game bug fix, also without the mod)
+struct SaveThumbLeftoverSites { uint8_t* serviceBind; uint8_t* addRawCall; uint8_t* callback; uint8_t* removeCall; uint8_t* engineDelegate; uint8_t* rawExec; };
+const char* SaveThumbLeftoverDiscover(const GameModule& game, SaveThumbLeftoverSites* out);  // nullptr = all found (self-test too)
+bool InstallSaveThumbLeftoverFix(bool beforeGameCode);  // start-up: two calls redirected
+void SetSaveThumbLeftoverFix(bool on);                  // live once installed
+void LogSaveThumbLeftoverStats();
+uint8_t* SaveThumbLeftoverResolve(uint8_t* p);          // the game's Remove when p is our redirect (SaveThumbnailAsync's check)
+uint8_t* SaveThumbLeftoverFind(const uint8_t* delegate, uint64_t handle);  // the bound instance with that handle, or nullptr
+bool SaveThumbLeftoverShouldRemove(bool on, uint64_t handle, uint64_t boundHandle, DWORD boundThread, DWORD thread, bool foundRawExec);
+void SaveThumbLeftoverTestSetup(void* addRaw, void* remove, const uint8_t* rawExec, bool on);  // self-test only (fakes)
+uint64_t* SaveThumbLeftoverTestAddRaw(void* delegate, uint64_t* out, void* object, void* fn);  // self-test: the AddRaw hook
+bool SaveThumbLeftoverTestRemove(void* delegate, uint64_t handle);                            // self-test: the Remove hook
+uint64_t SaveThumbLeftoverTestNoted();                                                       // self-test: the noted handle
 bool ApplyAutosaveFollowsMenu();                   // start-up (two calls on the OblivionThread's code)
 void SetAutosaveFollowsMenuEnabled(bool enabled);  // switchable live; off = both autosaves as in the stock game
 void LogAutosaveFollowsMenuStats();
@@ -870,6 +971,9 @@ struct VramCounterInfo {
 bool VramCounterFixInfo(VramCounterInfo* out);
 void VramCounterFixTestSetup(void* original, bool (*latest)(uint64_t*, uint64_t*));  // self-test
 bool LatestGameVram(uint64_t* used, uint64_t* budget);  // memory_monitor.cpp: last DXGI sample (bytes); false = none yet
+// memory_monitor.cpp: the last sample's commit room (available commit + page file growth room) and available commit alone
+// (bytes); false = no sample yet.
+bool LatestCommitRoom(uint64_t* room, uint64_t* available);
 // shader_screen.cpp (ShaderScreenAfterDriverChange, game bug): the start-up's Save_Settings check (which decides the
 // game's first-launch shader screen) answers "no save" once after the graphics card or driver changed
 bool ApplyShaderScreenAfterDriverChange(bool beforeGameCode, const wchar_t* dir);  // start-up only; dir: the DLL's folder
@@ -884,6 +988,7 @@ void SetHdrMenuBackground(bool on);                // live
 void LogHdrMenuBackgroundStats();
 bool HdrMenuBackgroundInfo(uint8_t** call, uint8_t** original, uint8_t** stub, void** hook, void*** manager);
 void HdrMenuBackgroundTable(float uiNits, uint8_t (&table)[256]);  // screenshot byte (sRGB-encoded PQ) -> sRGB at the same nits
+bool HdrMenuBackgroundShotTable(uint8_t (&table)[256]);  // GpuMenuShot: the table the handler would apply now (false: none)
 void HdrMenuBackgroundTestSetup(void* original, const int32_t* hdr, const int32_t* device, const float* uiNits);  // self-test
 // (same file) HdrSaveThumbnail (TRADE-OFF, off by default): the save's screenshot callback's pixel copy
 // through a wrapper that converts the holder's bytes with the same table in HDR10
@@ -982,6 +1087,8 @@ bool AnimTeardownParallelTestKeyTables(uint8_t* table);  // KeyTablesOk on a giv
 bool FindCellBufferPacedEvict();                          // locate and verify everything (no patching)
 bool InstallCellBufferPacedEvict(bool beforeGameCode);   // start-up only (before the TES constructor; last: chains detours)
 void SetCellBufferPacedEvict(int mode);                  // live: 0 crossing-frame teardown (as the game), 1 paced
+void SetCellBufferEvictDelay(int ms);                    // CellBufferEvictDelayMs (live): the paced drain starts ms after a crossing
+uint64_t CellBufferEvictDelayFrames();                   // OT frames a drain waited for that delay
 void LogCellBufferPacedEvictStats();
 // settings/hdr_menu.cpp (HdrMenuRows, off by default): an HDR section on the game's PC Graphics page
 // (a new settings table and category row, in memory; game thread): HDR, peak, paper white, black floor, mid-tone
@@ -1043,7 +1150,7 @@ struct CellBufferTest {
 };
 void CellBufferTestSetup(const CellBufferTest& t);
 uint64_t CellBufferTestGridHook(const void* caller, uint64_t tes, uint64_t pos, uint64_t flag);
-struct CellBufferCounts { uint64_t trimmed, paced, immediate, blocked, crossings, maxOverflow; };
+struct CellBufferCounts { uint64_t trimmed, paced, immediate, blocked, crossings, maxOverflow, crossTail, insertTorn; };
 CellBufferCounts CellBufferTestCounts();
 bool ApplyScreenshotParallelFix(bool beforeGameCode);  // patches the copy calls, the readback row loop, the zero fill (start-up)
 void SetScreenshotParallel(int mode);                  // live: 0 the game's way, 1 helpers + zero fill skipped
@@ -1114,6 +1221,96 @@ void RigTraceTestSetReuse(bool on);                               // self-test o
 uint64_t RigTraceTestReused();                                    // self-test only
 void RigTraceTestSetMode(int mode);                               // self-test only: 0 off, 1 reuse, 2 verify
 uint64_t RigTraceTestVerified(uint64_t* diff);                    // self-test only: verified repeats (and how many differed)
+// rig_import_template.cpp (RigImportTemplate, public since 1.3.0): the first bone import of a new rig is a copy of a stored
+// identical import (equivalent); RemoveElement's DestroyElement call guarded so a copied block is never freed under live elements
+bool InstallRigImportTemplate(bool beforeGameCode);  // start-up only (version.dll route); the guard first
+void SetRigImportTemplate(int mode);                 // live, once installed: 0 off, 1 on (lab: 2 verify); stays off after the cap
+void LogRigImportTemplateStats();                    // one line when a counter changed
+bool RigImportTemplateDiscover(const GameModule& game, const char** missing, const char** detail);  // self-test: patterns, checks, offsets
+struct RigTmplTestCounts {
+    long long removesOnCopied = 0, blocksKept = 0, elemsKept = 0, stockOwnerRemoves = 0, copies = 0, marksFull = 0;
+    int mode = 0;
+    size_t marks = 0;
+};
+void RigTmplTestBegin(void* fakeDestroy, void* fakeCopy, size_t maxMarks);  // self-test only: fresh state, fakes for the game
+void RigTmplTestEnd();                                                      // self-test only
+void RigTmplTestDestroy(uint8_t* hier, uint8_t** pElem);  // self-test only: the guard (RemoveElement's DestroyElement call)
+bool RigTmplTestCopy(uint8_t* hier, uint8_t* tmpl);       // self-test only: mark + copy (false: table full, no copy)
+void RigTmplTestNewImport(const uint8_t* hier);           // self-test only: Altar's first import on an empty hierarchy (forget its mark)
+RigTmplTestCounts RigTmplTestGet();                       // self-test only
+// npcs/far_pawn_move.cpp (FarPawnMoveHalfRate / FarPawnMoveHz / FarHorseMove, public since 1.3.0): calm far pawns' and horses'
+// movement tick at FarPawnMoveHz with the skipped frames' steps summed (not identical: small steps far away)
+struct FarPawnStep {
+    float acc = 0.f;   // carried time (s)
+    float thr = -1.f;  // the next threshold of carried time; -1 = not qualifying last time
+    int n = 0;         // frames skipped since the last tick
+};
+// One movement tick's decision (pure): true = tick now with *step; false = skip this frame (its time carried).
+bool FarPawnDecide(FarPawnStep& s, float dt, float period, float maxStep, bool qualifies, bool rootMotion, float phase, float* step);
+struct FarPawnMoveDiscovery {
+    void** pawnVtable = nullptr;   // VPairedPawnMovementComponent's
+    void** horseVtable = nullptr;  // VHorseMovementComponent's (nullptr: horses not covered)
+    uint8_t* tick = nullptr;       // UCharacterMovementComponent::TickComponent (slot 127 of both)
+    uint8_t* getProc = nullptr;    // Altar's GetCurrentProcedureType(pawn)
+    uint8_t* isRootMotion = nullptr;  // ACharacter::IsPlayingRootMotion
+    uint8_t* getAttachParent = nullptr;  // USceneComponent's execGetAttachParent (pins AttachParent's offset; FP-S1)
+    const char* missing = nullptr;
+};
+bool FarPawnMoveDiscover(const GameModule& game, uint32_t rootOffset, FarPawnMoveDiscovery* out);  // self-test (no writes)
+bool InstallFarPawnMove(bool beforeGameCode, int mode, int hz, int horseMode, int minDistance, int maxStepMs);  // start-up only (needs pacing)
+void SetFarPawnMove(int mode, int hz, int horseMode);  // live, once installed
+void LogFarPawnMoveStats();                            // one line when anything qualified
+struct FarPawnMoveTestFakes {
+    uint32_t rootOffset, locationOffset;
+    void* getProc;       // uint8_t (const void* pawn)
+    void* isRootMotion;  // bool (const void* character)
+    bool (*playerPos)(double*, double*, double*);
+    void* origTick;      // void (void* comp, float dt, int tickType, void* tf)
+};
+void FarPawnMoveTestSetup(const FarPawnMoveTestFakes& f);       // self-test only
+void FarPawnMoveTestTick(void* comp, float dt, bool horse);      // self-test only: the hook's path
+// npcs/create_preload.cpp (CreatePreload / CreatePreloadNear, public since 1.3.0): a deferrable create waits while its form
+// asset / class package loads asynchronously (equivalent)
+bool InstallCreatePreload(bool beforeGameCode);  // start-up only (needs NpcCreationPacing)
+void SetCreatePreload(int mode);                 // live: 0 off, 1 on
+void SetCreatePreloadNear(int frames);           // live: 0..30
+bool CreatePreloadBefore(const void* cmd, bool mayWait, uint64_t lag, uint64_t maxLag, bool nearCreate);  // npc_pacing.cpp, GT
+bool CreatePreloadNearMayWait(double x, double y, double z);  // npc_pacing.cpp, GT: a near create's spot is out of view
+void LogCreatePreloadStats();                                 // one line when it waited or requested
+bool CreatePreloadDiscover(const GameModule& game, const uint8_t* createExec, const char** missing);  // self-test (no writes)
+const void* CreatePreloadTestCached(const void* holder, uint32_t form);                 // self-test: map 1 reader
+int CreatePreloadTestPath(const void* holder, uint32_t form, wchar_t* buf, int cap);    // self-test: map 2 reader (a copy)
+int CreatePreloadTestGetter(const uint8_t* fn);                                         // self-test: a class path getter's offset
+int CreatePreloadTestHeads(const void* cmd, uint64_t frame, bool deferAgain);           // self-test: frames waited (null = clear)
+// npcs/ot_frame_trim.cpp (OtFrameTrim, public since 1.3.0): the OT frame's path-builder sleep wakes early (bit 1, equivalent)
+// and the node profiler timer returns 0 (bit 2, identical by audit)
+bool InstallOtFrameTrim(bool beforeGameCode, int mode);  // start-up only (version.dll route)
+void SetOtFrameTrim(int mode);                           // live 0..3, once installed
+void LogOtFrameTrimStats();                              // one line when the frame-start sleep ran with bit 1
+struct OtFrameTrimDiscovery {
+    int consumers, requests, polls, lists, timers;  // pattern matches (1 each)
+    uint8_t* consumer;      // exe+0x68D4090 frame-start deferred sleep
+    uint8_t* timer;         // exe+0x694E170 QPC wrapper
+    void** sleepSlot;       // the Sleep import slot
+    void** pathObj;         // exe+0x948C200 PathBuilder object pointer
+    int32_t* accumulator;   // exe+0x948D0A4 deferred sleep ms
+};
+bool OtFrameTrimDiscover(const GameModule& game, OtFrameTrimDiscovery* out);  // self-test (no writes)
+bool OtFrameTrimTestInstall();                                                // self-test: install on Game()
+void OtFrameTrimTestStats(uint64_t* sleeps, uint64_t* early, uint64_t* idle, uint64_t* full);
+// npcs/loose_miss_cache.cpp (LooseMissCache, public since 1.3.0): the file finder's failed loose voice-file checks remembered
+bool InstallLooseMissCache(bool beforeGameCode, int mode);  // start-up only (version.dll route)
+void SetLooseMissCache(int mode);                           // live 0/1, once installed
+void LogLooseMissCacheStats();                              // one line when it answered from memory
+struct LooseMissDiscovery {
+    int finds;          // pattern matches (1)
+    uint8_t* find;      // exe+0x68D0270 file finder's find
+    void** slot;        // the _access import slot
+};
+bool LooseMissDiscover(const GameModule& game, LooseMissDiscovery* out);  // self-test (no writes)
+bool LooseMissTestInstall();
+bool LooseMissTestVoicePath(const char* path);  // the cached family (voice paths)
+void LooseMissTestStats(uint64_t* cached, uint64_t* stored);
 uint64_t NpcPacingFrame();  // npc_pacing.cpp: its frame counter (counts while NpcCreationPacing's frame hook runs)
 // tick_split.cpp (diagnostic TickSplit, [Fixes] HitchLedgerTickSplit, public since 1.2.3, needs HitchLedger=1): the game
 // thread's tick time by tick-function kind, ticked class and tick group into OblivionPerfFix-ticksplit.csv.
@@ -1201,6 +1398,14 @@ void GpuSceneTestOriginals(void* stride, void* resize);  // self-test only: fake
 // beforeGameCode: loaded from DllMain. Otherwise calls are only switched where that is one atomic write.
 bool ApplyLumenKeepCapacityFix(bool beforeGameCode);
 void SetLumenKeepCapacityEnabled(bool enabled);     // switchable live
+// LumenGroupsPrior (part of LumenKeepArrayCapacity): PrimitiveGroups grows go straight to this many entries once a scene
+// holds 1/32 of it, while Windows' commit room (available + page file growth, the memory monitor's last sample) stays at
+// least minCommitRoomMB above the block; 0 entries = fix 12's doubling alone. Live.
+void SetLumenGroupsPrior(int64_t entries, int minCommitRoomMB);
+// Self-test only: pretend commit room and available commit (MB; free -1 = same as room); room -1 = the monitor's sample,
+// -2 = not known. And set the grow policy's session peak (entries).
+void LumenPriorTestCommitRoom(int64_t roomMB, int64_t freeMB);
+void LumenGrowTestSetPeak(int32_t entries);
 bool ApplyUploadMemoryKeepFix(bool beforeGameCode);
 void SetUploadMemoryKeep(bool enabled, int keepFrames, int keepPages, int releaseRampFrames);  // switchable live
 bool FindChaosTimeSlicing();                      // PhysicsTreeTimeSlicing: locate the console variables (no patching)
@@ -1218,11 +1423,30 @@ bool FindAllocatorTrim();
 bool InstallAllocatorTrim(bool beforeGameCode);       // three entry detours (counting is always on once installed)
 void SetAllocatorTrim(bool enabled, int windowSeconds);  // switchable live
 void SetImmediateAllocatorLists(int lists);           // part 2, switchable live; 0/1 = off
-void SetAllocatorTrimPressure(bool pressure, bool tight);  // over budget -> every pool, short window; tight -> copy pool
+void SetAllocatorTrimPressure(bool pressure, bool tight);  // over budget -> copy pool, short window; tight -> copy pool
 void AllocatorTrimTick();                             // monitor thread, once a second
 void LogAllocatorTrimStats();
 bool AllocatorTrimInfo(AllocatorTrimInfoOut* out);
-void* AllocatorTrimTestStub();                        // self-test only: the stand-in allocator object
+void* AllocatorTrimTestStub();                        // the stand-in allocator object (self-test; CmdMemPregrow never records on it)
+// CmdMemPregrow (memory/cmd_pregrow.cpp): the direct pool brought to its working size with its command memory, before the first world
+void SetCmdMemPregrow(int requested, bool poolsFound, bool beforeGameCode, int giveBackHeadroomMB, const wchar_t* iniPath);  // start-up: 0 off, 1 automatic size, else the size
+void CmdMemPregrowTick(void* device, uint64_t deviceAgeMs);  // allocator_trim.cpp, once a second
+void CmdMemGiveBackTick(void* device);   // allocator_trim.cpp, once a second, on the trim's own thread: the one trim of the direct pool
+struct CmdMemTrimOut {
+    int swapped = 0, freeReal = 0;
+    double releaseMs = 0, longestOneMs = 0;
+};
+int CmdMemTrimDirect(void* device, int64_t keepFree, int maxSwap, CmdMemTrimOut* out);  // allocator_trim.cpp: CommandAllocatorTrim's pass on the direct pool
+void CmdMemDirectStats(int64_t* real, int64_t* inFlight, int64_t* peakEver);  // allocator_trim.cpp
+bool AllocatorTrimFailed();              // allocator_trim.cpp: an exception in a trim pass: the pools are not to be touched again
+const char* CmdPregrowSelfTest();                     // self-test of the pool handling and the gates (nullptr = ok)
+void* CmdMemPopDirect(void* device);     // allocator_trim.cpp: a free direct allocator wrapper off the pool, nullptr if none
+void* CmdMemObtainDirect(void* device);  // allocator_trim.cpp: the engine's obtain, uncounted
+void CmdMemReleaseDirect(void* device, void* wrapper);  // allocator_trim.cpp: the engine's release (Reset, back to the pool), uncounted
+void* CmdMemD3dOf(void* wrapper);        // allocator_trim.cpp: the wrapper's D3D12 allocator
+int64_t CmdMemDirectCreated();           // allocator_trim.cpp: direct allocators the engine has made
+uint64_t CmdMemLastObtainMs();           // allocator_trim.cpp: GetTickCount64 of the last obtain of any pool
+uint64_t CmdMemDeviceAgeMs();            // allocator_trim.cpp
 const char* AllocatorTrimSelfTest();                  // self-test of the give-back (obtain between passes) and the latch
 bool StreamChurnInfo(StreamChurnFixInfo* out);
 void StreamChurnTestOriginals(void* removeAt0, void* shrink1, void* buddy, void* pool, void* grow);  // self-test only
@@ -1317,12 +1541,15 @@ void NpcPacingTestFade(const uint8_t* (*staticClass)());           // self-test:
 void NpcPacingTestRendered(bool (*rendered)(const void* actor));   // self-test: fake "recently rendered" (nullptr = fakes never are)
 void SetNpcPacing(bool enabled, int budgetMs, int minDistance, int maxLagFrames, bool useSlack, bool flowWait = true,
                   int flowWaitFrames = 8);  // switchable live
+void SetNpcPacingOwnerWalk(bool on);  // PacingOwnerWalk (live; mkusm, PR #25)
 void SetNpcPacingLeanFlowDrain(bool on);  // PacingLeanFlowDrain (live)
 void LogNpcPacingStats();
 bool NpcPacingInfo(NpcPacingInfoOut* out);
 void NpcPacingTestSetup(const NpcPacingTestFakes& fakes);  // self-test only
 NpcPacingTestState NpcPacingTestRead();                    // self-test only
 bool NpcPacingPlayerPos(double* x, double* y, double* z);  // game thread: the player's position (UE units), if known
+bool NpcPacingOnGameThread();                              // this is NpcCreationPacing's game thread (known after its first frame)
+bool NpcPacingLastPlayerPos(double* x, double* y, double* z);  // any thread: the last one the game thread saw (crash report)
 // ClothBuildDefer (game thread): inside a unit of a far, unseen actor in a frame that defers: true, that unit's owner
 // (its delegate's weak object pointer) and the pacing frame; and later, whether that owner is still far and unseen. Both
 // walk past an owner chain's non-actors (an equipment unit's body pairing component), which pacing's own walk does not
@@ -1369,6 +1596,7 @@ void LedgerFadeToGame(uint64_t us);
 uint64_t LedgerClockUs();                          // the ledger's clock (QPC in us; 0 when not installed)
 bool LedgerIsGameThread();                         // installed and on the game thread (its id from the first frame end)
 const volatile uint32_t* FindGpuFrameTime();       // GGPUFrameTime (FPlatformTime cycles), nullptr if not found
+bool LedgerFrameStats(uint32_t* frames, uint32_t* maxUs);  // game-thread frames and the longest since the last call (monitor thread)
 uint64_t StaticBodiesGtUs();                       // static_bodies.cpp: cumulative game-thread us in body creation / scene add
 struct HitchLedgerInfoOut {
     bool installed;
@@ -1441,6 +1669,8 @@ bool InstallStreamBehindLoading(bool beforeGameCode, bool tradeOffs);  // one en
 void SetStreamBehindLoading(bool on);                       // monitor thread, live
 void SetUnfreezeBehindLoading(int ms);                      // monitor thread, live (0 = off); prototype, trade-off
 void SetUnfreezeBehindLoadingFastTravel(int ms);            // ... its hold for fast travels (0 = UnfreezeBehindLoadingScreen's); live
+void SetDrawBehindLoading(int mode);                        // DrawBehindLoadingScreen (0 = off, 2..10 frames); monitor thread, live
+bool DrawBehindLoadingSelfTest(char* err, size_t n);         // self-test on a fake viewport field and transition (stream_behind_loading.cpp)
 void StreamBehindLoadingFrameEnd();                         // game thread, once per frame (NpcCreationPacing's frame hook)
 void LogStreamBehindLoadingStats();
 // an exec function (UFunction thunk) by its registered name, checked against a byte pattern (stream_behind_loading.cpp);
@@ -1507,6 +1737,19 @@ VramReliefEvent MemoryReliefTestVramStep(bool reset, uint64_t vramMB, uint64_t b
 void MemoryReliefTestAllowTranslate(bool allow);  // self-test: VramReliefPauseTranslate for the test state machine
 bool MemoryReliefTestCommitStep(uint64_t commitRoomMB);  // self-test: one second of RAM/commit relief (the live state); commit relief on?
 bool GpuCrashReportTestDred(void* device);                      // self-test: the DRED part of the report
+// diagnostics/gpu_markers.cpp ([General] GpuPassMarkers): render pass names for DRED (bit 1) and AMD's markers (bit 2)
+struct GameModule;
+bool InstallGpuPassMarkers(int mode, const wchar_t* ctlPath);  // start-up (either route) when the key is not 0; ctlPath: lab control file
+void GpuPassMarkersTick(int mode, bool deviceReady);           // monitor thread, once a second (live); deviceReady: the game's GPU in use
+int GpuPassMarkersMode();                                       // the mode in effect (-1 = not installed / not applied yet)
+void LogGpuPassMarkersStats();                                  // lab: pushes per second (with the statistics)
+UINT GpuPassMarkersTestEncode(uint64_t* out, size_t words, const char* name, bool marker);  // self-test: the PIX3 blob
+bool GpuPassMarkersTestDiscover(const GameModule& game, uint32_t* emitRva, uint32_t* pushRva, uint32_t* popRva);  // self-test
+int GpuPassMarkersTestHooks(int mode, void* fakePush, void* fakePop, void* list, const char* name);  // self-test: the hooks
+// memory_monitor.cpp: the GPU crash report's parts that the self-test feeds with fakes
+void GpuCrashReportTestBreadcrumbs(const void* headNode1);  // D3D12_AUTO_BREADCRUMB_NODE1 chain -> the per-queue lines
+void GpuCrashReportTestContext();                           // the context lines (uptime, position, keys, process VRAM, ring)
+void SetGpuCrashIniPath(const wchar_t* path);               // the ini whose [Fixes]/[General] keys the report lists (start-up)
 // saves/save_bytes.cpp (SaveBytesBulk; lab: SaveStallTimers): byte arrays inside SaveGameToMemory written in one piece
 // start-up only: bulk = SaveGameToMemory's calls and FArrayProperty::SerializeItem's slots, thumb = the screenshot read-back call
 bool InstallSaveBytes(bool beforeGameCode, bool bulk, bool thumb);
@@ -1645,6 +1888,146 @@ void BulkTestCatchUp(uint8_t* evolution, void** structure, uint8_t* queue);  // 
 bool InstallPhysicsDestroyBatch(bool beforeGameCode, int minProcessors);  // start-up only; the helper from minProcessors on
 void SetPhysicsDestroyBatch(int mode, int minPending);                    // live once installed (0/4 off, 1, 2, 3)
 void LogPhysicsDestroyBatchStats();
+// streaming/stream_granularity.cpp (StreamRegisterGranularity): smaller registration steps of streamed-in levels
+int32_t* FindStreamRegisterGranularityVar();      // the cvar's bound int (also on the mapped exe)
+uint8_t* FindAddToWorld(bool checkPrologue);      // UWorld::AddToWorld (the function of the int's only read)
+bool InstallStreamRegisterGranularity(bool beforeGameCode, const uint8_t* probeAdd);  // start-up, key on: the AddToWorld hook
+void StreamGranBeforeAdd(bool considerTimeLimit); // game thread, every AddToWorld call: sets the value it should see
+void SetStreamRegisterGranularity(int value);     // monitor thread, every second: StreamRegisterGranularity (live)
+void StreamGranLogStats();                        // stats interval (no-op unless active)
+void StreamGranTestSetup(void* gran, void* limit);  // self-test: fake console variables
+// physics/body_spread.cpp (BodyRemovalSpread): a streamed-out level's instance bodies terminated over frames
+bool InstallBodyRemovalSpread(bool beforeGameCode, int key, int perFrame, int maxFrames, int min, int nearM, bool frameHooks,
+                              const wchar_t* iniPath);  // start-up only (key != 0; lab: always); needs NpcCreationPacing's hooks
+void SetBodyRemovalSpread(int key, int perFrame, int maxFrames, int min, int nearM);  // monitor thread, each second (live)
+void LogBodyRemovalSpreadStats();                       // stats interval (nothing when nothing happened)
+// guards/pair_race.cpp (PairReleaseOnce, game bug fix; lab also PairRaceProbe): each pairing buffer released once
+bool InstallPairRace(bool beforeGameCode, int fixKey, const wchar_t* iniPath);  // start-up only (lab: PairRaceProbe's own key)
+void LogPairReleaseOnceStats();   // stats interval: the skipped early releases, when the count changed
+struct PairRaceDiscovery {
+    uint8_t* release, *acquire, *first, *dtor, *drain, *erase, *runSession;  // pool Release, Acquire (lab); early release; destructor; manager +8; erase; RunSession
+    void** releaseSlot, **acquireSlot;  // the pool vtable (lab)
+    uint8_t* runCall;                   // RunSession's call of the early release (exe+0x45910F0)
+    uint8_t* firstRet, *dtorRet, *drainRet;  // where the pool Release returns to at the three teardown sites
+    uint8_t* stepLoop, *preTickRet, *flowRet;  // exe+0x489C880 and its two callers' return addresses (lab; may stay null)
+};
+bool PairRaceDiscover(const GameModule& game, PairRaceDiscovery* out, const char** missing);  // self-test (no writes)
+int PairReleaseOnceTestInstall(); // self-test: the fix's writes and stubs on the mapped exe; 0 = passed
+// render/water_info_skip.cpp (WaterInfoSkip): a water zone's same-input water-info redraw skipped (equivalent)
+bool InstallWaterInfoSkip(bool beforeGameCode, int key, uint8_t* gtFn, const wchar_t* iniPath);  // start-up, after InstallWaterCapture
+bool WaterInfoSkipInstalled();
+void SetWaterInfoSkip(int mode);                     // live: 0 off, 1 skip same-input redraws (lab: 2 proof)
+bool WaterInfoSkipGt(const uint8_t* ctx);            // game thread, before UpdateWaterInfoRendering: true = skip the call
+void LogWaterInfoSkipStats();
+uint8_t* WaterInfoGtSite();                          // water_info.cpp: UpdateWaterInfoRendering when its game-thread detour is in
+int WaterInfoSkipTestLogic();                        // self-test: 0 = all checks passed
+const char* WaterInfoSkipTestPins(const GameModule& game, uint8_t* fn);  // self-test: nullptr = every layout read matches
+// render/water_spread.cpp (WaterInfoSpread): water-info updates spread over frames / merged (equivalent; port130k)
+bool InstallWaterInfoSpread(bool beforeGameCode, int mode, int nearM, int perFrame, int maxFrames, int mergeMs);  // start-up only
+void SetWaterInfoSpread(int mode, int nearM, int perFrame, int maxFrames, int mergeMs);  // live once installed
+void LogWaterInfoSpreadStats();
+int WaterSpreadTestDiscover(const GameModule& game, uint32_t* flag, uint32_t* tex, uint32_t* extents, uint32_t* groundZ);  // self-test
+int WaterSpreadTestLogic();                                                           // self-test: 0 = all checks passed
+// menus/map_spread.cpp (MapPopupSpread): the map menu's icon build (drop lists cleared unseen, reuse equal rebuilds; port130k)
+bool InstallMapPopupSpread(bool beforeGameCode, int mode, bool pacingHooked);  // start-up only (native tables before registration)
+void SetMapPopupSpread(int mode);                 // live once installed: 0, 1 drop, 4 reuse, 5 both
+void MapPopupSpreadFrameEnd(uint64_t frame);      // GT, NpcCreationPacing's frame end
+void MapPopupSpreadPairing(bool begin);           // GT, NpcCreationPacing's FrameRun: its main pairing run begins / ended
+void MapPopupSpreadPostTick();                    // GT, NpcCreationPacing's post-actor-tick end call
+void LogMapPopupSpreadStats();
+struct MapSpreadFound {
+    int tableCounts[3];
+    uint8_t* loop, *clear, *size, *hover, *copy, *rehash, *free, *thunkReturn, *filterTable, *iconTable;
+    uint32_t peSlot;
+};
+const char* MapSpreadTestDiscover(const GameModule& game, MapSpreadFound* out);  // self-test: nullptr = every site found (no writes)
+int MapSpreadTestLogic();                                                        // self-test: 0 = all checks passed
+// menus/gpu_menu_shot.cpp (GpuMenuShot, worker gpushot; public since 1.3.0, port130k): the menu backdrop made on the GPU
+struct GpuMenuShotSites {
+    uint8_t* copyTexture; void** copySlot; uint8_t* handler; uint8_t* createTexCall; uint8_t* createTex;
+    uint8_t* transition; uint8_t* addBarrier; uint8_t* flush; uint8_t* residency; uint8_t* service;
+    uint8_t* saveCallback; uint8_t* saveFunction; const char* leftoverWhy;  // leftover save bindings (nullptr why = handled)
+};
+const char* GpuMenuShotDiscover(const GameModule& game, GpuMenuShotSites* out);  // nullptr = all sites found (self-test too)
+bool InstallGpuMenuShot();                                   // start-up (after SaveThumbnailAsync's and the resize hooks)
+void SetGpuMenuShot(int mode, bool hdrMenuBackground);       // live 0/1 (3 = the compare test; lab: 2)
+int GpuMenuShotMode();
+uint8_t* GpuMenuShotHandlerFn();
+bool GpuMenuShotSkipResize(int32_t srcW, int32_t srcH, int32_t dstW, int32_t dstH, bool linear);  // image_resize.cpp
+int GpuMenuShotPrepare(int32_t x0, int32_t y0, int32_t w, int32_t h, bool hdr, const char** why); // GT: job + 1, or 0
+uint8_t* GpuMenuShotServiceFn();                // Altar's screenshot service (the engine delegate's listener)
+const uint8_t* GpuMenuShotServiceDelegate();    // the engine delegate its code unbinds from (must be save_thumb's)
+bool GpuMenuShotIsAdjustingExec(const uint8_t* exec);
+// Leftover save-thumbnail bindings on the screenshot service (shot130q; the game's behaviour after a save made in a menu):
+struct GpuMenuShotLeftoverView {
+    bool callback, rawExec, holder, saveSystem; int32_t state; bool eventSlot, eventDone, handleOnEngine;
+    int32_t resX, resY; float multiplier;
+};
+const char* GpuMenuShotLeftoverRule(const GpuMenuShotLeftoverView& v);  // nullptr = may be held out (self-test)
+bool GpuMenuShotLeftover(const uint8_t* fn, uint8_t* holder, bool rawExec, const char** why);  // GT: may it be held out?
+bool GpuMenuShotEventDone(const void* ev);                                   // the callback's own test (null = done)
+bool GpuMenuShotHandleOnDelegate(const uint8_t* delegate, uint64_t handle);  // what the callback's Remove would find
+struct GpuMenuShotHeld {                       // leftovers held out of one call (their raw delegate's function swapped)
+    static constexpr int kMax = 16;
+    int n = 0; uint8_t* inst[kMax] = {}; void* fn[kMax] = {};
+};
+bool GpuMenuShotHeldAdd(GpuMenuShotHeld& h, uint8_t* inst);   // false = full
+void GpuMenuShotHeldSwap(GpuMenuShotHeld& h, bool hold);      // hold: function slots -> no-op; false: restored
+void GpuMenuShotNoteLeftovers(int job, const GpuMenuShotHeld& h);  // GT: held out of the placeholder call
+void GpuMenuShotBeginCapture(int job);         // GT: around the service delegate's call with an empty picture
+int GpuMenuShotEndCapture();                    // -> textures made
+uint32_t GpuMenuShotServiceArm(int job, uint64_t weak, int32_t adj, void* weakGet, int32_t w, int32_t h);  // -> generation
+void GpuMenuShotSetHandlers(int job, const uint64_t* weak, const int32_t* adj, int n);  // GT: the checked backdrop handlers (fallback)
+void GpuMenuShotServicePixels(uint32_t gen, uint32_t* pixels, int32_t w, int32_t h);  // helper thread: the read-back picture (ownership passes)
+void GpuMenuShotGameThreadFrame();              // GT, every frame (menu_open_flash.cpp's ProcessScreenShots hook)
+bool GpuMenuShotSkipping();                     // GT: inside the service call with a placeholder (menu_hdr_background.cpp)
+void* GpuMenuShotMarker(int job);
+void* GpuMenuShotProbeMarker();
+bool GpuMenuShotIsMarker(const void* outData);
+void GpuMenuShotRenderThread(void** ctx, void* cmdList);
+bool GpuMenuShotVerify(int job, const uint32_t* ref, int32_t w, int32_t h);
+void GpuMenuShotTaken(int job, uint64_t gtTicks);
+void GpuMenuShotDeclined(const char* why);
+void LogGpuMenuShotStats();
+void GpuMenuShotTestReference(const uint32_t* r10, int32_t w, int32_t h, const uint32_t* lut, uint32_t* out);  // self-test (lut: 3072 + 256 entries)
+size_t GpuMenuShotShaderSize();
+const unsigned char* GpuMenuShotShaderBlob(size_t* size);  // self-test: the compiled compute shader (DXBC with its root signature)
+struct SaveThumbRhi {
+    void* readbackCtor; void* readbackVtable; void* executeAndReset; void* initContexts; void** rhiGlobal; bool hdrRoute;
+};
+bool SaveThumbInternals(SaveThumbRhi* out);  // saves/save_thumb.cpp: its render-thread helpers, once installed (GpuMenuShot)
+// npcs/repath_parallel.cpp (RepathParallel): a TickActor's queued re-searches' A* on helper threads, served on identical inputs
+bool InstallRepathParallel(bool beforeGameCode, int key, int minQueued, int threads, bool helpersAllowed, bool labProbe);  // start-up only
+void SetRepathParallel(int mode, int minQueued, bool helpersAllowed);  // monitor thread, each second (live once installed)
+void LogRepathParallelStats();                                         // stats interval (no line when nothing ran)
+int RepathParallelTestDiscover(const GameModule& game, uint32_t* rvas, const char** why);  // self-test: 1 = found (21 RVAs)
+bool RepathParallelTestKey();    // self-test: the input key on fake queries
+bool RepathParallelTestHooks();  // self-test: the nav-edit counter and the link recorder with fake originals
+int RepathParallelTestLinkServe(int which);  // self-test: serve / decline of a search that asked custom links (1 = as expected)
+// render/lumen_cards_narrow.cpp (LumenCardsNarrow): the Lumen mapping upload sends only the instances whose group changed (identical)
+struct LumenCardsOffsets { uint32_t list, groupList, groupsData, bits, bitsNum, sceneData, primNumInst, primOffset, primGroupsNum, primIndices; };
+bool LumenMeshCardsDiscover(const GameModule& game, uint8_t** call, uint8_t** fn, LumenCardsOffsets* o, const char** why);  // also the lab probe's
+bool InstallLumenCardsNarrow(bool beforeGameCode, int key);  // start-up only (key != 0), then live
+void SetLumenCardsNarrow(int value);                         // monitor thread, each second (live once installed)
+void LogLumenCardsNarrowStats();                             // stats interval (no line when nothing ran)
+int LumenNarrowTestDiscover(const GameModule& game, uint32_t* rvas, uint32_t* offs);  // self-test: 1 = found (no writes)
+int LumenNarrowTestMismatch(const GameModule& game);  // self-test: on a private copy; 0 = passed
+int LumenNarrowTestStub();                            // self-test: the stub executed; 0 = passed
+int LumenNarrowTestLogic();                           // self-test: the decision with fakes; 0 = passed
+int LumenNarrowTestUnwind(const GameModule& game);    // self-test: the stubs' unwind data, walked; 0 = passed
+int LumenNarrowTestResetSite(const GameModule& game, uint32_t* foundRva);  // self-test: the lists' reset, refusal and patch on a copy; 0 = passed
+// render/buffer_floor.cpp (InstanceBufferFloor; lab also SceneBufferFloorMiB): the GPU scene instance buffer at 192 MiB at its first large need
+bool InstallBufferFloor(bool beforeGameCode, int instanceKey, bool gpuSceneKeep, const wchar_t* iniPath);  // start-up only
+uint32_t BufferFloorGrow(int kind, uint32_t use, uint32_t need);        // GpuSceneKeep: the size a growth gets
+bool BufferFloorHold(int kind, uint32_t need, uint32_t capacity);       // GpuSceneKeep: keep the capacity at this need
+struct BufferFloorChoice { bool on; uint32_t instanceSlots; uint64_t sceneBytes; const char* why; };
+BufferFloorChoice BufferFloorChoose(double budgetMB, double usedMB, int instanceKey, int sceneKey);  // the gate and the tiers
+void BufferFloorTestKeys(int instanceKey, int sceneKey, double budgetMB, double usedMB);             // self-test: keys and a fake budget
+void BufferFloorTestVram(double budgetMB, double usedMB);                                           // self-test: a later fake sample
+void BodySpreadFrame();                                 // GT, every frame start (NpcCreationPacing's cap hook)
+void BodySpreadPostTick();                              // GT, every post-actor tick (NpcCreationPacing)
+int BodySpreadTestDiscover(const GameModule& game, uint32_t* arr, uint32_t* handle, uint32_t* weak);  // self-test: 1 = found
+int BodySpreadTestLogic();                                                                           // self-test: 0 = passed
 bool PhysicsDestroyBatchTestSites(const GameModule& game);  // self-test
 const char* PhysicsDestroyBatchTestRun(int mode, int n, int gcNum, int cuNum);  // self-test: the wrapper with fakes
 const char* PhysicsDestroyBatchTestConcurrent(int callers, int rounds, int n);    // self-test: concurrent solvers

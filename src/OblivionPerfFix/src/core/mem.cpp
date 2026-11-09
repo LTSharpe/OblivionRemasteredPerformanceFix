@@ -112,6 +112,18 @@ bool ParseModule(GameModule& out, HMODULE module)
     return out.text.begin && out.rdata.begin;
 }
 
+bool NoteGameBuild(const GameModule& game)
+{
+    const bool known = (game.timeDateStamp == 0xF19077A4u && game.sizeOfImage == 0x9E1E000u) ||   // Steam 19115871
+                       (game.timeDateStamp == 0x94273715u && game.sizeOfImage == 0x94A7000u);     // Game Pass, from players' logs
+    if (!known)
+        Log("game build not recognised (TimeDateStamp 0x%08X, SizeOfImage 0x%X): this version was made for Steam build 19115871 "
+            "(0xF19077A4 / 0x9E1E000); Game Pass 0x94273715 / 0x94A7000 is reported working. Each fix looks for its own code: "
+            "any it can't find stays off and says so below, which is safe. Please quote this line in a bug report",
+            game.timeDateStamp, game.sizeOfImage);
+    return known;
+}
+
 bool InitGameModule(GameModule& out, HMODULE module)
 {
     if (!ParseModule(out, module)) return false;

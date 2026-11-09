@@ -86,7 +86,8 @@ dumpbin /nologo /disasm /range:0x1426B9A00,0x1426B9C00 OblivionRemastered-Win64-
 ## 5. Verify
 
 1. Self-test: 0 failures. Update the `exe+0x...` expectations in `tests/selftest.cpp` to the new build's addresses
-   once the fix is confirmed there.
+   once the fix is confirmed there, and the build `NoteGameBuild` knows (`core/mem.cpp`: stamp, size, and the text of its log
+   line), so the log stops saying `game build not recognised`.
 2. Start the game with the new DLL; the log must show the fix applied (`hooked`, `patched`, `installed`, `at exe+0x...`)
    and no `disabled` line for it.
 3. Measure and compare images with the benchmark ([benchmark.md](benchmark.md)): `tools\Bench-Report.ps1` for stock

@@ -1714,8 +1714,13 @@ function V.quickload() PC():RequestQuickLoad(); return "sent" end
 -- open = the controller's own map input handler (toggles the map menu); the world map page view model's icons are
 -- LegacyMapMenuIconProperties {Position, Key, Name, UnderlyingType, Type, FastTravelEnabled, DepthAdjustment,
 -- IsTargetable, IsThroughLoadingDoor, PlayerRotation, IconAddress}; go = VMapPageViewModel:
--- RegisterSendWorldMapIconClickedHandlerName(Key) = the click the map UI sends to the old engine (pairing message
--- "MapPage_World_Map_Icon_Clicked_Handler_Name"), which then asks "travel to ...?" (answer with "msg 0").
+-- RegisterSendWorldMapIconClickedHandlerAddress(IconAddress) = the click the map page itself sends when an icon is clicked
+-- (WBP_Modern_MapPage_C.OnIconClickedEvent; IconAddress names the icon in the list the page shows now, so it is read
+-- from the current list right before the click), which then asks "travel to ...?" (answer with "msg 0"). Until
+-- 2026-11-08 the bench sent RegisterSendWorldMapIconClickedHandlerName(Key) instead (still "ft goname"); both travel the
+-- same. Either way a fast travel leaves one non-backdrop handler on the game's screenshot service for the rest of the
+-- session (rel130p; GpuMenuShot then leaves menu screenshots to the game), and `state` menu= stays 1 after any injected
+-- open and close: see "menus".
 local function MapIcons()
     local out = {}
     -- only the world map page: a click sent through the other (local map) page's view model crashed the old engine's
@@ -1732,7 +1737,7 @@ local function MapIcons()
                 vm.MapIcons:ForEach(function(_, e)
                     local s = e:get()
                     local function str(v) local ok, r = pcall(function() return v:ToString() end); return ok and r or tostring(v) end
-                    out[#out + 1] = { vm = vm, s = s, key = str(s.Key), name = str(s.Name), ft = s.FastTravelEnabled }
+                    out[#out + 1] = { vm = vm, s = s, key = str(s.Key), name = str(s.Name), addr = str(s.IconAddress), ft = s.FastTravelEnabled }
                 end)
             end)
         end
@@ -1757,16 +1762,41 @@ function V.ft(rest)
             end
         end
         return "icons=" .. #icons .. " " .. table.concat(out, ", ")
-    elseif cmd == "go" then
+    elseif cmd == "go" or cmd == "goname" then
         for _, ic in ipairs(MapIcons()) do
             if ic.name == arg or ic.key == arg then
+                if cmd == "go" and ic.addr ~= "" and ic.addr ~= "nil" then
+                    ic.vm:RegisterSendWorldMapIconClickedHandlerAddress(ic.addr)
+                    return "clicked " .. ic.name .. " key=" .. ic.key .. " ft=" .. tostring(ic.ft) .. " via=address"
+                end
                 ic.vm:RegisterSendWorldMapIconClickedHandlerName(ic.s.Key)
-                return "clicked " .. ic.name .. " key=" .. ic.key .. " ft=" .. tostring(ic.ft)
+                return "clicked " .. ic.name .. " key=" .. ic.key .. " ft=" .. tostring(ic.ft) .. " via=name"
             end
         end
         error("no map icon named " .. arg)
     end
-    error("usage: ft open | ft close | ft list [text] | ft go <name>")
+    error("usage: ft open | ft close | ft list [text] | ft go <name> | ft goname <name>")
+end
+
+-- "menus": which menus are really open (rel130p 2026-11-08). The UI subsystem's IsMenuVisible (`state` menu=) stays 1
+-- after any menu the bench opened and closed with injected input actions, with nothing on screen, so it can't say
+-- whether a menu is open. This counts the active widgets of the UI's menu layers (every CommonUI activatable stack but
+-- the HUD's GameStack, the fade and the loading screen) and the player menu's view model visibility:
+-- "open=<n> pm=<0|1> flag=<IsMenuVisible 0|1> [widget classes]"; open = n + pm.
+function V.menus()
+    local n, names, pm, flag = 0, {}, 0, "?"
+    for _, c in ipairs(FindAllOf("CommonActivatableWidgetStack") or {}) do
+        pcall(function()
+            if not c:IsValid() then return end
+            local layer = c:GetFName():ToString()
+            if layer == "GameStack" or layer == "FadeWidgetStack" or layer == "LoadingScreenStack" then return end
+            local w = c:GetActiveWidget()
+            if w and w:IsValid() then n = n + 1; names[#names + 1] = layer .. ":" .. w:GetClass():GetFName():ToString() end
+        end)
+    end
+    pcall(function() local vm = FindFirstOf("VPlayerMenuViewModel"); if vm and vm:IsValid() and vm:IsVisible() then pm = 1 end end)
+    pcall(function() local ui = FindFirstOf("VAltarUISubsystem"); if ui and ui:IsValid() then flag = ui:IsMenuVisible() and "1" or "0" end end)
+    return string.format("open=%d pm=%d flag=%s %s", n + pm, pm, flag, table.concat(names, ","))
 end
 
 -- "lua <chunk>": ad-hoc exploration
