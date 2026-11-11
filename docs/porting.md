@@ -31,7 +31,7 @@ and its remaining checks are skipped; the end of the output repeats each fix's o
 
 ## 2. Read what the fix expects
 
-Open the fix's file (index in AGENTS.md). The comment at the top says which game function it changes and why the
+Open the fix's file (index in [fix-index.md](fix-index.md)). The comment at the top says which game function it changes and why the
 result stays identical; the comment above each pattern shows the instructions it expects, with the old addresses. Note
 which parts are literal (the instructions the fix depends on) and which are already wildcards (displacements, stack
 offsets).

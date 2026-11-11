@@ -1,6 +1,25 @@
 # Contributing
 
-Thank you for helping. There are four ways in, from easiest to most involved.
+Thank you for helping. The short version first; the sections below have the detail.
+
+**Three ways to help**
+- **A measurement:** run the public benchmark kit (`Benchmark.cmd`, or `tools\Bench-Report.ps1`) and post its `report.md`.
+- **A bug report:** the *Bug report* form, with `OblivionPerfFix.log` (next to `version.dll`) attached.
+- **A fix:** a pull request. For build and test see [AGENTS.md](AGENTS.md); every existing fix is listed in
+  [docs/fix-index.md](docs/fix-index.md) (search it by ini key, log tag or source file).
+
+**A fix pull request lands without us re-porting it when it has**
+1. Code found by byte pattern, with checks, that switches itself off with one log line when anything differs.
+2. A self-test for the new code (`src\OblivionPerfFix\build.ps1 -SelfTest` passes).
+3. An ini key that defaults to off (we switch it on after review), with its explanation in `OblivionPerfFix.ini`.
+4. A row in [docs/fix-index.md](docs/fix-index.md) and a paragraph in [docs/how-it-works.md](docs/how-it-works.md).
+5. A line under `## Unreleased` in `CHANGELOG.md`.
+6. No change to what is drawn or how the game plays (identical, or argued equivalent; see "What counts as a fix").
+7. Your own work: no code, binaries, addresses or data taken from other mods (ideas are welcome, name where they came
+   from and we credit them).
+8. Every number you quote can be re-measured by anyone with the public benchmark: a public scenario, no save files.
+
+There are four ways in, from easiest to most involved.
 
 ## 1. Reports
 
@@ -40,7 +59,8 @@ Read [AGENTS.md](AGENTS.md) first: the layout, the build, how a fix finds its co
 Where a new fix goes: one file per fix, in the folder of its area under `src/OblivionPerfFix/src/` (`render`,
 `streaming`, `physics`, `npcs`, `loading`, `menus`, `saves`, `framegen`, `guards`, `memory`, `diagnostics`), its switch in
 `core/common.h` (`Config`), `core/config.cpp` and the shipped `OblivionPerfFix.ini` (explained in plain words), its
-installation in `core/main.cpp`, its checks in `tests/`, and a section in [docs/how-it-works.md](docs/how-it-works.md).
+installation in `core/main.cpp`, its checks in `tests/`, a row in [docs/fix-index.md](docs/fix-index.md) and a section in
+[docs/how-it-works.md](docs/how-it-works.md).
 Start the file with a comment that says what was slow, what the fix changes and why the result is the same.
 
 ## 4. Open challenges
@@ -111,6 +131,6 @@ that could touch the picture.
 
 - `src\OblivionPerfFix\build.ps1 -SelfTest` passes (0 failures) against the game build named in the README.
 - The CI build is green.
-- `CHANGELOG.md` has a line under `## Unreleased`.
+- `CHANGELOG.md` has a line under `## Unreleased`; `docs/fix-index.md` has the fix's row.
 - The PR description has the measurement (scenario, profile, before/after) and, for anything visual, the image
   comparison; the pull request template lists the rest.

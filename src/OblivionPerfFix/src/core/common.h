@@ -11,7 +11,7 @@
 #include <string_view>
 #include <vector>
 
-#define OPF_VERSION "1.3.0"
+#define OPF_VERSION "1.4.0"
 // The release label after the version (the tag is v<OPF_VERSION><OPF_RELEASE_SUFFIX>): in the log's first line and the DLL's
 // version resource (build.ps1 reads both lines; CI checks the tag against OPF_VERSION).
 #define OPF_RELEASE_SUFFIX "-beta"
@@ -187,6 +187,9 @@ struct Config {
     int lumenCardsNarrow = 1;          // LumenCardsNarrow: render/lumen_cards_narrow.cpp, the Lumen mapping upload sends only the
                                        // instances whose mesh cards changed (identical); start-up install when != 0, then live 0/1
                                        // (lab: 2 = with proof, needs 2 at start-up)
+    int lumenScanCull = 1;             // LumenScanCull: render/lumen_scan_cull.cpp, Lumen's CPU scan of its primitive groups reads only the
+                                       // blocks of 64 groups that can emit a request (identical; Epic's UE 5.6.0 idea); on since 1.4.0;
+                                       // start-up install when != 0, then live 0 / 1 / 2 (2 = proof)
     int waterInfoSkip = 1;             // WaterInfoSkip: render/water_info_skip.cpp, a water zone's water-info redraw skipped when its
                                        // inputs equal its last redraw's (equivalent); start-up install when != 0 (with the water-info
                                        // render's game-thread detour), then live 0/1 (lab: 2 proof)
@@ -1032,6 +1035,12 @@ bool OsPageCacheInfo(OsPageCacheInfoOut* out);
 // pso_precompile.cpp (PsoPrecompileFast: the start-up PSO precompile at UE's Fast pace outside play)
 bool InstallPsoPrecompileFast(bool beforeGameCode);  // SetBatchMode's entry detour (start-up)
 void SetPsoPrecompileFast(bool enabled);             // live (the game thread's timer applies it at its next check)
+// Rule R1 (user decision 2026-11-11, GitHub issue 51): the faster pace only while TaskWaitDeadlockGuard is installed and on
+// (its mode 1); without it (the OBSE64 route, TaskWaitDeadlockGuard=0 or unavailable, mode 0 or 2) the game's own pace.
+bool PsoPaceInstall(bool keyOn, int taskWaitGuardMode);  // start-up: detour SetBatchMode at all (key on, guard installed: mode >= 0)
+bool PsoPaceAllowed(bool keyOn, int taskWaitGuardMode);  // the faster pace now (key on, guard in mode 1)
+void ApplyPsoPrecompileFast(bool keyOn, int taskWaitGuardMode);  // live: SetPsoPrecompileFast(PsoPaceAllowed(..)), a log line
+                                                                 // when the guard's mode turns the faster pace off or on again
 void SetPsoPrecompileFastInGameMenus(bool enabled);  // live: Fast also in menus after play started (default: the game's pace)
 void SetPsoPrecompileScreenHold(bool on);  // ShaderScreenAfterDriverChange: UE's Fast, no cold guard, until the main menu
 bool PsoPrecompileScreenHold();
@@ -1939,6 +1948,12 @@ struct MapSpreadFound {
     int tableCounts[3];
     uint8_t* loop, *clear, *size, *hover, *copy, *rehash, *free, *thunkReturn, *filterTable, *iconTable;
     uint32_t peSlot;
+    uint8_t* mapTable;       // {name, exec thunk} pairs of the map widget class
+    bool mapAudited;         // the map widget's table is the audited one (only its icon natives are wrapped; mapshrink)
+    bool wrapped[3][256];    // per table (map widget, icon filter, icon), per entry: gets a notification stub
+    int codeSites, inlinePatches;   // code sites written at install (inline E9 entries + call sites; mapfix: 11 / 9)
+    uint8_t* inlineAt[16];          // where the inline E9 patches go (none at UpdateOrCreateMapIcons' exec thunk: mapfix)
+    uint8_t* iconsThunk;            // UpdateOrCreateMapIcons' exec thunk (from the native table)
 };
 const char* MapSpreadTestDiscover(const GameModule& game, MapSpreadFound* out);  // self-test: nullptr = every site found (no writes)
 int MapSpreadTestLogic();                                                        // self-test: 0 = all checks passed
@@ -2016,6 +2031,33 @@ int LumenNarrowTestStub();                            // self-test: the stub exe
 int LumenNarrowTestLogic();                           // self-test: the decision with fakes; 0 = passed
 int LumenNarrowTestUnwind(const GameModule& game);    // self-test: the stubs' unwind data, walked; 0 = passed
 int LumenNarrowTestResetSite(const GameModule& game, uint32_t* foundRva);  // self-test: the lists' reset, refusal and patch on a copy; 0 = passed
+// An observer called at the lists' reset (render thread, before they are emptied), through LumenCardsNarrow's reset patch, or a
+// reset-only patch when that fix is not installed (start-up only). False (with why) = no reset hook.
+bool LumenListsResetObserve(void (*observer)(const void* lumenSceneData), const char** why);
+// render/lumen_scan_cull.cpp (LumenScanCull, lumenscan; public since 1.4.0): Lumen's CPU primitive scan reads only the blocks of groups that can emit a request
+struct LumenScanBlock {   // one per 64 group indices (36 bytes): what the block's last scan saw
+    float lo[3], hi[3];   // box over its candidates (MeshCardsIndex -1, valid mesh cards)
+    float maxExt;         // the largest GetExtent().GetMax() of its near candidates (not far field)
+    float maxExtFar;      // ... of its far-field candidates
+    uint8_t flags;        // 1 empty, 2 emissive, 4 cards, 8 merged, 16 far-field candidates, 32 bad box, 64 added, 128 near candidates
+    uint8_t pad[3];
+};
+bool InstallLumenScanCull(bool beforeGameCode, int key);  // start-up only (key != 0), then live 0 / 1 / 2
+void SetLumenScanCull(int value);                         // monitor thread (live once installed)
+void LogLumenScanCullStats(bool detailed);               // per stats interval (no line when nothing ran); lab: detailed = every 10 s (LumenScanCullStats=1)
+LumenScanBlock* LumenScanBlocks(int32_t* count);          // the summaries (for a later GPU-side use)
+void LumenScanCullTask(void* task);                       // the hooks (the self-test calls them directly)
+void LumenScanCullPrep(void* lumenSceneData);
+void LumenScanCullPost();
+void LumenScanCullListsReset(const void* lumenSceneData);
+int LumenScanCullTestDiscover(const GameModule& game, uint32_t rva[4], uint32_t* pgOff, uint32_t* viewSpecOff);  // self-test: 1 = found (no writes)
+bool LumenScanCullTestInit(void* body, uint32_t pgOff, uint32_t listOff, uint32_t viewSpecOff);  // self-test: state with the given body, no patch
+void LumenScanCullTestLegacyGap(bool on);  // self-test: the first version's mode handling (review finding 1)
+void LumenScanCullTestMode(int mode);
+void LumenScanCullTestCounts(uint64_t* scanned, uint64_t* skipped, uint64_t* verified, uint64_t* mismatches);
+void LumenScanCullTestDone();
+uint8_t* LumenScanCullTestStub(const void* prep, const void* original, const void* post);
+void LumenScanCullTestFreeStub(uint8_t* mem);
 // render/buffer_floor.cpp (InstanceBufferFloor; lab also SceneBufferFloorMiB): the GPU scene instance buffer at 192 MiB at its first large need
 bool InstallBufferFloor(bool beforeGameCode, int instanceKey, bool gpuSceneKeep, const wchar_t* iniPath);  // start-up only
 uint32_t BufferFloorGrow(int kind, uint32_t use, uint32_t need);        // GpuSceneKeep: the size a growth gets

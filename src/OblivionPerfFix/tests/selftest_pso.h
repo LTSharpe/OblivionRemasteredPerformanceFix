@@ -126,6 +126,45 @@ static void Run(const GameModule& game)
     SetPsoPrecompileFast(true);
     tick();
     Check(lastMode == 1, "switched on: Fast again");
+    // rule R1 (issue 51): the faster pace only with TaskWaitDeadlockGuard installed (mode >= 0) and on (mode 1)
+    {
+        bool table = true;
+        for (int key = 0; key <= 1; ++key)
+            for (int mode = -1; mode <= 2; ++mode) {
+                table &= PsoPaceInstall(key != 0, mode) == (key != 0 && mode >= 0);
+                table &= PsoPaceAllowed(key != 0, mode) == (key != 0 && mode == 1);
+            }
+        Check(table, "R1: detour installed only with the key on and the guard installed; the faster pace only with the guard in mode 1");
+        Check(!PsoPaceInstall(true, -1) && !PsoPaceAllowed(true, -1),
+              "R1: the guard not installed (OBSE64 route, TaskWaitDeadlockGuard=0 or unavailable): no detour, the game's pace");
+    }
+    ApplyPsoPrecompileFast(true, 1);
+    tick();
+    Check(lastMode == 1, "R1: key on, guard in mode 1 (version.dll default): Fast in the menu");
+    ApplyPsoPrecompileFast(true, 0);   // TaskWaitDeadlockGuard switched to 0 live (the game's wait)
+    tick();
+    Check(lastMode == 0, "R1: the guard switched to 0 live: the game's Background at the next check");
+    hook(0);
+    Check(lastMode == 0, "R1: ... and the game's Background request passes unchanged");
+    state(0, 1);   // a loading screen: UE's Fast values with the guard on, the game's own pace without it
+    tick();
+    Check(lastMode == 0, "R1: guard off, loading screen: the game's Background (no switch to UE's Fast either)");
+    ApplyPsoPrecompileFast(true, 2);   // measure only: no rescue of a stuck worker either
+    tick();
+    Check(lastMode == 0, "R1: guard in mode 2 (measure only): still the game's pace");
+    ApplyPsoPrecompileFast(true, 1);   // back to 1 live
+    tick();
+    Check(lastMode == 1, "R1: the guard back to 1 live: Fast again on the loading screen");
+    ApplyPsoPrecompileFast(false, 1);  // PsoPrecompileFast switched to 0 live, the guard on
+    tick();
+    Check(lastMode == 0, "R1: the key switched to 0 live with the guard on: the game's pace");
+    ApplyPsoPrecompileFast(true, -1);  // the key on again, but no guard (cannot happen live after a start-up install; covered anyway)
+    tick();
+    Check(lastMode == 0, "R1: the key on with no guard installed: the game's pace");
+    ApplyPsoPrecompileFast(true, 1);
+    state(1, 0);
+    tick();
+    Check(lastMode == 1, "R1: key and guard on again: Fast in the menu");
     // menus opened in play (PsoPrecompileFastInGameMenus 0 by default): the game's pace once play has lasted long enough
     PsoPrecompileTestPlayMs(50);   // also forgets the menus and play seen so far
     state(0, 0);

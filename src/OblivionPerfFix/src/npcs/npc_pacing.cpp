@@ -1320,6 +1320,7 @@ uint64_t FrameBudget()
 
 
 // Times the frame-rate cap's sleep (game thread, once per frame, before the world ticks).
+
 void MaxTickRateHook(void* engine)
 {
     LedgerSleepBegin();  // HitchLedger: the cap's sleep starts (no-op unless recording, game thread only)
@@ -1484,6 +1485,7 @@ bool FlowWaits(const void* ret, int32_t key)
     return true;
 }
 
+
 uint8_t RunSessionHook(void* manager, int32_t key)
 {
     const void* ret = _ReturnAddress();
@@ -1564,6 +1566,7 @@ ExecFn const kExecuteHooks[kNumDelegates] = {&ExecuteHook<kAppearance>, &Execute
 
 
 }  // namespace
+
 
 bool FindNpcPacing()
 {

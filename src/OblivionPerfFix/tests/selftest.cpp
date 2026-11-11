@@ -576,6 +576,7 @@ static uint64_t HashWords(uint64_t seed, const void* data, size_t bytes)
 #include "selftest_bodyspread.h"   // BodyRemovalSpread: sites on the mapped exe, the queue / drain / drop logic with fakes
 #include "selftest_streamgran.h"    // StreamRegisterGranularity: the cvar's int on the mapped exe, set / live / left alone
 #include "selftest_lumennarrow.h"   // LumenCardsNarrow: sites, refusal, stub, unwind, the decision with fakes (lab: the proof)
+#include "selftest_lumenscan.h"    // LumenScanCull: sites, the call-site stub, the cull against the game's own scan body on fakes
 #include "selftest_waterinfo_skip.h"  // WaterInfoSkip: layout reads on the mapped exe, the same-input decision with fakes
 #include "selftest_waterspread.h"     // WaterInfoSpread: sites + shared zone layout on the mapped exe, the defer / merge logic with fakes
 #include "selftest_mapspread.h"       // MapPopupSpread: sites by pattern on the mapped exe, the keep / drop / reuse logic with fakes
@@ -2953,6 +2954,9 @@ int wmain(int argc, wchar_t** argv)
     StreamGranRun();
     // LumenCardsNarrow (selftest_lumennarrow.h): discovery, refusal and patch on a copy, the stubs, the decision with fakes.
     LumenNarrowRun(game);
+    // LumenScanCull (selftest_lumenscan.h): sites (nothing installed), the stub, and the cull run against the mapped exe's scan body
+    // (the proof and an independent stock run as oracles; a forged wrong skip must be caught).
+    lscan::Run(game);
     // RepathParallel (selftest_repath.h): discovery on the mapped exe (nothing installed), the key and hooks with fakes.
     RepathRun(game);
     // PairReleaseOnce / lab PairRaceProbe (selftest_pairrace.h): rewrites the two early releases (no later test reads them).

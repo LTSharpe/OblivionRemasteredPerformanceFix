@@ -62,6 +62,7 @@ std::atomic<bool> g_gpuSceneHooked{false};   // GpuSceneKeepCapacity installed
 std::atomic<bool> g_allocTrimHooked{false};  // CommandAllocatorTrim installed
 std::atomic<bool> g_navLinkHooked{false};    // NavLinkFast installed
 std::atomic<bool> g_lumenNarrowHooked{false}; // LumenCardsNarrow installed
+std::atomic<bool> g_lumenScanHooked{false};   // LumenScanCull installed
 std::atomic<bool> g_saveBytesHooked{false};  // SaveBytesBulk / SaveThumbnailAsync (lab: and SaveStallTimers) installed
 std::atomic<bool> g_saveRefIdHooked{false};  // SaveRefIdIndex installed
 std::atomic<bool> g_physAnimHooked{false};   // PhysAnimNoEmptyLock installed (start-up)
@@ -241,6 +242,7 @@ DWORD WINAPI MonitorThread(LPVOID)
                              cfg.bodyRemovalSpreadMin, cfg.bodyRemovalSpreadNearM);  // BodyRemovalSpread: no-op unless installed
         SetStreamRegisterGranularity(cfg.streamRegisterGranularity);  // the key (live); applied on the game thread at AddToWorld
         if (g_lumenNarrowHooked) SetLumenCardsNarrow(cfg.lumenCardsNarrow);  // LumenCardsNarrow: live once installed (render thread forgets on a change)
+        if (g_lumenScanHooked) SetLumenScanCull(cfg.lumenScanCull);  // LumenScanCull: live once installed (any change marks every block dirty)
         SetWaterInfoSkip(cfg.waterInfoSkip);  // WaterInfoSkip: live once installed (no-op otherwise)
         SetWaterInfoSpread(cfg.waterInfoSpread, cfg.waterInfoSpreadNearM, cfg.waterInfoSpreadPerFrame, cfg.waterInfoSpreadMaxFrames,
                            cfg.waterInfoSpreadMergeMs);  // WaterInfoSpread: live once installed (no-op otherwise)
@@ -250,7 +252,9 @@ DWORD WINAPI MonitorThread(LPVOID)
         SetRtSceneKeep(relief.shared && cfg.rtSceneBufferKeep ? 2 : cfg.rtSceneBufferKeep);  // RtSceneBufferKeep: live once installed (no-op otherwise); 2 = the game's way
         SetRayTracingBuildBatch(cfg.rayTracingBuildBatch);  // RayTracingBuildBatch: live once installed (no-op otherwise)
         SetOsPageCache(relief.shared ? 0 : cfg.osPageCache, cfg.osPageCacheMB, cfg.osPageCacheTrimSeconds, relief.osCache);  // OsPageCache: no-op unless installed
-        SetPsoPrecompileFast(cfg.psoPrecompileFast);  // PsoPrecompileFast: no-op unless installed at start-up
+        // PsoPrecompileFast: no-op unless installed at start-up; faster only while TaskWaitDeadlockGuard is in mode 1 (rule R1,
+        // its mode was set above in this same pass)
+        ApplyPsoPrecompileFast(cfg.psoPrecompileFast, TaskWaitGuardMode());
         SetPsoPrecompileFastInGameMenus(cfg.psoPrecompileFastInGameMenus);
         SetPsoPrecompileFastBudget(static_cast<float>(cfg.psoPrecompileFastBudgetMs < 1 ? 1 : cfg.psoPrecompileFastBudgetMs),
                                    cfg.psoPrecompileColdQueue < 0 ? 0 : cfg.psoPrecompileColdQueue);
@@ -292,6 +296,7 @@ DWORD WINAPI MonitorThread(LPVOID)
             LogBodyRemovalSpreadStats();  // no-op unless installed (the lab logs every 5 s instead)
             StreamGranLogStats();         // StreamRegisterGranularity (no-op unless active)
             if (g_lumenNarrowHooked) LogLumenCardsNarrowStats();  // LumenCardsNarrow (no line when nothing ran)
+            if (g_lumenScanHooked) LogLumenScanCullStats(false);  // LumenScanCull (no line when nothing ran; MISMATCH lines of the proof)
             LogRepathParallelStats();     // RepathParallel (no line when nothing ran)
             LogPairReleaseOnceStats();    // PairReleaseOnce (no line unless the count changed)
             if (g_rigSetup) LogRigSetupStats();
@@ -580,11 +585,18 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
         if (InstallOsPageCache(beforeGameCode, Directory(g_iniPath).c_str(), osTrace))
             SetOsPageCache(cfg.osPageCache, cfg.osPageCacheMB, cfg.osPageCacheTrimSeconds, false);
     } else Log("[oscache] disabled in OblivionPerfFix.ini (takes a restart to switch on)");
-    // PsoPrecompileFast: SetBatchMode's entry detour, installed only if enabled at startup; afterwards the ini switches it live.
-    if (cfg.psoPrecompileFast) {
+    // PsoPrecompileFast: SetBatchMode's entry detour, installed only if enabled at startup and only with TaskWaitDeadlockGuard
+    // installed above (rule R1, user decision 2026-11-11, issue 51: without the guard the game's own pace); afterwards the
+    // ini switches it live, and the guard's mode decides too (faster only in mode 1).
+    if (cfg.psoPrecompileFast && !PsoPaceInstall(true, TaskWaitGuardMode()))
+        Log("[pso] PsoPrecompileFast not installed: the game's own shader precompile pace, because TaskWaitDeadlockGuard is not "
+            "installed (%s) and the faster pace without it can run into the game's task-wait freeze (issue 51)",
+            !beforeGameCode ? "loaded as an OBSE64 plugin, too late for it" : !cfg.taskWaitDeadlockGuard ? "TaskWaitDeadlockGuard=0"
+                                                                             : "unavailable, see the [taskwait] line");
+    else if (cfg.psoPrecompileFast) {
         SetPsoPrecompileFastBudget(static_cast<float>(cfg.psoPrecompileFastBudgetMs < 1 ? 1 : cfg.psoPrecompileFastBudgetMs),
                                    cfg.psoPrecompileColdQueue < 0 ? 0 : cfg.psoPrecompileColdQueue);
-        if (InstallPsoPrecompileFast(beforeGameCode)) SetPsoPrecompileFast(true);
+        if (InstallPsoPrecompileFast(beforeGameCode)) ApplyPsoPrecompileFast(true, TaskWaitGuardMode());
     } else Log("[pso] off in OblivionPerfFix.ini (takes a restart to switch on)");
     // ScreenshotParallel: installed only if enabled at startup; afterwards the ini switches it live.
     if (cfg.screenshotParallel) {
@@ -911,6 +923,10 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
     // LumenCardsNarrow (lumenfixa; public 1.3.0): the Lumen mapping upload narrowed to the changed instances (identical); start-up
     // install when != 0, then live. Before the lab's LumenCardsProbe: it reads the call the probe redirects.
     if (InstallLumenCardsNarrow(beforeGameCode, cfg.lumenCardsNarrow)) g_lumenNarrowHooked = true;
+    // LumenScanCull (lumenscan; public since 1.4.0): Lumen's CPU primitive scan reads only the blocks of groups that can emit a
+    // request (identical; the idea is Epic's, UE 5.6.0); after LumenCardsNarrow (shares its lists' reset hook; without it, a
+    // reset-only patch at the same site); start-up install when != 0, then live 0 / 1 / 2.
+    if (InstallLumenScanCull(beforeGameCode, cfg.lumenScanCull)) g_lumenScanHooked = true;
     // BodyRemovalSpread: a streamed-out level's instance bodies terminated over frames; three call sites and the physics
     // scene's deleting-destructor slot, installed at start-up when != 0 (lab: always) and NpcCreationPacing's frame hooks
     // are in (it drains at their post-actor tick), then live. After the lab's probes (as in the lab, where it was first run).
@@ -979,7 +995,7 @@ struct OBSEPluginVersionData {
 extern "C" {
 __declspec(dllexport) OBSEPluginVersionData OBSEPlugin_Version = {
     OBSEPluginVersionData::kVersion,
-    0x010300,  // plugin version 1.3.0
+    0x010400,  // plugin version 1.4.0
     "OblivionPerfFix",
     "OblivionPerfFix",
     // Addresses come from byte-pattern scans and we use no OBSE game structures,

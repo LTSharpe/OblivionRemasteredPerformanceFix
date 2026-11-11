@@ -285,6 +285,49 @@ object it didn't queue makes the fix forget that object, so its next send is a f
 build every upload was compared with what the game would have sent: 0 differences in 272.5 million instances.
 `LumenCardsNarrow=0` turns it off (live; installed at start-up).
 
+<a id="lumenscancull"></a>
+
+### Lumen's object check reads only what can change (`LumenScanCull`)
+
+[Evidence](research.md#lumenscancull).
+
+**The problem.** Every frame, Lumen checks on the processor, for every object group it tracks, whether the group should
+get its surface "cards" (it is near and large enough on screen) or lose them (it no longer is). With the game's settings
+every instance of a forest or rock object is its own group: about 1.5-2 million groups in the open world, about 80 bytes
+each, read one after the other every frame. On the game's helper threads that is tens of milliseconds of processor time per frame (37-44 ms summed on our `bravil-road` run, a first measurement; the size depends on the place), and streaming 120-170 MB
+through the processor's caches slows the other threads that run at the same moment (the game's own engine thread among
+them). In nearly every frame almost none of those groups can change state: the far ones fail the test, most near ones
+already have their cards.
+
+**What we did.** Epic solved this cost in Unreal Engine 5.6.0 by testing a whole block of groups first and reading the
+groups only when the block can matter (the two-level culling of the surface cache's primitive update, Epic's commit
+3e5ff8e28f). The game runs on Unreal Engine 5.3, so this fix brings the same approach to it as our own hook code: for
+every run of 64 groups it remembers a box around the groups that could get cards, their largest size and a few flags
+(whether any of them has cards, or got them in the last check, or is of a kind the summary can't describe). A run is
+skipped only when the engine has not changed any of its groups since it was last read and the summary proves that every
+group in it fails this frame's test (too far, or too small for the distance), with a safety margin larger than the
+engine's own rounding. Every other run is checked by the game's own code, unchanged. Changes are known from the
+engine's own list of changed groups, the same list it uses to keep the graphics card's copy of the groups current; any
+case the summaries can't follow (a switch of the key, another Lumen scene, a scene capture's own copy) makes every run
+count as changed, or runs the check as the game does.
+
+**Why it should not change anything.** The fix only skips work whose result is unchanged: the engine gets the same
+requests (which groups get cards, in which order, at which distance, and which lose them) as without the fix.
+`LumenScanCull=2` runs both ways in every frame, gives the game its own result and writes any difference into the log:
+in our tests (one PC, AMD graphics card) 0 differences in several hundred million checked tasks, outdoors, in towns,
+interiors, after fast travel, loading a save and graphics changes (more than 170 million of them with the released
+build). Screenshots of six of our seven test views match the stock game within run-to-run variation. At the seventh, a close-up of a gate in shadow, our test screenshots differ between key on and
+key off. We traced this to our test camera, not to the fix: the camera follows the player character, which settles a
+fraction of a centimetre differently after each teleport (0.2-0.5 cm sideways; at that view 1 cm is about 3.6 pixels
+on the near ground), and the differences grow across the picture the way a sideways camera move does; camera rotation
+and field of view were identical in every shot. A fresh key-on run that happened to stand where a key-off run had
+stood matched it as closely as two key-off runs match each other (mean difference 2.6 against 2.1 within one state),
+while it differed from the two earlier key-on runs. We found no difference attributable to the fix, and none was
+noticed in play. We do not claim identical pictures. The self-test runs the game's own check code on test data
+against the fix. Lumen at Low global illumination does not run this check at all, so the fix does nothing there.
+`LumenScanCull=0` turns it off (live; installed at start-up; not on the OBSE64 route). A game update that changes this
+part of the engine switches it off by itself, with a line in the log.
+
 ### New objects' ray-tracing structures built together (`RayTracingBuildBatch`)
 
 [Evidence](research.md#raytracingbuildbatch).
@@ -319,7 +362,7 @@ own method comes back within a second. Every case with specks so far rendered 51
 nor on a 4K 16:9 screen at DLAA (3840 wide).
 
 **What changes.** Skin is shaded by the separable method on wide renders. On the test character at play distance the
-contributor saw the same skin and a slightly cheaper frame (his measurements: pull request #35); close-ups in dialogue
+contributor saw the same skin and a slightly cheaper frame (their measurements: pull request #35); close-ups in dialogue
 were not compared, and we have no display that wide to check it ourselves. The specks are gone. On by default since 1.2.4, in the ini's "Game bug fixes"; `SeparableSkinAbove4K=0` keeps the game's skin
 everywhere (live). Pull request #35 by Mishu117.
 <a id="hdrgamma22"></a>
@@ -1622,6 +1665,21 @@ build, it keeps the game's own pace until the build ends (`PsoPrecompileColdQueu
 driver's threads are looked up once per build; where there are none (likely NVIDIA and Intel) the search is tried three
 times, 10 s apart, and the log says which it was.
 
+**Only with the task-thread guard (since 1.4.0).** The faster pace hands the engine's task threads more pipelines at
+once, and the stock engine's task threads can then all end up waiting for wake-up calls nobody sends (the game bug that
+`TaskWaitDeadlockGuard` fixes, see its section). That guard can only be put in place when the fix loads as
+`version.dll`: as an OBSE64 plugin it loads after the engine's task threads have started. After a report of a freeze at
+the main menu during the start-up build on the OBSE64 route (issue #51, Linux/Proton; cause not confirmed), the faster
+pace now runs only while the guard is installed and on (1). Without it (the OBSE64 package; `TaskWaitDeadlockGuard=0`
+at start-up; a game build where the guard is not found) `SetBatchMode` is not wrapped at all and the log says why
+(`[pso] PsoPrecompileFast not installed: ...`). While the game runs, `PsoPrecompileFast=0` hands the pace back to the
+game's own at once (the wrapper passes its requests on unchanged). Switching `TaskWaitDeadlockGuard` to 0 while the game
+runs does the same only when `PsoCompileThreadPool` is not running: with that pool on (the default) the guard refuses to
+leave 1, logs it, and the faster pace stays; to turn the guard off, set `TaskWaitDeadlockGuard=0` before starting the
+game (then the pool and the faster pace are not installed either). What an OBSE64 player gives up is
+the time measured below: the build runs until ~110-150 s after launch, and doors and fast travel in that time are held
+up to 5 s longer, as in the stock game.
+
 **Why the game can't change.** Only when the pipelines are built: the same ones, by the same
 code, sooner. Nothing else is touched. In play the pace is the game's own; with a cold driver cache (after a driver
 update) the precompile takes much longer, and then only the parts behind menus and loading screens go faster. The fix
@@ -1629,7 +1687,8 @@ finds `SetBatchMode` by its code (its three cases checked to store the same batc
 Unreal's `IsPrecompiling`, and the freeze state through the loading-screen hook's search; it stays out with a log line
 if any of them does not match. The self-test runs the moved entry instructions on the game's code and drives the
 wrapper and the timer through every case with fakes (menu, play, loading screen, start-up, the game's own Fast and
-Precompile, a request from another thread, the switch, the end of the precompile).
+Precompile, a request from another thread, the switch, the end of the precompile), and the guard rule for every key
+and guard state, including either switch changed while the game runs.
 
 **Measured (2026-10-16, 480p `small`, fresh launches, scenes right after arriving, ABBA on/off/off/on plus stock after
 its own precompile):** the precompile finished at 22-25 s after launch instead of 110-148 s (8 s of it at the Fast
@@ -1689,7 +1748,7 @@ is replaced by the one Windows calls the monitor's preferred mode, when that is 
 instead of only the native aspect ratio.
 
 **What changes.** The resolutions the Graphics page offers. In borderless the game draws at the desktop's size either
-way (the contributor checked it on his monitor: pull request #35). Other aspect ratios in fullscreen are stretched or
+way (the contributor checked it on their monitor: pull request #35). Other aspect ratios in fullscreen are stretched or
 letterboxed by the display or the graphics driver. `MonitorNativeFromWindows` is on by default;
 `FullscreenAllResolutions` is off by default since the first fixes the reported bug and the second only adds choices.
 Both take a restart.
@@ -1919,6 +1978,21 @@ unseen never existed for anything to see. Ours, a lab menu test (the map opened 
 small window, this release's DLL: later map opens 338 -> 207 ms for the
 open frame and 179 -> 61 ms for the next; a session's first map open 413 -> 297 ms. `MapPopupSpread=0` turns it off
 (live).
+
+**What it changes in the game, and other map mods.** At start-up it puts a small step in front of the map's functions
+that can touch the markers (the map widget's, the marker filter's and the markers' own functions that read or change
+them, the zoom, the hover or the map's size: 46 of the 83 in this game build), detours the game's "build", "size" and
+"remove all" marker functions, patches the first bytes of six more marker readers and two calls, and watches the map
+widget's events. Each step first finishes what the fix is holding back (it builds a kept list, runs a held "remove all",
+and stops the next list from reusing the markers); it never changes what the function itself does. The local map's
+texture and material loads and unloads (`Load*` / `Unload*`), the getters of zoom, sizes, DPI and textures, and the pure
+coordinate helpers are left exactly as the game has them: each was read in the game's code, and none of them reads a
+field the marker work writes or writes a field it reads. In the game, the map functions ran in the same order with and
+without this narrowing when the world map was opened outdoors, and in the same order and with identical pictures when
+the local map was opened in an interior (ours, lab tests, small window). If a game update changes the map
+widget's list of functions, every one of them gets the step again (the safe way it worked in 1.3.0). UE4SS `RegisterHook`
+hooks on these functions still run (tested with our own test mod hooking 17 of them); a mod that checks or patches the
+same functions' first bytes may not work beside it. `MapPopupSpread=0` plus a restart installs nothing of it.
 
 ### The menu's background made on the graphics card (`GpuMenuShot`)
 

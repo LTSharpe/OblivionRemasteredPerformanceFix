@@ -9,10 +9,103 @@ Downloads, checksums and build attestations: https://github.com/LTSharpe/Oblivio
 Bug fixes say whose bug it was: **game bug** = also happens without OblivionPerfFix (in the game, its engine or a
 driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 
+## 1.4.0-beta
+2026-11-11. For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Numbers marked "ours" are from our
+test PC (Ryzen 7 5800X, RX 9070 XT: one PC with an AMD graphics card; nothing here was tested on an NVIDIA card).
+Thanks to AngusHades for the log and details in issue #51, and to the player on Nexus whose map mod made us look at what
+our map fix hooks.
+
+**In short:** a crash that 1.3.0-beta can cause is fixed (our bug); Lumen's per-frame check is cheaper (on by default;
+a first measurement, below); the map fix hooks fewer functions; and on the OBSE64 package the start-up shaders are
+built at the game's own pace.
+- **Our bug, fixed: a crash when riding or travelling far** (`BodyRemovalSpread`, since 1.3.0-beta; not the game's). On
+  1.3.0-beta, if you cannot update yet: `BodyRemovalSpread=0`.
+- **New, on by default: `LumenScanCull`.** Switch off: `LumenScanCull=0` (also while the game runs).
+- **`MapPopupSpread`** leaves 37 of the map's 83 functions as the game has them. Switch off: `MapPopupSpread=0` and restart.
+- **OBSE64 package: `PsoPrecompileFast`** keeps the game's own shader pace (issue #51). The `version.dll` package is unchanged.
+
+**What was tested.** On our test PC only: the exported source builds and passes its self-test against the game's exe;
+hidden smoke runs with the shipped ini and with 1.3.0-beta's ini; our crash repro (8 far teleports, each followed by
+mounting a horse; `bench/scenarios/east-crash.json`) 8 of 8 clean. Not tested: NVIDIA or Intel cards, the Game Pass
+build, the OBSE64 route (OBSE64 is not installed on our PC; the reporter of issue #51 is asked to confirm), Linux/Proton.
+This is a beta: please report what you see, with `OblivionPerfFix.log`.
+
+Details, in the order of the list:
+- **New: Lumen's per-frame object check reads only what can change** (`LumenScanCull`, on; not a bug: the engine's
+  own cost). Every frame, Lumen (the game's global lighting) checked, on the game's helper threads, whether each of
+  its 1.5-2 million object groups in the open world should get or lose its surface cards, although almost none can
+  change in a given frame; besides the processor time, reading all of them pushed what the other threads needed out of
+  the processor's caches. Epic solved this cost in Unreal Engine 5.6.0 (testing a whole block of groups before reading its groups);
+  this fix brings that approach to the game's Unreal Engine 5.3 as our own code: blocks of 64 groups that provably
+  can't change this frame are skipped, every other block is checked by the game's own code, so the engine gets the
+  same requests in the same order: the fix only removes work whose result is unchanged (`LumenScanCull=2` runs both
+  ways side by side and logs any difference).
+  **What we checked about the picture.** In that check mode (the game's own scan and the fix run side by side, the game
+  gets its own result) the two agreed in every one of more than 170 million compared tasks (91 million in one run, 80
+  million in another, at a close-up test view). Screenshots of six of our seven test views match the stock game within
+  run-to-run variation. At the seventh, a close-up of a gate in shadow, our test screenshots differ between key on and
+  key off. We traced this to our test camera, not to the fix: the camera follows the player character, which settles a
+  fraction of a centimetre differently after each teleport (0.2-0.5 cm sideways; at that view 1 cm is about 3.6 pixels
+  on the near ground), and the differences grow across the picture the way a sideways camera move does; camera rotation
+  and field of view were identical in every shot. A fresh key-on run that happened to stand where a key-off run had
+  stood matched it as closely as two key-off runs match each other (mean difference 2.6 against 2.1 within one state),
+  while it differed from the two earlier key-on runs. We found no difference attributable to the fix, and none was
+  noticed in play. We do not claim identical pictures. `LumenScanCull=0` switches the fix off.
+  **What we measured** (ours, one PC: Ryzen 7 5800X, RX 9070 XT; a first measurement, and the size of the effect depends
+  on the place: the public, save-free benchmark scenario `bravil-road` with profile `native-cap60`: 4K, FSR
+  performance, frame generation, 60 fps cap, Lumen hardware ray tracing; one game, the key switched while it runs; one
+  run with the key off, three with it on): Lumen's check took 37-44 ms of processor time per frame with the key off and
+  3.0-3.7 ms with it on (summed over the helper threads); the helper threads' load went from 4.2 to 2.7 cores; frames of
+  18 ms or more were 13.8 % of all frames with the key off and 10.7-11.4 % with it on. Tested on one PC only; with Global Illumination at Low, Lumen does
+  not run this check and nothing changes. Installed at game start with the `version.dll` package (not on the OBSE64
+  route); `LumenScanCull=0` switches it off (also while the game runs; set it before starting the game to have it not
+  installed at all). A game update that changes this part of the engine switches it off by itself, with a line in the
+  log.
+- **Fixed: our bug, a crash when riding or travelling far** (`BodyRemovalSpread`, on; **our bug since 1.3.0-beta**,
+  not the game's; an access violation on the game thread, at `exe+0x487CBE1` in the crash report): the collision bodies
+  of an area you had left wait up to 30 frames to be taken down, and in that time the game's own collision checks could
+  still find them; when the object they belonged to was already cleaned up, the game's horse and creature physics code
+  got a hit without an object and crashed. Waiting bodies are now hidden from the game's collision checks (line traces,
+  sweeps, overlaps) from the moment they are queued, so those checks answer as without the mod; the spread and its gain
+  stay. Ours, one PC, lab: our crash repro (8 far teleports, each followed by mounting a horse) crashed 1.3.0-beta in
+  the second cycle every time; with the fix 8 of 8 cycles clean, with the public build and with the lab build. Workaround
+  on 1.3.0-beta: `BodyRemovalSpread=0`.
+- **Changed: without `TaskWaitDeadlockGuard` the start-up shaders are built at the game's own pace**
+  (`PsoPrecompileFast`; a precaution after issue #51: on the OBSE64 route under Linux/Proton the game froze at the main
+  menu about 40 s after launch, while the start-up shaders were being built). `PsoPrecompileFast` hands the engine more
+  pipelines to build at once, and the stock engine's task threads can then all end up waiting for each other (the game
+  bug `TaskWaitDeadlockGuard` fixes). That guard can only be put in place by the `version.dll` package; loaded as an
+  OBSE64 plugin the fix comes too late for it. From this release the faster pace runs only while
+  `TaskWaitDeadlockGuard` is installed and on; without it (the OBSE64 package, `TaskWaitDeadlockGuard=0` at start-up,
+  or a game build where the guard is not found) the start-up shaders are built exactly as in the game, and the log says
+  why. With the `version.dll` package and the default ini nothing changes. To get the game's own pace with the
+  `version.dll` package, set `PsoPrecompileFast=0` (works while the game runs) or `TaskWaitDeadlockGuard=0` before
+  starting the game. Setting `TaskWaitDeadlockGuard=0` while the game runs does not do it with the default ini: the
+  shader thread pool (`PsoCompileThreadPool`, on) needs the guard, so the game refuses the switch, logs that, and keeps
+  the guard and the faster pace. Whose bug: not
+  confirmed; if the freeze is the suspected one, it is the game's task-thread freeze, made likelier by our faster pace,
+  which has run without the guard on the OBSE64 route since 1.1.0-beta (the first OBSE64 package). What OBSE64 players
+  lose (ours, one PC, lab, warm shader cache): the build runs in the background until ~110-150 s after launch instead of
+  ~40 s, and while it runs the game holds doors and fast-travel loading screens up to 5 s longer, as in the stock game.
+  The same on 1.3.0-beta: `PsoPrecompileFast=0`.
+- **Map fix, smaller footprint for other map mods** (`MapPopupSpread`, on; a compatibility improvement of ours): after a
+  Nexus report that our map hooks get in the way of a minimap mod, we read each of the map functions it wrapped in the
+  game's code. The 37 that read and write none of the marker fields (the local map's texture and material loads and
+  unloads, the getters of zoom, sizes, DPI and textures, the coordinate helpers) are now left exactly as the game has
+  them; 46 of the 83 keep the small step that first finishes the marker work the fix holds back. The marker-list
+  function itself is still patched as before. What is gone is the patch on the small stub that Blueprint calls go
+  through to reach it (its Blueprint exec thunk; the small step in front of it always runs first, so that patch had
+  nothing left to do): nine such patches are left instead of ten. In our lab tests the map functions ran in the same order as
+  before, outdoors (world map) and in an interior (local map, with identical pictures). The map opens as fast as before
+  (ours, the lab menu test of 1.3.0, small window, later opens: open frame 212 ms before and after this change, 340-345
+  ms with the switch off). The ini comment, the README's compatibility table and the
+  how-it-works page now say what the fix touches; `MapPopupSpread=0` plus a restart installs none of it.
+- Version 1.4.0 in the DLL's version resource and the OBSE64 plugin version.
+
 ## 1.3.0-beta
 For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). 1.2.5 was announced but never released: its
 changes are in this version. Thanks to luisAzcuaga for pull request #45 (issue #44), to mkusm for the code behind
-`PacingOwnerWalk` (from his pull request #25), and to everyone who reported results and problems. Numbers marked "ours"
+`PacingOwnerWalk` (from their pull request #25), and to everyone who reported results and problems. Numbers marked "ours"
 are from our test PC (Ryzen 7 5800X, RX 9070 XT); the contributors' own measurements are in their pull requests.
 
 **Against 1.2.4**, all switches at their defaults (ours: 4K, FSR Performance, frame generation, ray tracing, Ultra with
@@ -199,7 +292,7 @@ your own ini from an earlier version, the new switches take their defaults (on).
   request #25 by mkusm, thank you): equipment and hair steps of a character far away and out of view now wait their turn
   like its other steps; before, a read fault on a small object in the owner chain made them count as near (so they ran
   at once, as in the stock game: a gap in our pacing, not a game bug). mkusm wrote it in the first version of pull
-  request #25 and later left it out after his NVIDIA runs showed no measurable gain; we kept it after testing it on AMD
+  request #25 and later left it out after their NVIDIA runs showed no measurable gain; we kept it after testing it on AMD
   (lab counters on the public `ic-spots` Waterfront pass: equipment steps with an unknown owner 12 -> 2 per pass, now
   paced; whole passes within our noise). Timing only, in the game's order. `PacingOwnerWalk=0`: as in 1.2.4 (live).
 
@@ -405,7 +498,7 @@ in their pull requests.
   streaming update the game's own wait runs first), so that wait is mostly over when the loading screen ends. The game's
   own wait still runs, so the first picture is the fully textured one (a texture not drawn for half a second gets no mip
   fade in the engine, so textures streamed earlier come in as the game's own wait brings them), and the world does not
-  run longer than before. His measurements: pull request #34. Ours (our PC, small profile (854x480), Cheydinhal inn
+  run longer than before. Their measurements: pull request #34. Ours (our PC, small profile (854x480), Cheydinhal inn
   door, switched live A B B A A B: the fade-in's texture wait 0.3-1.9 ms with it against 99-710 ms without; the
   loading screen a little shorter at every transition (arriving outside 6325 -> 5977 ms, entering the inn 89 ms
   shorter, leaving it 4402 -> 3949 ms); hitch time after the exit -29 %; the end pictures within the run-to-run
@@ -454,7 +547,7 @@ in their pull requests.
   Mishu117): the game waits for its shader building only on its very first start, so after a new graphics driver it
   builds everything while you play. Now a changed card or driver brings back the game's own first-start shader screen,
   at the engine's fast pace (a few minutes once, after a driver update); your settings are kept, and the first start
-  with the fix only notes the card. His measurements: pull request #33. New key `ShaderScreenAfterDriverChange` (1). It
+  with the fix only notes the card. Their measurements: pull request #33. New key `ShaderScreenAfterDriverChange` (1). It
   notes the card in a new small file, `OblivionPerfFix-gpu.txt`, next to the DLL. Our review change: the card is also
   recorded when the main menu is reached with no precompile running. version.dll route only. Good to know (stock
   behaviour, with or without the fix): after a graphics driver update the first game session also rebuilds the

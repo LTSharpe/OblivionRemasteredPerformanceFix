@@ -515,6 +515,45 @@ default since 1.2.4 (a game bug fix, user decision 2026-10-31).
   9.02 -> 7.60 / 7.61 ms (Vilverin, -1.22); time over 16.7 ms per frame 0.51 -> 0.25 (-50 %) and 0.83 -> 0.56 (-32 %).
   Doors (tree rebuilds with the extra leaves), `small`, A/B/A: no added hitch. End screenshots: same positions within 1 cm.
 
+<a id="lumenscancull"></a>
+
+### Lumen's object check reads only what can change (`LumenScanCull`, 1.4.0)
+
+[Explanation](how-it-works.md#lumenscancull).
+
+- **What the game does:** every frame the surface-cache update runs `FLumenSurfaceCacheUpdatePrimitivesTask` over every
+  allocated primitive group (`exe+0x1FBF320`, the UE 5.3 task unchanged): distance from the view origins to the group's
+  box and a resolution estimate decide whether a group without cards gets an add request or a group with cards a remove
+  request. With one group per instance this is 1.5-2.0 million 80-byte groups in the open world; outdoors only 2-4 % of
+  them are in a 64-group block that can emit anything.
+- **The fix:** blocks of 64 group indices with a summary (box over the card candidates, largest extent, flags for
+  cards, recent adds, merged, far-field and broken groups); a block is skipped only when it is not dirty and every
+  candidate provably fails this frame's test (bounds with a 1e-4 margin over the stock's float rounding); every other
+  block runs the game's own task body over its range on the same task object, so requests come in the same order. Dirty
+  comes from `PrimitiveGroupIndicesToUpdateInBuffer`, read at the scan's start and at the lists' reset. The approach is
+  Epic's (UE 5.6.0, two-level culling of this scan); the block form and the hooks are ours.
+- **Checked:** the whole task body is the byte pattern. In the whole `.text`, the functions that write group fields
+  (remove / add of mesh cards, and the scene-primitive update) are called only from the 5.3 call sites, and the list is
+  the engine's own only channel for keeping the GPU copy of the same fields current. Check mode (`LumenScanCull=2`, both
+  ways every frame, the game gets the stock result): 0 differences, more than 170 million tasks with the public build
+  (91 million on the Chalman ride and the Old Bridge, 80 million at the close-up test view `tdv-bravil-road`, both
+  `small`), and over 450 million in lab builds (doors, fast travel, save load, graphics changes, live switching).
+  Images (`td-visual`, `small`, key on vs off from start): 6 of 7 views within run-to-run variation. At the seventh, a
+  close-up of a gate in shadow (`tdv-bravil-road`), the screenshots differ between key on and key off (no light, colour
+  or sharpness change; the shift is parallax, about 0.5 px on the far ground to 1.9 px on the near ground). Worker
+  `viewdiag` traced it to the test camera: the spectator camera follows the pawn, which settles 0.2-0.5 cm sideways
+  differently after each teleport (1 cm = about 3.6 px on the near ground); camera rotation and field of view were
+  identical in every shot. A fresh key-on run whose landing pose matched a key-off run's matched it as closely as two
+  key-off runs match each other (mean MAD 2.6 against 2.1 within one state, shift at most 0.2 px) and differed from the
+  two earlier key-on runs (6.0-6.4). No difference attributable to the fix was found and none was noticed in play. The
+  in-place comparison (one parked game, key switched live, camera pose held still) was not run. We do not claim
+  identical pictures.
+- **Measured** (a first measurement, and the size depends on the place: one run off, three on; one game, the key
+  switched live; `bravil-road`, `native-cap60`: 4K, FSR performance, frame generation, 60 fps cap): the scan's processor time 37-44 -> 3.0-3.7 ms per frame;
+  background helper threads 4.16 -> 2.65 cores, foreground helpers 1.50 -> 1.03, the old engine's thread 0.27 -> 0.17
+  cores; frames >= 18 ms 13.8 % -> 10.7-11.4 %, time over 16.7 ms per frame 0.73 -> 0.60-0.68 ms. The frame-time gain
+  grows where the processor is the limit.
+
 ## Travelling: memory and threads
 
 <a id="lumenkeeparraycapacity"></a>

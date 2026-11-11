@@ -723,6 +723,32 @@ void SetPsoPrecompileFast(bool enabled)
     g_enabled = enabled;   // the timer (if running) applies the change at its next check
 }
 
+// Rule R1 (user decision 2026-11-11, GitHub issue 51: a freeze ~40 s after launch on the OBSE64 route, the game thread
+// stopped during this precompile with no compile backlog). The faster pace feeds the task workers more pipeline work at
+// once; the stock task graph can then deadlock (every worker waiting for a wake-up nobody sends, task_wait_guard.cpp).
+// TaskWaitDeadlockGuard removes that deadlock, but it can only be installed at start-up as version.dll: loaded as an
+// OBSE64 plugin (or with TaskWaitDeadlockGuard=0, or with its pattern not found) it is missing. So the faster pace (the
+// bounded menu pace, UE's Fast on loading screens and behind the shader screen) runs only while the guard is installed
+// and in mode 1 (mode 0 is the game's wait, mode 2 measures only: neither wakes a stuck worker). Without it the detour
+// is not installed at all (the guard cannot be installed later); with it in another mode the detour passes the game's
+// own requests unchanged until the mode is 1 again.
+bool PsoPaceInstall(bool keyOn, int taskWaitGuardMode) { return keyOn && taskWaitGuardMode >= 0; }
+bool PsoPaceAllowed(bool keyOn, int taskWaitGuardMode) { return keyOn && taskWaitGuardMode == 1; }
+
+void ApplyPsoPrecompileFast(bool keyOn, int taskWaitGuardMode)
+{
+    static std::atomic<int> s_guardOk{-1};   // the guard's verdict at the last call (-1: none yet); logged on a change
+    const bool allowed = PsoPaceAllowed(keyOn, taskWaitGuardMode);
+    SetPsoPrecompileFast(allowed);
+    if (!g_fn || !keyOn) return;
+    const int ok = taskWaitGuardMode == 1 ? 1 : 0;
+    const int was = s_guardOk.exchange(ok);
+    if (was == ok || (was < 0 && ok)) return;
+    if (ok) Log("[pso] TaskWaitDeadlockGuard is on again (mode 1): the faster shader precompile pace again");
+    else Log("[pso] TaskWaitDeadlockGuard is in mode %d, not 1: the game's own shader precompile pace until it is 1 again (the "
+             "faster pace without the guard can run into the game's task-wait freeze)", taskWaitGuardMode);
+}
+
 void SetPsoPrecompileScreenHold(bool on)
 {
     if (g_screenHold.exchange(on) != on && on)

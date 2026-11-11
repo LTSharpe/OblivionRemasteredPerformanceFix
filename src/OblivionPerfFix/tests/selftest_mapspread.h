@@ -6,7 +6,9 @@
 // functions (map_spread.cpp's MapSpreadTestLogic: a kept list is dropped by a clear, runs with its size pass in stock order and
 // with the zoom of then at the pairing end or before a reader, is never kept outside the pairing run or in mode 0, a second list
 // first runs the first; reuse writes nothing unless every copy matches, reuses through the hooks, never across map kinds
-// (M-S1), not after a non-quiet event; public values).
+// (M-S1), not after a non-quiet event; public values); the wrapped native set (mapshrink: all but 37 audited map widget
+// natives on the audited table, every entry on any other); the code sites (mapfix: 11, none on UpdateOrCreateMapIcons' exec
+// thunk).
 #pragma once
 
 static void MapSpreadRun(const GameModule& game)
@@ -25,6 +27,56 @@ static void MapSpreadRun(const GameModule& game)
                   rva(f.iconTable) == 0x7CCDB50,
               "MapPopupSpread: native tables 65 + 10 + 8 entries (filter exe+0x7CD2B90, icon exe+0x7CCDB50: not the link info)");
         printf("      native tables %d + %d + %d\n", f.tableCounts[0], f.tableCounts[1], f.tableCounts[2]);
+        Check(f.mapAudited, "MapPopupSpread: build 19115871's map widget table is the audited one (mapshrink)");
+    }
+    if (!missing) {
+        // mapshrink (2026-11-11): the wrapped set, pinned by its own copy of the audit here, so that an edit of the list in
+        // map_spread.cpp cannot widen or narrow it unnoticed. Left as the game has them: these 37 map widget natives
+        // (getters, the local map's loads / unloads, pure coordinate helpers); every other entry of the three tables wrapped.
+        static const char* const kLeft[] = {
+            "AbsoluteSpaceToMapSpace", "ClampZoomValue", "GetBaseColorRenderTarget", "GetCurrentZoomValue", "GetDPIScaling",
+            "GetFogMaterial", "GetFogRenderTarget", "GetIsPaintSpaceGeometryValid", "GetLocalMapMaterial",
+            "GetLocalMapSobelMaterial", "GetOriginalMapSize", "GetResolution", "GetSceneDepthRenderTarget",
+            "GetSecondPassRenderTarget", "GetSmallestPossibleZoomValue", "GetViewSize", "GetZoomedMapSize",
+            "IsAskingForPlayerMarker", "LoadBaseColorRenderTarget", "LoadFogMaterial", "LoadFogRenderTarget",
+            "LoadLocalMapMaterial", "LoadLocalMapSobelMaterial", "LoadSceneDepthRenderTarget", "LoadSecondPassRenderTarget",
+            "LocalMapToOblivionWorld", "OTAMapCoord", "RemapCircleToSquare", "UnloadBaseColorRenderTarget", "UnloadFogMaterial",
+            "UnloadFogRenderTarget", "UnloadLocalMapMaterial", "UnloadLocalMapSobelMaterial", "UnloadSceneDepthRenderTarget",
+            "UnloadSecondPassRenderTarget", "ViewSpaceToAbsoluteSpace", "ViewSpaceToMapSpace"};
+        constexpr int kNumLeft = sizeof kLeft / sizeof kLeft[0];
+        int leftFound = 0, mismatch = 0, wrappedN[3] = {};
+        for (int t = 0; t < 3; ++t)
+            for (int i = 0; i < f.tableCounts[t]; ++i) wrappedN[t] += f.wrapped[t][i];
+        if (f.mapAudited) {
+            for (int i = 0; i < f.tableCounts[0]; ++i) {
+                const char* const name = *reinterpret_cast<const char* const*>(f.mapTable + i * 16);
+                bool left = false;
+                for (const char* l : kLeft) left |= strcmp(l, name) == 0;
+                leftFound += left;
+                if (f.wrapped[0][i] == left) {
+                    ++mismatch;
+                    printf("    %s: %s\n", name, left ? "wrapped, expected left as is" : "left as is, expected wrapped");
+                }
+            }
+            Check(kNumLeft == 37 && leftFound == kNumLeft && mismatch == 0 && wrappedN[0] == f.tableCounts[0] - kNumLeft,
+                  "MapPopupSpread: map widget natives wrapped = all but the 37 audited ones (mapshrink)");
+        } else {
+            Check(wrappedN[0] == f.tableCounts[0], "MapPopupSpread: a map widget table other than the audited one wraps every entry");
+        }
+        Check(wrappedN[1] == f.tableCounts[1] && wrappedN[2] == f.tableCounts[2],
+              "MapPopupSpread: every icon filter and icon widget native wrapped");
+        printf("      wrapped %d + %d + %d of %d + %d + %d\n", wrappedN[0], wrappedN[1], wrappedN[2], f.tableCounts[0],
+               f.tableCounts[1], f.tableCounts[2]);
+        // mapfix (2026-11-11): 9 inline E9 patches (the 3 detours + 6 readers) and 2 call sites; none on UpdateOrCreateMapIcons'
+        // exec thunk (its table stub is always in front of it), and no two patches at one place
+        bool thunkFree = f.iconsThunk != nullptr, distinct = true;
+        for (int i = 0; i < f.inlinePatches; ++i) {
+            thunkFree &= f.inlineAt[i] != nullptr && f.inlineAt[i] != f.iconsThunk;
+            for (int j = 0; j < i; ++j) distinct &= f.inlineAt[i] != f.inlineAt[j];
+        }
+        Check(f.inlinePatches == 9 && f.codeSites == 11 && thunkFree && distinct,
+              "MapPopupSpread: 11 code sites (9 inline E9 + 2 calls), none on UpdateOrCreateMapIcons' exec thunk (mapfix)");
+        printf("      code sites %d (inline %d)\n", f.codeSites, f.inlinePatches);
     }
     const int fail = MapSpreadTestLogic();
     Check(fail == 0, "MapPopupSpread: keep / drop / flush / reuse logic with fakes (incl. M-S1 map kind; MS-S1: the filter's displayed-icon count is no guard)");

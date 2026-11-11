@@ -191,6 +191,7 @@ void Max(std::atomic<uint64_t>& m, uint64_t v)
     if (v > m.load(std::memory_order_relaxed)) m.store(v, std::memory_order_relaxed);
 }
 
+
 // Evict up to maxCells cells from the tail (index >= base), last one first, as the insert evicts the entry that fell
 // off. A cell that is attached (state 5/6: never seen in the tail) stops it.
 uint32_t Trim(uint8_t* tes, uint32_t maxCells, bool paced)
@@ -531,6 +532,7 @@ void SetCellBufferPacedEvict(int mode)
 }
 
 // CellBufferEvictDelayMs (see g_delayUs; live, 0..3000): 0 = the drain starts in the OT frame after the crossing (fix 50 as is).
+
 void SetCellBufferEvictDelay(int ms)
 {
     const uint32_t v = static_cast<uint32_t>(ms < 0 ? 0 : ms > 3000 ? 3000 : ms) * 1000u;

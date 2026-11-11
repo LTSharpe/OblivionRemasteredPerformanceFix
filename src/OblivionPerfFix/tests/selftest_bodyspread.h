@@ -6,7 +6,11 @@
 // the player or with no known position; queued inside: maps at once in stock order, the clear empties, nothing terminated
 // inside the removal, the post-actor tick's quota, the age bound in frames (also with no post-actor tick), a dead
 // component's batch first within the quota, a deleted scene's batch terminated before its delete, the fallback drop at
-// the solver's destroy, the fast map order, the measure-only split, the bounds-box distance).
+// the solver's destroy, the fast map order, the measure-only split, the bounds-box distance; the query filter: both
+// PreFilter slots (game-thread particle and physics-thread handle: the frozen game thread's path), both keys hidden from
+// queue to TermBody, an unknown key or proxy class or a full set = stock, a continuous unload stream through the two
+// tables; the frozen-game-thread flag's watch; on the mapped exe also both slots, the visitor calls (84 / 41) and the
+// flag's 5 sites at solver+0x1D0).
 #pragma once
 
 static void BodySpreadRun(const GameModule& game)

@@ -608,12 +608,16 @@ void LedgerPreActorTick()
 
 void LedgerPostActorTick()
 {
-    if (g_on.load(std::memory_order_relaxed) && f.preTs && !f.postTs && OnGt()) f.postTs = Us();
+    if (g_on.load(std::memory_order_relaxed) && f.preTs && !f.postTs && OnGt()) {
+        f.postTs = Us();
+    }
 }
 
 void LedgerSleepBegin()
 {
-    if (g_on.load(std::memory_order_relaxed) && OnGt()) f.sleepTs = Us();
+    if (g_on.load(std::memory_order_relaxed) && OnGt()) {
+        f.sleepTs = Us();
+    }
 }
 
 void LedgerFadeToGame(uint64_t us)
@@ -624,6 +628,7 @@ void LedgerFadeToGame(uint64_t us)
 }
 
 uint64_t LedgerClockUs() { return g_installed ? Us() : 0; }
+
 
 bool LedgerIsGameThread() { return g_installed && OnGt(); }
 

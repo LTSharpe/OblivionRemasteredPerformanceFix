@@ -23,7 +23,10 @@ tools\Compare-Benchmark.ps1. "Cannot touch the picture" needs a sentence why. --
 ### Checklist
 - [ ] `src\OblivionPerfFix\build.ps1 -SelfTest` passes (0 failures) against the game build named in the README
 - [ ] Byte-pattern search with checks; the fix switches itself off with one log line when anything differs
-- [ ] New ini key with a safe default, explained in `OblivionPerfFix.ini`; a self-test for the new code
-- [ ] `CHANGELOG.md` line under `## Unreleased`; a section in `docs/how-it-works.md` for a new fix
+- [ ] New ini key that defaults to off, explained in `OblivionPerfFix.ini`; a self-test for the new code
+- [ ] A row in `docs/fix-index.md`; a section in `docs/how-it-works.md` for a new fix
+- [ ] `CHANGELOG.md` line under `## Unreleased`
+- [ ] No change to what is drawn or how the game plays (identical or argued equivalent, see CONTRIBUTING)
+- [ ] Every number above can be re-measured with the public benchmark (a public scenario, no saves)
 - [ ] `python tools\Audit-UESource.py --ue <your UE checkout> src docs` finds no copied engine text
-- [ ] The code is my own work. Idea source, if any (we credit it): <!-- post, video, mod description, or "my own" -->
+- [ ] The code is my own work: nothing taken from other mods (code, binaries, addresses, data). Idea source, if any (we credit it): <!-- post, video, mod description, or "my own" -->

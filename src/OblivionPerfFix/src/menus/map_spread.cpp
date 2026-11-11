@@ -14,8 +14,9 @@
 // (Blueprint passes its own array by reference; each entry copied with the game's FMapIconData copy constructor into zeroed
 // memory) instead of creating the icons; UpdateIconsSizeSmoothly right after it (the map holds no other icon) is recorded. If
 // ClearAllMapIcons comes next for that widget, the kept list is destroyed as the exec thunk would have (nothing was created,
-// nothing to remove). Anything else that could see the icons first runs the kept work in stock order ("flush"): every native
-// of the map widget, icon filter and icon widget classes (their native tables are patched before registration), the map
+// nothing to remove). Anything else that could see the icons first runs the kept work in stock order ("flush"): the natives
+// of the map widget, icon filter and icon widget classes that can touch the icons (their native tables are patched before
+// registration; see kMapNatives for the 37 map widget natives left as the game has them), the map
 // widget's own natives called from C++ (hover finder, zoom iterators, player position / marker, single icon, icon position),
 // any ProcessEvent on a map widget other than "Update Icons", a new list for the same widget, and the end of the pairing run
 // (so the last list's icons exist before the world ticks on and long before anything is drawn). Safety flushes at the
@@ -310,7 +311,7 @@ void PreCall(uint8_t* self, int id, uint8_t* a2)
         return;
     }
     if (g_inFlush) return;  // inside a list, clear or size pass we run
-    if (id == 11 || id == g_idClearThunk || id == g_idIconsThunk || id == g_idSizeThunk) return;  // the hooks below decide
+    if (id == g_idClearThunk || id == g_idIconsThunk || id == g_idSizeThunk) return;  // the hooks below decide
     Disturb();
     if (g_numPend) FlushAll();
 }
@@ -794,6 +795,57 @@ NativeTable FindNativeTable(const GameModule& game, const char* first)
     while (t.count < 256 && game.rdata.Contains(t.at + t.count * 16 + 16) && PairAt(game, t.at + t.count * 16)) ++t.count;
     return t;
 }
+// Which natives get a notification stub (worker mapshrink 2026-11-11, findings "mapshrink"; Nexus report that our map hooks
+// get in the way of other map mods). The icon filter's (10) and icon widget's (8) natives all are icon state: every one is
+// wrapped. Of the map widget's 65, the 37 marked 0 are left as the game has them (no stub): each was read in the exe and
+// (1) reads nothing the kept work or a held ClearAllMapIcons writes (the icon set +0x590.., the player icon +0x628, the
+// filter, the icon widgets, the canvas' children) and (2) writes nothing they or a reuse decision read (+0x4D0, +0x4D8,
+// +0x4E8, +0x570..+0x584, the set, +0x608, +0x628, +0x630 / +0x634, the filter, the icons, PlayerIcon). They are the getters
+// of zoom, sizes, DPI and geometry, the getters, loads and unloads of the local map's render targets and materials (their
+// own soft-pointer fields +0x638..+0x757 and the local map's material instance +0x728), IsAskingForPlayerMarker (player and
+// world state, flags +0x4F0..+0x4F2) and the pure coordinate / zoom-clamp helpers. So whether they run before or after the
+// kept work, and whether a held clear or reuse is pending, gives the same results as stock: they cannot affect the spread.
+// Kept (1): the three the hooks decide on, every native that reads or writes the icons, the hover (+0x608), the zoom or the
+// map size, and the map-moving / drag / input natives (not argued; they run only on player input with the map open).
+// The list holds only for this exact table: any other map widget table (a game update adding, removing or renaming a
+// native) wraps every entry, as before (log line). The self-test pins the wrapped set on the mapped exe.
+struct Audited {
+    const char* name;
+    bool wrap;
+};
+constexpr Audited kMapNatives[] = {
+    {"AbsoluteSpaceToMapSpace", 0}, {"AddMapZoom", 1}, {"ClampZoomValue", 0}, {"ClearAllMapIcons", 1},
+    {"GetBaseColorRenderTarget", 0}, {"GetCurrentZoomValue", 0}, {"GetDPIScaling", 0}, {"GetFogMaterial", 0},
+    {"GetFogRenderTarget", 0}, {"GetIsPaintSpaceGeometryValid", 0}, {"GetLocalMapMaterial", 0},
+    {"GetLocalMapSobelMaterial", 0}, {"GetOriginalMapSize", 0}, {"GetPlayerPosition", 1}, {"GetResolution", 0},
+    {"GetSceneDepthRenderTarget", 0}, {"GetSecondPassRenderTarget", 0}, {"GetSmallestPossibleZoomValue", 0},
+    {"GetViewSize", 0}, {"GetZoomedMapSize", 0}, {"HandleMouseMove", 1}, {"InitializeMapWidget_LocalMap", 1},
+    {"InitializeMapWidget_WorldMap", 1}, {"IsAskingForPlayerMarker", 0}, {"IsIconInLeftHalfOfView", 1},
+    {"LoadBaseColorRenderTarget", 0}, {"LoadFogMaterial", 0}, {"LoadFogRenderTarget", 0}, {"LoadLocalMapMaterial", 0},
+    {"LoadLocalMapSobelMaterial", 0}, {"LoadSceneDepthRenderTarget", 0}, {"LoadSecondPassRenderTarget", 0},
+    {"LocalMapToOblivionWorld", 0}, {"MapZoomSmoothInternal", 1}, {"MouseDrag", 1}, {"OnSwitchInputMode", 1},
+    {"OTAMapCoord", 0}, {"RemapCircleToSquare", 0}, {"RequestMapPositionUpdateWithGeometryValidation", 1},
+    {"SetCursorPosition", 1}, {"SetMapPivot", 1}, {"SetMapPivotToViewCenter", 1}, {"SetMapPosition", 1}, {"SetMapZoom", 1},
+    {"SetMapZoomSmooth", 1}, {"StartMouseDrag", 1}, {"StopMouseDrag", 1}, {"TranslateCursor", 1}, {"TranslateMap", 1},
+    {"UnloadBaseColorRenderTarget", 0}, {"UnloadFogMaterial", 0}, {"UnloadFogRenderTarget", 0},
+    {"UnloadLocalMapMaterial", 0}, {"UnloadLocalMapSobelMaterial", 0}, {"UnloadSceneDepthRenderTarget", 0},
+    {"UnloadSecondPassRenderTarget", 0}, {"UpdateIconsSizeOnMapSetup", 1}, {"UpdateIconsSizeOnMapSwitch", 1},
+    {"UpdateIconsSizeSmoothly", 1}, {"UpdateMapIconPosition", 1}, {"UpdateOrCreateMapIcon", 1},
+    {"UpdateOrCreateMapIcons", 1}, {"UpdatePlayerMarkerPosition", 1}, {"ViewSpaceToAbsoluteSpace", 0},
+    {"ViewSpaceToMapSpace", 0}};
+constexpr int kNumMapNatives = sizeof kMapNatives / sizeof kMapNatives[0];
+static_assert(kNumMapNatives == 65, "the audited map widget table has 65 natives");
+// The map widget's table is the audited one: the same names in the same (sorted) order.
+bool MapTableAudited(const NativeTable& t)
+{
+    if (t.count != kNumMapNatives) return false;
+    for (int i = 0; i < t.count; ++i)
+        if (strcmp(*reinterpret_cast<const char* const*>(t.at + i * 16), kMapNatives[i].name) != 0) return false;
+    return true;
+}
+// table 0 = map widget, 1 = icon filter, 2 = icon widget
+bool WrapEntry(int table, int i, bool mapAudited) { return table != 0 || !mapAudited || kMapNatives[i].wrap; }
+
 uint8_t* ThunkIn(const NativeTable& t, const char* name)
 {
     for (int i = 0; i < t.count; ++i) {
@@ -822,8 +874,12 @@ const Entry kEntries[] = {
     {6, "48 89 5C 24 10 48 89 74 24 18 55 57 41 54 41 55 41 57", 5, "GetPlayerPosition"},
     {7, "48 89 5C 24 08 57 48 83 EC 20 48 8B 81 28 06 00 00", 5, "UpdatePlayerMarkerPosition"},
     {10, "48 8B C4 53 48 81 EC A0 00 00 00", 11, "IsIconInLeftHalfOfView"},
-    {11, "48 89 5C 24 08 48 89 6C 24 18 48 89 74 24 20 57 48 83 EC 30", 5, "UpdateOrCreateMapIcons exec thunk"},
 };
+// mapfix (2026-11-11): no inline patch on UpdateOrCreateMapIcons' exec thunk any more (was id 11). The thunk is reached only
+// through its native-table pointer, which holds our table stub before the class registers (the exe has no other reference to
+// it: no call, jmp or lea, one {name, thunk} pair; in game every thunk run had the table stub in front), and the stub plus
+// LoopHook do everything the patch did (in modes 1/4/5 it returned at once; in mode 0 it drained what the stub had just
+// drained). It was the inline patch other map mods are most likely to meet.
 constexpr int kNumEntries = sizeof kEntries / sizeof kEntries[0];
 // ClearAllMapIcons' exec thunk: Stack.Code += !!Stack.Code (no parameters); jmp ClearAllMapIcons
 constexpr char kClearThunk[] = "48 8B 42 20 45 33 C0 48 85 C0 41 0F 95 C0 4C 03 C0 4C 89 42 20 E9";
@@ -868,8 +924,16 @@ struct Sites {
     uint8_t* calls[2] = {};  // the single-icon and icon-position calls (in their thunks)
     uint8_t* free = nullptr, *copy = nullptr, *rehash = nullptr, *thunkReturn = nullptr, *fname = nullptr, *pe = nullptr;
     uint32_t peSlot = 0;
+    bool mapAudited = false;  // the map widget's table is the audited one (kMapNatives): only its icon natives are wrapped
     const char* missing = nullptr;
 };
+int WrappedCount(const Sites& s)
+{
+    int n = 0;
+    for (int t = 0; t < 3; ++t)
+        for (int i = 0; i < s.tables[t].count; ++i) n += WrapEntry(t, i, s.mapAudited);
+    return n;
+}
 uint8_t* CallTarget(const GameModule& game, uint8_t* thunk, size_t at)
 {
     if (!thunk || !game.text.Contains(thunk + at + 5) || thunk[at] != 0xE8) return nullptr;
@@ -888,6 +952,7 @@ bool Discover(const GameModule& game, Sites* s)
         if (!s->tables[i].count) return miss(firsts[i]);
     }
     const NativeTable& map = s->tables[0];
+    s->mapAudited = MapTableAudited(map);
     // ClearAllMapIcons
     uint8_t* const clearThunk = ThunkIn(map, "ClearAllMapIcons");
     if (!clearThunk || !MatchesAt(clearThunk, ParsePattern(kClearThunk))) return miss("ClearAllMapIcons' exec thunk");
@@ -899,7 +964,7 @@ bool Discover(const GameModule& game, Sites* s)
     if (rh.size() != 1) return miss("ClearAllMapIcons' rehash call");
     s->rehash = CallTarget(game, rh[0], 7);
     if (!s->rehash || !MatchesAt(s->rehash, ParsePattern(kRehashBytes))) return miss("the icon set's rehash");
-    // UpdateOrCreateMapIcons through its exec thunk (entry 11)
+    // UpdateOrCreateMapIcons through its exec thunk (the thunk itself is not patched: its table entry carries the stub)
     uint8_t* const iconsThunk = ThunkIn(map, "UpdateOrCreateMapIcons");
     if (!iconsThunk || !game.text.Contains(iconsThunk + 0x100) || !MatchesAt(iconsThunk + kIconsThunkCall, ParsePattern(kThunkCallBytes)))
         return miss("UpdateOrCreateMapIcons' exec thunk");
@@ -924,7 +989,7 @@ bool Discover(const GameModule& game, Sites* s)
     uint8_t* const found[kNumEntries] = {
         hovers.size() == 1 ? hovers[0] : nullptr, setup, sw, CallTarget(game, ThunkIn(map, "GetPlayerPosition"), kPlayerPosCall),
         CallTarget(game, ThunkIn(map, "UpdatePlayerMarkerPosition"), kMarkerCall),
-        CallTarget(game, ThunkIn(map, "IsIconInLeftHalfOfView"), kLeftHalfCall), iconsThunk};
+        CallTarget(game, ThunkIn(map, "IsIconInLeftHalfOfView"), kLeftHalfCall)};
     for (int i = 0; i < kNumEntries; ++i) {
         if (!found[i] || !MatchesAt(found[i], ParsePattern(kEntries[i].bytes))) return miss(kEntries[i].what);
         s->entries[i] = found[i];
@@ -950,16 +1015,20 @@ bool Discover(const GameModule& game, Sites* s)
     return true;
 }
 
+// The wrapped entries (WrapEntry) get a notification stub; the others stay as the game has them. Ids are 100 + the entry's
+// position over the three tables, wrapped or not (stable for logs and tests).
 int PatchTables(const Sites& s)
 {
     int n = 0, id = 100;
-    for (const NativeTable& t : s.tables) {
+    for (int ti = 0; ti < 3; ++ti) {
+        const NativeTable& t = s.tables[ti];
         uint8_t* const stubs = AllocNearGame(static_cast<size_t>(t.count) * 128);
         if (!stubs) return n;
         for (int i = 0; i < t.count; ++i, ++id) {
+            if (!WrapEntry(ti, i, s.mapAudited)) continue;
             void** const pair = reinterpret_cast<void**>(t.at + i * 16);
             const char* const name = static_cast<const char*>(pair[0]);
-            if (&t == &s.tables[0]) {
+            if (ti == 0) {
                 if (strcmp(name, "ClearAllMapIcons") == 0) g_idClearThunk = id;
                 if (strcmp(name, "UpdateOrCreateMapIcons") == 0) g_idIconsThunk = id;
                 if (strcmp(name, "UpdateIconsSizeSmoothly") == 0) g_idSizeThunk = id;
@@ -970,6 +1039,7 @@ int PatchTables(const Sites& s)
         VirtualProtect(stubs, static_cast<size_t>(t.count) * 128, PAGE_EXECUTE_READ, &old);
         FlushInstructionCache(GetCurrentProcess(), stubs, static_cast<size_t>(t.count) * 128);
         for (int i = 0; i < t.count; ++i) {
+            if (!WrapEntry(ti, i, s.mapAudited)) continue;
             void** const pair = reinterpret_cast<void**>(t.at + i * 16);
             if (WritePointer(pair + 1, stubs + i * 128)) ++n;
         }
@@ -1024,7 +1094,7 @@ bool InstallOn(const GameModule& game, const Sites& s)
     for (int i = 0; i < kNumEntries; ++i) ok += PatchJmp(s.entries[i], kEntries[i].copy, region + (3 + i) * kSlot + 48);
     for (int c = 0; c < 2; ++c) ok += PatchCall(s.calls[c], region + (3 + kNumEntries + c) * kSlot);
     const int tabled = PatchTables(s);
-    const int tableTotal = s.tables[0].count + s.tables[1].count + s.tables[2].count;
+    const int tableTotal = WrappedCount(s);
     if (ok != static_cast<int>(kN) || tabled != tableTotal) {
         // A part could not be written: never keep or hold anything (the hooks that are in pass straight through in mode 0).
         Log("[mapspread] MapPopupSpread: %d of %zu code sites, %d of %d native-table entries written: switched off", ok, kN, tabled,
@@ -1034,10 +1104,15 @@ bool InstallOn(const GameModule& game, const Sites& s)
         return false;
     }
     g_installed = true;
+    int mapWrapped = 0;
+    for (int i = 0; i < s.tables[0].count; ++i) mapWrapped += WrapEntry(0, i, s.mapAudited);
     Log("[mapspread] MapPopupSpread installed: UpdateOrCreateMapIcons exe+0x%llX, ClearAllMapIcons exe+0x%llX, %zu code sites, "
-        "native tables %d + %d + %d entries (map widget, icon filter, icon)",
-        static_cast<unsigned long long>(s.loop - game.base), static_cast<unsigned long long>(s.clear - game.base), kN,
-        s.tables[0].count, s.tables[1].count, s.tables[2].count);
+        "native-table entries wrapped: map widget %d of %d (%s), icon filter %d, icon %d",
+        static_cast<unsigned long long>(s.loop - game.base), static_cast<unsigned long long>(s.clear - game.base), kN, mapWrapped,
+        s.tables[0].count,
+        s.mapAudited ? "the natives that touch icons; loads, unloads and getters of the local map left as they are"
+                     : "all: not the audited table",
+        s.tables[1].count, s.tables[2].count);
     return true;
 }
 bool g_offForGood = false;  // installed but switched off (a write failed or ProcessEvent's slot did not match)
@@ -1150,6 +1225,19 @@ const char* MapSpreadTestDiscover(const GameModule& game, MapSpreadFound* out)
         out->peSlot = s.peSlot;
         out->filterTable = s.tables[1].at;
         out->iconTable = s.tables[2].at;
+        out->mapTable = s.tables[0].at;
+        out->mapAudited = s.mapAudited;
+        for (int t = 0; t < 3; ++t)
+            for (int i = 0; i < 256; ++i) out->wrapped[t][i] = i < s.tables[t].count && WrapEntry(t, i, s.mapAudited);
+        // the same sites InstallOn writes: 3 detours + kNumEntries readers (inline E9) and 2 call sites
+        out->inlinePatches = 3 + kNumEntries;
+        out->codeSites = 3 + kNumEntries + 2;
+        static_assert(3 + kNumEntries <= 16, "inlineAt has room for every inline patch");
+        out->inlineAt[0] = s.loop;
+        out->inlineAt[1] = s.size;
+        out->inlineAt[2] = s.clear;
+        for (int i = 0; i < kNumEntries; ++i) out->inlineAt[3 + i] = s.entries[i];
+        out->iconsThunk = s.tables[0].count ? ThunkIn(s.tables[0], "UpdateOrCreateMapIcons") : nullptr;
     }
     return ok ? nullptr : (s.missing ? s.missing : "?");
 }
@@ -1403,6 +1491,31 @@ int MapSpreadTestLogic()
     }
     // 11: public values keep only the drop and reuse bits
     check(Clean(5) == 5 && Clean(7) == 5 && Clean(2) == 0 && Clean(-1) == 0 && Clean(32) == 0);
+    // 13 (mapshrink): the audited map table (same names, same order) wraps only its icon natives; one name different, or one
+    // entry more or less, wraps every entry; the icon filter's and icon's tables always wrap every entry
+    {
+        static const char* fakeNames[kNumMapNatives + 1];
+        alignas(16) static uint8_t fakeTable[(kNumMapNatives + 1) * 16];
+        for (int i = 0; i < kNumMapNatives; ++i) {
+            fakeNames[i] = kMapNatives[i].name;
+            memcpy(fakeTable + i * 16, &fakeNames[i], 8);
+        }
+        NativeTable ft{fakeTable, kNumMapNatives};
+        const bool audited = MapTableAudited(ft);
+        int wrappedMap = 0;
+        for (int i = 0; i < kNumMapNatives; ++i) wrappedMap += WrapEntry(0, i, audited);
+        const bool decisionWrapped = WrapEntry(0, 3, audited) && WrapEntry(0, 58, audited) && WrapEntry(0, 61, audited);
+        static const char renamed[] = "GetCurrentZoomValue2";
+        const char* const keep = fakeNames[5];
+        fakeNames[5] = renamed;
+        memcpy(fakeTable + 5 * 16, &fakeNames[5], 8);
+        const bool renamedAudited = MapTableAudited(ft);
+        fakeNames[5] = keep;
+        memcpy(fakeTable + 5 * 16, &fakeNames[5], 8);
+        const bool shorter = MapTableAudited(NativeTable{fakeTable, kNumMapNatives - 1});
+        check(audited && wrappedMap == 28 && decisionWrapped && !renamedAudited && !shorter && WrapEntry(0, 5, false) &&
+              WrapEntry(1, 0, true) && WrapEntry(2, 7, true) && !WrapEntry(0, 5, true));
+    }
     for (int i = 0; i < 4; ++i) {
         g_propCache[i] = savedProp[i];
         g_playerCache[i] = savedPlayer[i];

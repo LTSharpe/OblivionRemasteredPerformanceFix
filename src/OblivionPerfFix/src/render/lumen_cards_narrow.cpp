@@ -441,8 +441,16 @@ bool Decide(const void* lsd, const void* scene, void* ub, uint32_t numIndices)
 // Every UpdateLumenScene, right before the lists are emptied, Lumen active or not. Whatever is listed and Decide didn't go through (it wasn't reached, or the group came later)
 // wasn't sent: stock would heal it at the primitive's next queue, so that primitive's next send is whole. The counters say how often a call has listed groups with no upload,
 // and how often queue entries are lost without an upload: the second is stock's behaviour in water frames, see findings lumenfixa.
+std::atomic<void (*)(const void*)> g_resetObserver{nullptr};  // LumenScanCull: sees the lists before they are emptied
+std::atomic<bool> g_resetPatched{false};
+void ResetOnlyHook(const void* lsdv)  // the reset-only patch's target (LumenCardsNarrow not installed)
+{
+    if (auto* const f = g_resetObserver.load(std::memory_order_acquire)) f(lsdv);
+}
+
 void ResetHook(const void* lsdv)
 {
+    if (auto* const f = g_resetObserver.load(std::memory_order_acquire)) f(lsdv);
     const uint8_t* const lsd = static_cast<const uint8_t*>(lsdv);
     if (!g_ready.load(std::memory_order_relaxed)) { g_ran = false; return; }
     if (!SameThread()) { g_ran = false; return; }
@@ -857,6 +865,7 @@ bool InstallLumenCardsNarrow(bool beforeGameCode, int key)
     g_lastMode = g_mode.load();
     // Decide stays off (g_ready) until every patch is in. The loop goes last: a failure before it leaves the game's loop running as stock.
     if (!PatchJmp(f.resetSite, kResetLen, mem + kOffReset)) { Log("[lumennarrow] LumenCardsNarrow: could not patch the lists' reset: stays stock"); return false; }
+    g_resetPatched = true;
     if (!PatchJmp(f.site, kSiteLen, mem)) { Log("[lumennarrow] LumenCardsNarrow: could not patch the loop: stays stock (the reset hook already in does nothing)"); return false; }
     g_ready = true;
     const char* const modes = "0 stock, 1 fix";
@@ -864,6 +873,40 @@ bool InstallLumenCardsNarrow(bool beforeGameCode, int key)
         "group layout checked; mode %d (%s; live)",
         static_cast<unsigned>(f.site - game.base), static_cast<unsigned>(f.exitTo - game.base), static_cast<unsigned>(f.resetSite - game.base), g_n.list, g_n.groupList, g_n.groupsData, g_n.extBuffer,
         g_n.upload, g_mode.load(), modes);
+    return true;
+}
+
+// LumenScanCull (public since 1.4.0): an observer at the lists' reset. Through LumenCardsNarrow's reset stub when that is in (ResetHook calls it first),
+// else a reset-only stub at the same site (start-up only, after InstallLumenCardsNarrow).
+bool LumenListsResetObserve(void (*observer)(const void*), const char** why)
+{
+    if (!g_resetPatched.load()) {
+        const GameModule& game = Game();
+        Sites f{};
+        if (!Discover(game, &f, why)) return false;
+        if (!DiscoverReset(game, f.o.list, f.o.groupList, &f.resetSite, why)) return false;
+        constexpr size_t kOffU = 64, kOffTable = kOffU + kUnwindMax, kBlock = kOffTable + sizeof(RUNTIME_FUNCTION);
+        uint8_t* const mem = AllocNearGame(kBlock);
+        if (!mem) { *why = "no memory near the game's code"; return false; }
+        const size_t len = BuildResetStub(mem, reinterpret_cast<const void*>(&ResetOnlyHook), f.resetSite, f.resetSite + kResetLen);
+        if (len > kOffU) { *why = "stub too long"; return false; }
+        const uint8_t* const info = FindUnwindInfo(game, f.resetSite);
+        auto* const table = reinterpret_cast<RUNTIME_FUNCTION*>(mem + kOffTable);
+        table[0].BeginAddress = 0;
+        table[0].EndAddress = static_cast<DWORD>(len);
+        table[0].UnwindData = static_cast<DWORD>(kOffU);
+        const bool unwind = info && BuildUnwind(mem + kOffU, info);
+        DWORD old;
+        VirtualProtect(mem, kBlock, PAGE_EXECUTE_READ, &old);
+        FlushInstructionCache(GetCurrentProcess(), mem, kBlock);
+        if (!unwind || !RtlAddFunctionTable(table, 1, reinterpret_cast<DWORD64>(mem))) Log("[lumennarrow] no unwind data for the reset-only stub");
+        g_resetObserver = observer;  // before the patch: the stub calls it from the first reset on
+        if (!PatchJmp(f.resetSite, kResetLen, mem)) { g_resetObserver = nullptr; *why = "could not patch the lists' reset"; return false; }
+        g_resetPatched = true;
+        Log("[lumennarrow] the lists' reset (exe+0x%X) patched for an observer only (LumenCardsNarrow not installed)", static_cast<unsigned>(f.resetSite - game.base));
+        return true;
+    }
+    g_resetObserver = observer;
     return true;
 }
 

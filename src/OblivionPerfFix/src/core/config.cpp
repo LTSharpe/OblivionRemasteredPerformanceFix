@@ -90,6 +90,7 @@ Config LoadConfig(const wchar_t* iniPath)
     c.bodyRemovalSpreadNearM = get(L"Fixes", L"BodyRemovalSpreadNearM", c.bodyRemovalSpreadNearM);
     c.streamRegisterGranularity = get(L"Fixes", L"StreamRegisterGranularity", c.streamRegisterGranularity);
     c.lumenCardsNarrow = get(L"Fixes", L"LumenCardsNarrow", c.lumenCardsNarrow);
+    c.lumenScanCull = get(L"Fixes", L"LumenScanCull", c.lumenScanCull);
     c.repathParallel = get(L"Fixes", L"RepathParallel", c.repathParallel);
     c.waterInfoSkip = get(L"Fixes", L"WaterInfoSkip", c.waterInfoSkip);
     c.waterInfoSpread = get(L"Fixes", L"WaterInfoSpread", c.waterInfoSpread);
