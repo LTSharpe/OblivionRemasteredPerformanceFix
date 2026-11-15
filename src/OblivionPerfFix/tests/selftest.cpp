@@ -21,6 +21,7 @@
 #include <initializer_list>
 #include <mutex>
 #include <algorithm>
+#include <tuple>
 #include <string>
 #include <thread>
 #include <vector>
@@ -559,6 +560,7 @@ static uint64_t HashWords(uint64_t seed, const void* data, size_t bytes)
 #include "selftest_rigtmpl.h"       // RigImportTemplate: discovery, offsets, the RemoveElement guard, cap and table with fakes
 #include "selftest_farpawn.h"       // FarPawnMoveHalfRate / FarHorseMove: discovery, cadence, root motion, input mean, fakes
 #include "selftest_createpreload.h" // CreatePreload: sites, the form-asset map readers with a fake holder, per-command wait count
+#include "selftest_impactpreload.h" // ImpactPreload: sites, the preload state machine with fakes
 #include "selftest_npcbodies.h"     // NpcBodiesOneLock: sites and the one-hold wrapper with a fake scene lock
 #include "selftest_rtscene.h"       // RtSceneBufferKeep: sites, patch and the stub's decisions
 #include "selftest_rtbatch.h"       // RayTracingBuildBatch: sites, patch and the queue decision
@@ -574,7 +576,10 @@ static uint64_t HashWords(uint64_t seed, const void* data, size_t bytes)
 #include "selftest_clothreg.h"    // ClothRegisterLite: sites, lite builds and their completion with fakes
 #include "selftest_clothdefer.h"     // ClothBuildDefer: sites, hooks and the defer rule (after ClothRegisterLite)
 #include "selftest_bodyspread.h"   // BodyRemovalSpread: sites on the mapped exe, the queue / drain / drop logic with fakes
+#include "selftest_epicport.h"     // StreamOutEndPlaySlice, ResetLoadersNoFlush: sites on the mapped exe, the hooks with fakes
 #include "selftest_streamgran.h"    // StreamRegisterGranularity: the cvar's int on the mapped exe, set / live / left alone
+#include "selftest_indirectargs.h"  // IndirectArgBufferPool: the cvar's int on the mapped exe, start-up rules
+#include "selftest_filereads.h"     // ParallelFileReads: the reader on the mapped exe, the replacement against stand-ins and a real file
 #include "selftest_lumennarrow.h"   // LumenCardsNarrow: sites, refusal, stub, unwind, the decision with fakes (lab: the proof)
 #include "selftest_lumenscan.h"    // LumenScanCull: sites, the call-site stub, the cull against the game's own scan body on fakes
 #include "selftest_waterinfo_skip.h"  // WaterInfoSkip: layout reads on the mapped exe, the same-input decision with fakes
@@ -589,6 +594,7 @@ static uint64_t HashWords(uint64_t seed, const void* data, size_t bytes)
 #include "selftest_loosemiss.h"     // LooseMissCache: discovery, install, the finder's checks with a fake _access
 #include "selftest_animpar.h"      // AnimTeardownParallel's shapes and the helper queue with fakes
 #include "selftest_cellbuf.h"      // CellBufferPacedEvict's shapes, the clamp stub and the buffer LRU with and without the fix
+#include "selftest_rowpreload.h"   // RowPreload: sites (CellBufferPacedEvict's too) and the preload logic with fakes
 #include "selftest_vramcounter.h"  // VramCounterFix: the Show VRAM counter
 #include "selftest_hangcapture.h"  // GpuPassMarkers and the GPU crash report's per-queue DRED / history lines
 #include "selftest_shaderscreen.h"  // ShaderScreenAfterDriverChange
@@ -1050,6 +1056,110 @@ const uint8_t kCaller[] = {0x55, 0x48, 0x89, 0xCD, 0x49, 0x89, 0xD2, 0x4D, 0x89,
                            0x41, 0xFF, 0xD3, 0x4C, 0x31, 0xD0, 0x5D, 0xC3};
 using CallerFn = uint64_t (*)(void* rbp, const void* view, void* stub);
 }  // namespace fgc
+
+// CellEvictSplit (fix102, rev102b M1): fake references, cell, ProcessLists and lock for CellEvictSplitStep's decision.
+// A reference: vtable +0 (vt+0x310 = its base form, vt+0x2D0 = Set3D), 3D at +0x78, our base form pointer at +0x80. Set3D
+// records the call and clears +0x78 (unless keep3d); it can raise the arrow count after the n-th call. The base form
+// call can add a MagicHitEffect targeting another reference (a hit effect created between the walk and the call). The
+// fake lock counts its depth: every base-form and Set3D call must run under it (rev102b S1).
+namespace ces {
+struct Node {
+    void* item;
+    Node* next;
+};
+alignas(16) uint8_t refs[12][0x100];
+alignas(16) uint8_t cell[0x200];
+Node nodes[16];
+uint8_t npcBase[16], creaBase[16], statBase[16];
+void* vt[0x320 / 8];
+void* player = nullptr;
+volatile int32_t arrows = 0;
+int depth = 0, locks = 0, unlocked = 0, unlockedCalls = 0;
+std::vector<int> calls;
+bool keep3d = false;
+int arrowAfter = -1;               // Set3D call count after which the arrow count becomes 1
+int hitOnBaseOf = -1, hitTarget = -1;  // the base-form call of ref hitOnBaseOf adds a hit effect on ref hitTarget
+// ProcessLists +0x90: {item, next}; a hit effect: vt (vt[1] = its RTTI), target at +0x30
+alignas(16) uint8_t pl[0x100];
+uint8_t* plPtr = pl;
+alignas(16) uint8_t effects[4][0x40];
+Node effNodes[4];
+int nEff = 0;
+alignas(16) uint8_t rttiHit[16], rttiChild[16];
+void* effVt[2];
+int Index(const void* ref)
+{
+    for (int i = 0; i < 12; ++i)
+        if (ref == refs[i]) return i;
+    return -1;
+}
+void AddHit(int target)
+{
+    uint8_t* const e = effects[nEff];
+    memset(e, 0, sizeof effects[0]);
+    *reinterpret_cast<void***>(e) = effVt;
+    *reinterpret_cast<void**>(e + 0x30) = refs[target];
+    // the list's head node is embedded at pl+0x90 (as the game's); later items are chained from it
+    Node* const head = reinterpret_cast<Node*>(pl + 0x90);
+    if (!nEff) {
+        *head = {e, nullptr};
+    } else {
+        effNodes[nEff] = {e, nullptr};
+        Node* n = head;
+        while (n->next) n = n->next;
+        n->next = &effNodes[nEff];
+    }
+    ++nEff;
+}
+const uint8_t* Rtti(const void*) { return rttiChild; }
+const uint8_t* BaseOf(const void* ref)
+{
+    if (depth <= 0) ++unlocked;
+    if (Index(ref) == hitOnBaseOf && hitTarget >= 0) {
+        AddHit(hitTarget);
+        hitOnBaseOf = -1;
+    }
+    return *reinterpret_cast<const uint8_t* const*>(static_cast<const uint8_t*>(ref) + 0x80);
+}
+void Set3D(void* ref, void*)
+{
+    if (depth <= 0) ++unlockedCalls;
+    calls.push_back(Index(ref));
+    if (!keep3d) *reinterpret_cast<void**>(static_cast<uint8_t*>(ref) + 0x78) = nullptr;
+    if (arrowAfter >= 0 && static_cast<int>(calls.size()) >= arrowAfter) arrows = 1;
+}
+void Lock(void*, void*) { ++depth, ++locks; }
+void Unlock(void*, void*) { --depth; }
+// kinds: 'n' NPC_, 'c' CREA, 's' static, 'p' the player (an NPC_), 'x' an actor without 3D
+void Build(const char* kinds)
+{
+    memset(cell, 0, sizeof cell);
+    memset(pl, 0, sizeof pl);
+    nEff = 0;
+    calls.clear();
+    arrows = 0, depth = 0, locks = 0, unlocked = 0, unlockedCalls = 0;
+    keep3d = false, arrowAfter = -1, hitOnBaseOf = -1, hitTarget = -1;
+    npcBase[8] = 0x23, creaBase[8] = 0x24, statBase[8] = 0x1F;
+    vt[0x310 / 8] = reinterpret_cast<void*>(&BaseOf);
+    vt[0x2D0 / 8] = reinterpret_cast<void*>(&Set3D);
+    effVt[1] = reinterpret_cast<void*>(&Rtti);
+    *reinterpret_cast<const uint8_t**>(rttiChild + 8) = rttiHit;
+    *reinterpret_cast<const uint8_t**>(rttiHit + 8) = nullptr;
+    player = nullptr;
+    const int n = static_cast<int>(strlen(kinds));
+    for (int i = 0; i < n; ++i) {
+        uint8_t* const ref = refs[i];
+        memset(ref, 0, sizeof refs[0]);
+        *reinterpret_cast<void***>(ref) = vt;
+        *reinterpret_cast<void**>(ref + 0x78) = kinds[i] == 'x' ? nullptr : ref;  // any non-null "3D"
+        *reinterpret_cast<const uint8_t**>(ref + 0x80) = kinds[i] == 'c' ? creaBase : kinds[i] == 's' ? statBase : npcBase;
+        if (kinds[i] == 'p') player = ref;
+        nodes[i].item = ref;
+        nodes[i].next = i + 1 < n ? &nodes[i + 1] : nullptr;
+    }
+    if (n) *reinterpret_cast<Node*>(cell + 0xB8) = {nodes[0].item, nodes[0].next};
+}
+}  // namespace ces
 
 int wmain(int argc, wchar_t** argv)
 {
@@ -2950,8 +3060,15 @@ int wmain(int argc, wchar_t** argv)
     skinsss::Run(game);
     // BodyRemovalSpread (selftest_bodyspread.h): discovery only on the mapped exe (nothing installed) and its logic with fakes.
     BodySpreadRun(game);
+    // StreamOutEndPlaySlice / ResetLoadersNoFlush (selftest_epicport.h): discovery on the mapped exe (nothing patched), hooks with fakes.
+    EpicPortRun(game);
     // StreamRegisterGranularity (selftest_streamgran.h): the cvar's bound int on the mapped exe and the set rules.
     StreamGranRun();
+    // IndirectArgBufferPool (selftest_indirectargs.h): the cvar's int on the mapped exe and the start-up rules (put back to 0).
+    IndirectArgsRun();
+    // ParallelFileReads (selftest_filereads.h): the engine's reader, its slot, Pop and ServiceNotify on the mapped exe (nothing
+    // patched); the replacement run against stand-ins for the engine's objects and a real temporary file.
+    FileReadsRun(game);
     // LumenCardsNarrow (selftest_lumennarrow.h): discovery, refusal and patch on a copy, the stubs, the decision with fakes.
     LumenNarrowRun(game);
     // LumenScanCull (selftest_lumenscan.h): sites (nothing installed), the stub, and the cull run against the mapped exe's scan body
@@ -2968,7 +3085,9 @@ int wmain(int argc, wchar_t** argv)
     // AnimTeardownParallel (lab prototype): dying NPC animation data's interpolators on helper threads (selftest_animpar.h).
     apar::Run(game);
     // CellBufferPacedEvict (lab prototype): spare cell buffer slots, overflow torn down one cell per OT frame (selftest_cellbuf.h); after
-    // the ledger's test, which detours the same grid-change entry.
+    // the ledger's test, which detours the same grid-change entry. RowPreload first: it reads CellBufferPacedEvict's real
+    // sites, which the cell buffer test replaces with fakes.
+    rpl::RowPreloadSelfTest(game);
     cbuf::Run(game);
     // HdrMenuRows: the engine helpers it calls (selftest_hdrmenu.h).
     hdrm::Run(game);
@@ -3474,6 +3593,8 @@ int wmain(int argc, wchar_t** argv)
         Check(at(pi.delegateVtable[2], 0x7D72370) && at(pi.delegateExecIfSafe[2], 0x47FBC10) && pi.delegateSize[2] == 0x90 &&
                   at(pi.delegateCopyCtor[2], 0x47EB6E0), "pacing: hair delegate vtable exe+0x7D72370, size 0x90, copy constructor exe+0x47EB6E0");
         Check(at(pi.weakGet, 0x1126290), "pacing: FWeakObjectPtr::Get exe+0x1126290");
+        Check(pi.hairActorWeak == 0x20,
+              "pacing: PacingHairActor: the hair lambda tests and Gets the capture's first weak pointer (its mesh component), +0x20");
         Check(at(pi.getWorld, 0x37E3350) && at(pi.gEngine, 0x927E7D8) && at(pi.getPc, 0x31ABE90) && at(pi.getPawn, 0x357D290),
               "pacing: GetCurrentPlayWorld, GEngine, GetPlayerController, GetPawnOrSpectator");
         Check(pi.rootOffset == 0x1A0 && pi.locationOffset == 0x280, "pacing: RootComponent +0x1A0, location +0x280");
@@ -4006,6 +4127,119 @@ int wmain(int argc, wchar_t** argv)
             SetNpcPacing(true, 4, 4096, 15, false);
             PcPost(kFakeEnd, 0, 0);
             gtFrame();
+            // PacingFlowProgress (drainfix 2026-11-12), (1): two OT frames of far creates (6 + 4); the first frame runs one
+            // and leaves the rest owed, so the flow waits with an older OT frame owed (lag 1) while one create runs per
+            // frame. Key 0: that is no progress, so after 3 held frames the drain runs the rest of the first OT frame and
+            // the whole second one in one frame; key 1: one create per frame, the flow runs after the last.
+            const auto lagFlow = [&](bool on, int base, int32_t flowKey, int* frames, int* maxPerFrame) {
+                SetNpcPacingFlowProgress(on);
+                for (int k = 0; k < 6; ++k) PcPost(kFakeCreate, base + k, 10000, distant);
+                PcPost(kFakeEnd, 0, 0);
+                for (int k = 0; k < 4; ++k) PcPost(kFakeCreate, base + 6 + k, 10000, distant);
+                PcPost(kFakeEnd, 0, 0);
+                const size_t b0 = g_pcRan.size();
+                g_pcWriter[0x4E] = 1;
+                run(fakeMgr, -1);  // frame 1: one create, the rest owed; no flow yet
+                end(fakeMgr, nullptr, 2, 0);
+                *maxPerFrame = static_cast<int>(g_pcRan.size() - b0);
+                bool done = false;
+                *frames = 1;
+                while (!done && *frames < 25) {
+                    const size_t b = g_pcRan.size();
+                    g_pcWriter[0x4E] = 1;
+                    run(fakeMgr, -1);
+                    done = run(fakeMgr, flowKey) != 3;
+                    end(fakeMgr, nullptr, 2, 0);
+                    int c = 0;
+                    for (size_t i = b; i < g_pcRan.size(); ++i) c += g_pcRan[i] >= base && g_pcRan[i] < base + 10;
+                    *maxPerFrame = std::max(*maxPerFrame, c);
+                    ++*frames;
+                }
+                SetNpcPacingFlowProgress(false);
+                return done;
+            };
+            {
+                int fOff = 0, pOff = 0, fOn = 0, pOn = 0;
+                const size_t q0 = g_pcRan.size();
+                const bool dOff = lagFlow(false, 470, 1006, &fOff, &pOff);
+                const bool okOff = dOff && g_pcRan.size() == q0 + 11 && g_pcRan.back() == 1006 && !g_pcDeadlock &&
+                                   NpcPacingTestRead().S == NpcPacingTestRead().E;
+                PcPost(kFakeEnd, 0, 0);
+                gtFrame();
+                const size_t q1 = g_pcRan.size();
+                const bool dOn = lagFlow(true, 490, 1007, &fOn, &pOn);
+                std::vector<int> wantOn;
+                for (int k = 0; k < 10; ++k) wantOn.push_back(490 + k);
+                wantOn.push_back(1007);
+                const bool okOn = dOn && std::vector<int>(g_pcRan.begin() + q1, g_pcRan.end()) == wantOn && !g_pcDeadlock &&
+                                  NpcPacingTestRead().S == NpcPacingTestRead().E && NpcPacingTestRead().heldFrames == 0;
+                printf("      (PacingFlowProgress, older frame owed: key 0 %d frames, max %d creates per frame; key 1 %d frames, max %d)\n",
+                       fOff, pOff, fOn, pOn);
+                Check(okOff && pOff >= 3, "pacing: PacingFlowProgress=0: with an older OT frame owed the flow drains after 3 frames (as before)");
+                Check(okOn && pOn == 1 && fOn == 10,
+                      "pacing: PacingFlowProgress=1: creates with an older OT frame owed count as progress: one per frame, then the flow");
+                PcPost(kFakeEnd, 0, 0);
+                gtFrame();
+            }
+            // PacingFlowProgress (2): the queue's head create waits for its loads (CreatePreload, faked: 4 offers) while a
+            // flow waits. Key 0: no progress, the drain at 3 held frames runs it with its load in flight; key 1: the flow
+            // keeps waiting, the create runs in the frame's own run once loaded, then the flow.
+            const auto loadFlow = [&](bool on, int id, int32_t flowKey, int* frames) {
+                SetNpcPacingFlowProgress(on);
+                CreatePreloadTestFake(4);
+                PcPost(kFakeCreate, id, 10000, distant);
+                PcPost(kFakeEnd, 0, 0);
+                bool done = false;
+                *frames = 0;
+                while (!done && *frames < 20) {
+                    g_pcWriter[0x4E] = 1;
+                    run(fakeMgr, -1);
+                    done = run(fakeMgr, flowKey) != 3;
+                    end(fakeMgr, nullptr, 2, 0);
+                    ++*frames;
+                }
+                SetNpcPacingFlowProgress(false);
+                const bool ok = done && g_pcRan.size() >= 2 && g_pcRan[g_pcRan.size() - 2] == id && g_pcRan.back() == flowKey;
+                CreatePreloadTestFake(0);
+                return ok;
+            };
+            {
+                int fOff = 0, fOn = 0;
+                const bool okOff = loadFlow(false, 520, 1008, &fOff);
+                PcPost(kFakeEnd, 0, 0);
+                gtFrame();
+                const bool okOn = loadFlow(true, 521, 1009, &fOn);
+                printf("      (PacingFlowProgress, head create loading 4 frames: key 0 flow after %d frames, key 1 after %d)\n", fOff, fOn);
+                Check(okOff && fOff == 4 && !g_pcDeadlock,
+                      "pacing: PacingFlowProgress=0: a create waiting for its loads is no progress: drained at 3 held frames (as before)");
+                Check(okOn && fOn == 5 && !g_pcDeadlock && NpcPacingTestRead().S == NpcPacingTestRead().E,
+                      "pacing: PacingFlowProgress=1: the flow waits while the head create loads; it runs in the frame's own run, then the flow");
+                PcPost(kFakeEnd, 0, 0);
+                gtFrame();
+            }
+            // CreatePreloadEarly: a far create held back for the budget asks for its loads at once (key 1), not with 0
+            {
+                SetCreatePreloadEarly(false);
+                CreatePreloadTestFake(0);
+                for (int k = 0; k < 2; ++k) PcPost(kFakeCreate, 530 + k, 10000, distant);
+                PcPost(kFakeEnd, 0, 0);
+                run(fakeMgr, -1);  // 530 runs, 531 is held back for the budget
+                end(fakeMgr, nullptr, 2, 0);
+                const int asksOff = CreatePreloadTestFake(-1);
+                SetCreatePreloadEarly(true);
+                for (int k = 0; k < 2; ++k) PcPost(kFakeCreate, 532 + k, 10000, distant);
+                PcPost(kFakeEnd, 0, 0);
+                int asksOn = 0;
+                for (int fr = 0; fr < 4; ++fr) {  // 531; 532 (533 held back: asks); 533; the owed ends
+                    if (fr > 0) PcPost(kFakeEnd, 0, 0);
+                    run(fakeMgr, -1);
+                    end(fakeMgr, nullptr, 2, 0);
+                    asksOn += CreatePreloadTestFake(-1);
+                }
+                SetCreatePreloadEarly(false);
+                Check(asksOff == 0 && asksOn >= 1 && !g_pcDeadlock && NpcPacingTestRead().S == NpcPacingTestRead().E,
+                      "pacing: CreatePreloadEarly: a far create held back for the budget requests its loads (key 1 only)");
+            }
             // switched off (PacingFlowWait=0): the flow drains the queue at once, as in 0.13.x
             SetNpcPacing(true, 4, 4096, 15, false, false);
             const size_t r5 = g_pcRan.size();
@@ -4169,6 +4403,617 @@ int wmain(int argc, wchar_t** argv)
                   "pacing: PacingOwnerWalk=1: the walk goes on to its outer, a far actor: the first runs, the others wait, in order");
         }
 
+        // PacingHairActor (npcunits 2026-11-12): two appearance units of a far unseen actor, then four hair units whose
+        // owner is the hair asset (no actor in its outers) and whose capture holds the hair mesh component (an invalid word
+        // at the root-component offset, its outer the actor). Off: the hair units cannot be resolved, queue as near behind
+        // the second appearance and all run in its frame (the Imperial City Waterfront's 14 hair units in one frame); on:
+        // they resolve to the far actor and wait under the budget, in order
+        {
+            static FakeActor haActor{}, haRoot{}, haComp{}, haAsset{};
+            *reinterpret_cast<void**>(haActor.bytes + 0x1A0) = &haRoot;
+            *reinterpret_cast<void**>(haRoot.bytes + 0x20) = &haActor;
+            *reinterpret_cast<double*>(haRoot.bytes + 0x280) = 30000.0;
+            *reinterpret_cast<uintptr_t*>(haComp.bytes + 0x1A0) = 0x10;  // no pointer: reading it as a root faults
+            *reinterpret_cast<void**>(haComp.bytes + 0x20) = &haActor;
+            struct FakeHairInst { void* vtable; uint64_t pad; uint64_t handle; void* weak; int id; int pad2; uint64_t costUs; void* comp; };
+            static_assert(offsetof(FakeHairInst, comp) == 0x30, "fake hair delegate layout");
+            NpcPacingTestFakes fh = f;
+            fh.sizeOverride[2] = sizeof(FakeHairInst);
+            fh.hairActorWeak = 0x30;
+            NpcPacingTestSetup(fh);
+            auto hairHook = reinterpret_cast<DelHook>(pi.execIfSafeHook[2]);
+            static FakeDelInst ha[2]{};
+            static FakeHairInst hh[4]{};
+            auto hairRun = [&](bool on, int idBase, size_t* inSecondFrame, size_t* maxLater, int* framesUsed) {
+                SetNpcPacingHairActor(on);
+                for (int k = 0; k < 2; ++k) {
+                    ha[k] = FakeDelInst{};
+                    ha[k].vtable = reinterpret_cast<void*>(0x1234);
+                    ha[k].weak = &haActor;
+                    ha[k].id = idBase + k;
+                    ha[k].costUs = 6000;
+                }
+                for (int k = 0; k < 4; ++k) {
+                    hh[k] = FakeHairInst{};
+                    hh[k].vtable = reinterpret_cast<void*>(0x1234);
+                    hh[k].weak = &haAsset;
+                    hh[k].id = idBase + 2 + k;
+                    hh[k].costUs = 1500;
+                    hh[k].comp = &haComp;
+                }
+                g_pcDelRan.clear();
+                PcPost(kFakeEnd, 0, 0);
+                run(fakeMgr, -1);
+                del(&ha[0]);
+                del(&ha[1]);
+                for (int k = 0; k < 4; ++k) hairHook(&hh[k]);
+                end(fakeMgr, nullptr, 2, 0);
+                *inSecondFrame = 0;
+                *maxLater = 0;
+                *framesUsed = 0;
+                for (int k = 0; k < 12 && NpcPacingTestRead().fifo; ++k) {
+                    const size_t d0 = g_pcDelRan.size();
+                    PcPost(kFakeEnd, 0, 0);
+                    run(fakeMgr, -1);
+                    end(fakeMgr, nullptr, 2, 0);
+                    const size_t n = g_pcDelRan.size() - d0;
+                    if (k == 0) *inSecondFrame = n;
+                    else *maxLater = std::max(*maxLater, n);
+                    ++*framesUsed;
+                }
+            };
+            size_t second = 0, later = 0;
+            int haFrames = 0;
+            hairRun(false, 110, &second, &later, &haFrames);
+            Check(second == 5 && g_pcDelRan == std::vector<int>({110, 111, 112, 113, 114, 115}) && NpcPacingTestRead().fifo == 0,
+                  "pacing: PacingHairActor=0: hair units owned by their asset count as near: all four run in the second "
+                  "appearance's frame");
+            hairRun(true, 120, &second, &later, &haFrames);
+            printf("      (PacingHairActor=1: second frame %zu units, later frames at most %zu, %d frames)\n", second, later, haFrames);
+            Check(second == 1 && later >= 1 && later <= 3 && haFrames >= 3 &&
+                      g_pcDelRan == std::vector<int>({120, 121, 122, 123, 124, 125}) && NpcPacingTestRead().fifo == 0 &&
+                      !g_pcDeadlock && NpcPacingTestRead().S == NpcPacingTestRead().E,
+                  "pacing: PacingHairActor=1: hair units resolve to their far actor through the mesh component and wait under "
+                  "the budget, in order");
+            // rev94a N4: the hair walk is guarded on its own, also with PacingOwnerWalk=0 (the component's root word faults)
+            SetNpcPacingOwnerWalk(false);
+            hairRun(true, 130, &second, &later, &haFrames);
+            SetNpcPacingOwnerWalk(true);
+            Check(second == 1 && later >= 1 && later <= 3 && haFrames >= 3 &&
+                      g_pcDelRan == std::vector<int>({130, 131, 132, 133, 134, 135}) && NpcPacingTestRead().fifo == 0 &&
+                      !g_pcDeadlock && NpcPacingTestRead().S == NpcPacingTestRead().E,
+                  "pacing: PacingHairActor=1 with PacingOwnerWalk=0: the hair walk is still guarded and resolves the far actor");
+            SetNpcPacingHairActor(false);
+            NpcPacingTestFakes restore = f;  // rev94a N4: the fake hair offset (0x30) does not stay set for later tests
+            restore.hairActorWeak = pi.hairActorWeak;
+            NpcPacingTestSetup(restore);
+        }
+
+        // PacingBaseGate (basegate 2026-11-12): frames are cap sleep (NpcPacingTestFrameEdge) -> RunSession(-1) -> the actor
+        // tick (the clock moves by the frame's base) -> the post-actor tick (end) -> delegate arrivals -> 1.5 ms to the next
+        // sleep. 8 ms far appearance units arriving on 20 ms frames: off, each runs in its frame (29.5 ms frames); on (25 ms),
+        // they wait for frames with room and run there one per frame, in order; at the lag bound they run one per frame, not
+        // all at once; a near unit never waits; the queue runs at once when the frame may not defer; live off = today's rule
+        {
+            PcActor(0, 30000.0);
+            PcActor(1, 500.0);
+            NpcPacingTestFakes gf = f;
+            gf.hairActorWeak = pi.hairActorWeak;
+            NpcPacingTestSetup(gf);
+            SetNpcPacing(true, 4, 4096, 15, false);
+            SetNpcPacingGateBounds(30, 0, 100, 0);  // gate2: the old tests' bound (2 x 15 frames), calm frames off
+            static FakeDelInst gd[64]{};
+            int gdNext = 0;
+            auto newUnit = [&](int id, int actor, uint64_t costUs) {
+                FakeDelInst& d = gd[gdNext++ % 64];
+                d = FakeDelInst{};
+                d.vtable = reinterpret_cast<void*>(0x1234);
+                d.weak = &g_pcActors[actor];
+                d.id = id;
+                d.costUs = costUs;
+                return &d;
+            };
+            struct GateFrame { uint64_t busy; size_t ran; uint64_t tp; };  // tp: the clock at the post-actor tick
+            // one frame: base = the actor tick's time, arrivals = units completing after the post-actor tick
+            auto frame = [&](uint64_t baseUs, std::initializer_list<FakeDelInst*> arrivals) {
+                NpcPacingTestFrameEdge();
+                const uint64_t t0 = g_pcClock;
+                const size_t d0 = g_pcDelRan.size();
+                PcPost(kFakeEnd, 0, 0);
+                run(fakeMgr, -1);
+                g_pcClock += baseUs;
+                const uint64_t tp = g_pcClock;
+                end(fakeMgr, nullptr, 2, 0);
+                for (FakeDelInst* a : arrivals) del(a);
+                g_pcClock += 1500;
+                return GateFrame{g_pcClock - t0, g_pcDelRan.size() - d0, tp};
+            };
+            for (int k = 0; k < 6; ++k) frame(4000, {});  // the rest after the post-actor tick is learnt (1.5 ms)
+            frame(4000, {newUnit(140, 0, 8000)});         // a unit's size is learnt (8 ms)
+            auto heavyThenLight = [&](int on, int idBase, uint64_t* maxBusy, int* slow, std::vector<size_t>* lightRuns) {
+                SetNpcPacingBaseGate(on);
+                g_pcDelRan.clear();
+                *maxBusy = 0;
+                *slow = 0;
+                lightRuns->clear();
+                for (int k = 0; k < 4; ++k) {
+                    const GateFrame r = frame(20000, {newUnit(idBase + k, 0, 8000)});
+                    *maxBusy = std::max(*maxBusy, r.busy);
+                    *slow += r.busy > 25000;
+                }
+                for (int k = 0; k < 6; ++k) {
+                    const GateFrame r = frame(4000, {});
+                    *maxBusy = std::max(*maxBusy, r.busy);
+                    *slow += r.busy > 25000;
+                    lightRuns->push_back(r.ran);
+                }
+            };
+            uint64_t busyOff = 0, busyOn = 0;
+            int slowOff = 0, slowOn = 0;
+            std::vector<size_t> lightOff, lightOn;
+            heavyThenLight(0, 150, &busyOff, &slowOff, &lightOff);
+            Check(slowOff == 4 && busyOff >= 29000 && g_pcDelRan == std::vector<int>({150, 151, 152, 153}),
+                  "pacing: PacingBaseGate=0: far units arriving on 20 ms frames run there (four frames over 25 ms)");
+            heavyThenLight(25, 160, &busyOn, &slowOn, &lightOn);
+            printf("      (PacingBaseGate=25: max frame %.1f ms, units in the light frames %zu %zu %zu %zu %zu %zu)\n",
+                   busyOn / 1000.0, lightOn[0], lightOn[1], lightOn[2], lightOn[3], lightOn[4], lightOn[5]);
+            Check(slowOn == 0 && busyOn <= 25000 && g_pcDelRan == std::vector<int>({160, 161, 162, 163}) &&
+                      lightOn == std::vector<size_t>({1, 1, 1, 1, 0, 0}) && NpcPacingTestRead().fifo == 0,
+                  "pacing: PacingBaseGate=25: they wait for frames with room and run there one per frame, in order; no frame "
+                  "over 25 ms");
+            // the lag bound: three far units on one 20 ms frame, then 40 more 20 ms frames: they run at ages 28-30, one
+            // per frame (bound 30 frames), never two in one frame
+            {
+                g_pcDelRan.clear();
+                const uint64_t f0 = NpcPacingTestRead().frame + 1;
+                std::vector<uint64_t> ranAt;
+                size_t maxPer = 0;
+                frame(20000, {newUnit(170, 0, 8000), newUnit(171, 0, 8000), newUnit(172, 0, 8000)});
+                for (int k = 0; k < 40 && NpcPacingTestRead().fifo; ++k) {
+                    const GateFrame r = frame(20000, {});
+                    maxPer = std::max(maxPer, r.ran);
+                    for (size_t i = 0; i < r.ran; ++i) ranAt.push_back(NpcPacingTestRead().frame - f0);
+                }
+                printf("      (PacingBaseGate=25 at the bound: ages at run");
+                for (uint64_t a : ranAt) printf(" %llu", static_cast<unsigned long long>(a));
+                puts(")");
+                Check(ranAt == std::vector<uint64_t>({28, 29, 30}) && maxPer == 1 && g_pcDelRan == std::vector<int>({170, 171, 172}),
+                      "pacing: PacingBaseGate=25: at the lag bound held units run one per frame, by age 30");
+            }
+            // gatefix D1: 35 far units arriving in one frame (a queue longer than the bound): the gate never runs more
+            // units in a frame than today's rule does on the same stream (the old lookahead ran 35 - 29 = 6 at once)
+            {
+                uint64_t burstAge = 0;  // rev94d: the oldest age a unit ran at (frames since the burst's frame)
+                auto burst = [&](int on, int idBase, std::vector<size_t>* per) {
+                    SetNpcPacingBaseGate(on);
+                    g_pcDelRan.clear();
+                    per->clear();
+                    std::vector<FakeDelInst*> arr;
+                    for (int k = 0; k < 35; ++k) arr.push_back(newUnit(idBase + k, 0, 8000));
+                    // one frame, all 35 arriving after its post-actor tick
+                    NpcPacingTestFrameEdge();
+                    const size_t d0 = g_pcDelRan.size();
+                    PcPost(kFakeEnd, 0, 0);
+                    run(fakeMgr, -1);
+                    g_pcClock += 20000;
+                    end(fakeMgr, nullptr, 2, 0);
+                    for (FakeDelInst* a : arr) del(a);
+                    g_pcClock += 1500;
+                    per->push_back(g_pcDelRan.size() - d0);
+                    const uint64_t f0 = NpcPacingTestRead().frame;
+                    burstAge = 0;
+                    for (int k = 0; k < 80 && NpcPacingTestRead().fifo; ++k) {
+                        const GateFrame r = frame(20000, {});
+                        per->push_back(r.ran);
+                        if (r.ran) burstAge = std::max<uint64_t>(burstAge, NpcPacingTestRead().frame - f0);
+                    }
+                    std::vector<int> want;
+                    for (int k = 0; k < 35; ++k) want.push_back(idBase + k);
+                    return g_pcDelRan == want && NpcPacingTestRead().fifo == 0;
+                };
+                std::vector<size_t> perOff, perOn;
+                const bool orderOff = burst(0, 300, &perOff);
+                const bool orderOn = burst(25, 400, &perOn);
+                const uint64_t ageOn = burstAge;
+                const size_t maxOff = *std::max_element(perOff.begin(), perOff.end());
+                const size_t maxOn = *std::max_element(perOn.begin(), perOn.end());
+                printf("      (35 at once: max units per frame off %zu, on %zu; frames to drain off %zu, on %zu)\n", maxOff, maxOn,
+                       perOff.size(), perOn.size());
+                printf("      (35 at once: oldest age at run %llu frames, bound 30)\n", static_cast<unsigned long long>(ageOn));
+                Check(orderOff && orderOn && maxOn <= maxOff && ageOn <= 30,
+                      "pacing: PacingBaseGate=25: 35 units arriving in one frame never run more per frame than today's rule, "
+                      "and none older than the bound (30)");
+            }
+            // a near unit of another actor arriving behind a held far one runs at once; then the frame may not defer
+            // (menus, loading): the held one runs at once
+            {
+                g_pcDelRan.clear();
+                frame(20000, {newUnit(180, 0, 8000)});
+                const GateFrame r = frame(20000, {newUnit(181, 1, 8000)});
+                Check(r.ran == 1 && g_pcDelRan == std::vector<int>({181}) && NpcPacingTestRead().fifo == 1,
+                      "pacing: PacingBaseGate=25: a near unit never waits behind a held far one");
+                NpcPacingTestFakes nf = gf;
+                nf.guards = 0;
+                NpcPacingTestSetup(nf);
+                const GateFrame gq2 = frame(20000, {});
+                NpcPacingTestSetup(gf);
+                Check(gq2.ran == 1 && g_pcDelRan == std::vector<int>({181, 180}) && NpcPacingTestRead().fifo == 0,
+                      "pacing: PacingBaseGate=25: a frame that may not defer (menu, loading) runs the held units at once");
+            }
+            // a held far unit whose actor comes into view (rendered, not fading) runs at once, on a 20 ms frame too
+            {
+                g_pcDelRan.clear();
+                frame(20000, {newUnit(185, 0, 8000)});
+                const GateFrame held = frame(20000, {});
+                NpcPacingTestRendered([](const void* a) { return a == static_cast<const void*>(&g_pcActors[0]); });
+                const GateFrame shown = frame(20000, {});
+                NpcPacingTestRendered(nullptr);
+                Check(held.ran == 0 && shown.ran == 1 && g_pcDelRan == std::vector<int>({185}) && NpcPacingTestRead().fifo == 0,
+                      "pacing: PacingBaseGate=25: a held unit whose actor comes into view runs at once");
+            }
+            // live off: a held unit runs by today's rule in the next frame
+            {
+                g_pcDelRan.clear();
+                frame(20000, {newUnit(190, 0, 8000)});
+                const GateFrame gq1 = frame(20000, {});
+                SetNpcPacingBaseGate(0);
+                const GateFrame gq2 = frame(20000, {});
+                Check(gq1.ran == 0 && gq2.ran == 1 && g_pcDelRan == std::vector<int>({190}) && NpcPacingTestRead().fifo == 0 &&
+                          !g_pcDeadlock && NpcPacingTestRead().S == NpcPacingTestRead().E,
+                      "pacing: PacingBaseGate live 25 -> 0: the held unit runs by today's rule");
+            }
+            // PacingHairActor's fade rate (gatefix; stampfix / rev96a: at most 2 units and 16 ms of estimates a frame, due
+            // before dither 3): (1) eight far units, then one of a far character whose fade-in is at 3.6 (0.15 s before it
+            // shows; the fake fade drops 4 per second of each frame's time), arriving in one frame, gate off. Today's budget
+            // runs about one 8 ms unit per frame, so that character's unit ran at frame ~8, after it began to show; with the
+            // fade rate the queue up to it is done before 3.0, in order, at most 2 per frame. (2) 12 units of 10 ms before
+            // a character at 3.5: the time cap leaves one rule unit a frame (2 without it). (3) 16 units of 4 ms before a
+            // character at 3.5: at most 2 a frame (4 with the old cap of 4).
+            {
+                const FakeActor saveA2 = g_pcActors[2], saveR2 = g_pcRoots[2];
+                PcActor(2, 30000.0);
+                static float s_fade = 3.6f;  // drops 4 per second of the fake clock's frame time
+                NpcPacingTestFadeValue([](const void* a) { return a == static_cast<const void*>(&g_pcActors[2]) ? s_fade : -1.0f; });
+                auto fadeRun = [&](bool hair, int idBase, int nUnits, uint64_t costUs, float fade0) {
+                    SetNpcPacingHairActor(hair);
+                    g_pcDelRan.clear();
+                    s_fade = fade0;
+                    std::vector<FakeDelInst*> arr;
+                    for (int k = 0; k < nUnits; ++k) arr.push_back(newUnit(idBase + k, 0, costUs));
+                    arr.push_back(newUnit(idBase + nUnits, 2, costUs));
+                    NpcPacingTestFrameEdge();
+                    PcPost(kFakeEnd, 0, 0);
+                    run(fakeMgr, -1);
+                    g_pcClock += 20000;
+                    end(fakeMgr, nullptr, 2, 0);
+                    for (FakeDelInst* a : arr) del(a);
+                    g_pcClock += 1500;
+                    int at = -1;
+                    float fadeAt = -1.0f;
+                    size_t maxPer = 0;
+                    for (int k = 0; k < 60 && NpcPacingTestRead().fifo; ++k) {
+                        const float before = s_fade;
+                        const GateFrame r = frame(20000, {});
+                        s_fade -= 4.0f * static_cast<float>(r.busy) / 1e6f;
+                        maxPer = std::max(maxPer, r.ran);
+                        for (size_t i = 0; i < g_pcDelRan.size(); ++i)
+                            if (g_pcDelRan[i] == idBase + nUnits && at < 0) { at = k + 1; fadeAt = before; }
+                    }
+                    std::vector<int> want;
+                    for (int k = 0; k <= nUnits; ++k) want.push_back(idBase + k);
+                    printf("      (fade rate %s, %d x %llu us at %.2f: the fading character's unit ran %d frames after arriving, at "
+                           "dither %.2f; max units per frame %zu)\n", hair ? "on" : "off", nUnits, (unsigned long long)costUs,
+                           fade0, at, fadeAt, maxPer);
+                    return std::make_tuple(at, maxPer, g_pcDelRan == want && fadeAt >= 3.0f);
+                };
+                SetNpcPacingBaseGate(0);
+                const auto [atOff, maxOff, orderOff] = fadeRun(false, 700, 8, 8000, 3.6f);
+                const auto [atOn, maxOn, orderOn] = fadeRun(true, 720, 8, 8000, 3.6f);
+                Check(!orderOff && orderOn && atOn >= 1 && maxOn <= 2,
+                      "pacing: PacingHairActor: a fading far character's queued unit (and those before it) is done before "
+                      "it shows, in order, at most 2 per frame");
+                const auto [atBig, maxBig, orderBig] = fadeRun(true, 740, 12, 10000, 3.5f);
+                (void)atBig;
+                (void)orderBig;
+                Check(maxBig == 1, "pacing: PacingHairActor's fade rate: 10 ms units, one a frame (the 16 ms cap)");
+                const auto [atSmall, maxSmall, orderSmall] = fadeRun(true, 760, 16, 4000, 3.5f);
+                (void)atSmall;
+                (void)orderSmall;
+                Check(maxSmall == 2, "pacing: PacingHairActor's fade rate: 4 ms units, at most 2 a frame (the 2-unit cap)");
+                NpcPacingTestFadeValue(nullptr);
+                SetNpcPacingHairActor(false);
+                SetNpcPacingBaseGate(0);
+                g_pcActors[2] = saveA2;
+                g_pcRoots[2] = saveR2;
+            }
+            // gate2 (2026-11-13): the gate decides per queued unit and has its own hard bound (PacingGateBoundFrames). Actors
+            // 0 and 2 are 300 m away in their spawn fade-in at the game's floor (dither 4.0), actor 3 300 m away, not fading.
+            {
+                const FakeActor saveA2 = g_pcActors[2], saveR2 = g_pcRoots[2], saveA3 = g_pcActors[3], saveR3 = g_pcRoots[3];
+                PcActor(2, 30000.0);
+                PcActor(3, 30000.0);
+                static float s_f0 = 4.0f, s_f2 = 4.0f;
+                NpcPacingTestFadeValue([](const void* a) {
+                    return a == static_cast<const void*>(&g_pcActors[0]) ? s_f0 : a == static_cast<const void*>(&g_pcActors[2]) ? s_f2 : -1.0f;
+                });
+                SetNpcPacingHairActor(true);
+                SetNpcPacingBaseGate(25);
+                SetNpcPacingGateBounds(90, 0, 100, 1000);  // public: the fade hold cannot be switched on
+                auto ranIdx = [](int id) {
+                    for (size_t i = 0; i < g_pcDelRan.size(); ++i)
+                        if (g_pcDelRan[i] == id) return static_cast<int>(i);
+                    return -1;
+                };
+                // (1) the flaw: four units of actor 0 (held at the floor) and one of actor 2 behind them, all on 20 ms frames;
+                // actor 2's fade-in then runs on (3.6: 0.15 s before it shows). Its unit runs within two frames, ahead of
+                // actor 0's, and actor 0's stay held (the old gate dropped itself for the whole call once any queued actor's
+                // fade had left 5, and today's lag-scaled budget ran the floor-held units onto the busy frames)
+                g_pcDelRan.clear();
+                s_f0 = 4.0f;
+                s_f2 = 4.0f;
+                const uint64_t q0 = NpcPacingTestRead().frame + 1;
+                frame(20000, {newUnit(800, 0, 8000), newUnit(801, 0, 8000), newUnit(802, 0, 8000), newUnit(803, 0, 8000),
+                              newUnit(804, 2, 8000)});
+                const size_t heldFirst = g_pcDelRan.size();
+                s_f2 = 3.6f;
+                int soonAt = -1;
+                for (int k = 0; k < 10; ++k) {
+                    frame(20000, {});
+                    s_f2 -= 0.08f;  // 4 per second of 20 ms frames
+                    if (soonAt < 0 && ranIdx(804) >= 0) soonAt = k + 1;
+                }
+                printf("      (gate2: floor-held units ran in the first frame %zu, in the next 10 frames %zu; the fading actor's unit "
+                       "after %d frames)\n", heldFirst, g_pcDelRan.size(), soonAt);
+                Check(heldFirst == 0 && g_pcDelRan == std::vector<int>({804}) && soonAt >= 1 && soonAt <= 2,
+                      "pacing: PacingBaseGate per unit: a far unit whose actor is about to show runs within two frames, ahead of "
+                      "another actor's held units, without releasing them (gate2: the flaw)");
+                // (1b) lab fade hold (PacingGateFadeHoldMs; off by default, public builds never): actor 0 has held units, so
+                // its fade-in stops at the floor (4): a step from 4.3 is kept, from 4.05 cut to land on 4.0, none at 4.0; a
+                // value under the game's floor 4 is raised to 4 (no visible change); a fade already past the floor (3.8)
+                // and actor 2 (its unit ran) go on as the game's. Public: every step is the game's.
+                {
+                    float val = 4.0f;
+                    Check(NpcPacingTestFadeHold(&g_pcActors[0], &val, 0.0f, 4.0f, 0.02f) == 0.02f && val == 4.0f,
+                          "pacing: PacingBaseGate: no fade hold in the public build (rev96e B1)");
+                }
+                // (2) a held unit of actor 3 whose actor comes within PacingGateNearM (80 m: still far for pacing) runs at once;
+                // actor 0's stay held
+                frame(20000, {newUnit(810, 3, 8000)});
+                const size_t before3 = g_pcDelRan.size();
+                PcActor(3, 8000.0);
+                frame(20000, {});
+                Check(before3 == 1 && g_pcDelRan == std::vector<int>({804, 810}),
+                      "pacing: PacingBaseGate per unit: an actor nearer than PacingGateNearM is not held; the far held units stay "
+                      "held");
+                // (3) the bound: actor 0's units run by age 90 (frames since queued), one per frame, in order; none older
+                std::vector<uint64_t> ages;
+                size_t maxPer = 0;
+                for (int k = 0; k < 120 && NpcPacingTestRead().fifo; ++k) {
+                    const GateFrame r = frame(20000, {});
+                    maxPer = std::max(maxPer, r.ran);
+                    for (size_t i = 0; i < r.ran; ++i) ages.push_back(NpcPacingTestRead().frame - q0);
+                }
+                printf("      (gate2 bound 90: ages at run");
+                for (uint64_t a : ages) printf(" %llu", static_cast<unsigned long long>(a));
+                puts(")");
+                const bool inBound = !ages.empty() && *std::max_element(ages.begin(), ages.end()) <= 90 &&
+                                     *std::min_element(ages.begin(), ages.end()) >= 85;
+                Check(inBound && maxPer == 1 && g_pcDelRan == std::vector<int>({804, 810, 800, 801, 802, 803}) &&
+                          NpcPacingTestRead().fifo == 0,
+                      "pacing: PacingBaseGate per unit: held units wait on busy frames up to PacingGateBoundFrames (90) and run "
+                      "by it, one per frame, oldest first; no unit older than the bound");
+                {
+                    float val = 4.0f;
+                    Check(NpcPacingTestFadeHold(&g_pcActors[0], &val, 0.0f, 4.0f, 0.02f) == 0.02f,
+                          "pacing: PacingBaseGate fade hold: once the held units ran (here at the bound) the fade goes on");
+                }
+                PcActor(3, 30000.0);
+                // (4) calm frames: held 8 ms units do not fit a 16 ms frame (16 + 1.5 + 8 > 25); PacingGateCalmMs 20 lets
+                // one a frame run there (16 + 1.5 < 20); with it off they wait
+                auto calmRun = [&](int calmMs, int idBase) {
+                    SetNpcPacingGateBounds(90, calmMs, 100, 0);
+                    g_pcDelRan.clear();
+                    frame(20000, {newUnit(idBase, 0, 8000), newUnit(idBase + 1, 0, 8000), newUnit(idBase + 2, 0, 8000)});
+                    std::vector<size_t> per;
+                    for (int k = 0; k < 4; ++k) per.push_back(frame(16000, {}).ran);
+                    return per;
+                };
+                const std::vector<size_t> calmOff = calmRun(0, 820);
+                for (int k = 0; k < 100 && NpcPacingTestRead().fifo; ++k) frame(20000, {});
+                const std::vector<size_t> calmOn = calmRun(20, 830);
+                printf("      (gate2 calm frames: off %zu %zu %zu %zu, on %zu %zu %zu %zu)\n", calmOff[0], calmOff[1], calmOff[2],
+                       calmOff[3], calmOn[0], calmOn[1], calmOn[2], calmOn[3]);
+                Check(calmOff == std::vector<size_t>({0, 0, 0, 0}) && calmOn == std::vector<size_t>({1, 1, 1, 0}) &&
+                          g_pcDelRan == std::vector<int>({830, 831, 832}),
+                      "pacing: PacingGateCalmMs: a held unit too big for the target runs on a calm frame, one a frame, in order");
+                // (5) arrival (no queue): a unit of an actor past the fade's floor (3.6) runs at once on a 20 ms frame; one at
+                // the floor (4.0) is held (gatefix D2 as the per-unit test)
+                SetNpcPacingGateBounds(90, 0, 100, 0);
+                g_pcDelRan.clear();
+                s_f2 = 3.6f;
+                const GateFrame soonArr = frame(20000, {newUnit(840, 2, 8000)});
+                s_f2 = 4.0f;
+                const GateFrame floorArr = frame(20000, {newUnit(841, 2, 8000)});
+                Check(soonArr.ran == 1 && floorArr.ran == 0 && NpcPacingTestRead().fifo == 1,
+                      "pacing: PacingBaseGate: an arriving unit of an actor past the fade's floor runs at once; at the floor it is "
+                      "held");
+                s_f2 = 3.6f;  // ... and runs once its actor leaves the floor
+                frame(20000, {});
+                Check(g_pcDelRan == std::vector<int>({840, 841}) && NpcPacingTestRead().fifo == 0,
+                      "pacing: PacingBaseGate: a held unit runs once its actor leaves the fade's floor");
+                // (6) gatefix L2: a key-0 unit (its actor not found) queued behind held units: everything before it runs
+                // first, by today's rule, in order; it does not wait for the bound
+                s_f2 = 4.0f;
+                g_pcDelRan.clear();
+                FakeDelInst* k0 = newUnit(852, 0, 8000);
+                k0->weak = nullptr;  // its weak pointer resolves to nothing
+                frame(20000, {newUnit(850, 0, 8000), newUnit(851, 0, 8000), k0});
+                int k0At = -1;
+                for (int k = 0; k < 20 && NpcPacingTestRead().fifo; ++k) {
+                    frame(20000, {});
+                    if (k0At < 0 && ranIdx(852) >= 0) k0At = k + 1;
+                }
+                Check(g_pcDelRan == std::vector<int>({850, 851, 852}) && k0At >= 1 && k0At <= 6,
+                      "pacing: PacingBaseGate: a key-0 unit runs by today's rule with everything queued before it (gatefix L2)");
+                // (7) PacingGateShownHoldMs's due rule on the gate's own queue (rev96g F10, port102). Actor 0 stays at the
+                // shown level 5 (held: what the hold shows), its own fade value (the game's) falls 4 per second on 20 ms
+                // frames from 5; its 8 ms units never fit (20 + 1.5 + 8 > 25). Key off: they wait for the bound (90 frames,
+                // long after the fade's end at frame ~63). On (End 1.0): all run before the game's value reaches 1.0 (the
+                // fade's last 0.25 s), at most one a frame, in order, none as due now; the actor leaves the hold list in the
+                // frame its last unit ran (F9). 7b: a unit queued while the actor was near (not gated) runs before its later
+                // gated units (F1), also counted in the spread (the follow-up)
+                {
+                    static float s_gv0 = 5.0f;
+                    NpcPacingTestGameValue([](const void* a) {
+                        return a == static_cast<const void*>(&g_pcActors[0]) ? s_gv0 : -1.0f;
+                    });
+                    SetNpcPacingGateBounds(90, 0, 100, 0);
+                    s_f0 = 5.0f;
+                    // fix102: longAt >= 0: that frame takes 250 ms (the fade value drops 1.0 in it); markAt >= 0: an equipment
+                    // unit of actor 0 runs before its appearance in that frame (its hold open from then; touch: kept live)
+                    auto dueRun = [&](int ms, int idBase, bool nearFirst, std::vector<float>* at, size_t* most, bool* heldAfter,
+                                      int longAt = -1, int markAt = -1, bool touch = true, int units = 4,
+                                      std::vector<int>* ranFrame = nullptr, int openAt = -2) {
+                        if (openAt == -2) openAt = markAt;
+                        ShownHoldTestSetup(nullptr, markAt >= 0 ? &PcClock : nullptr, markAt >= 0 ? 1 : -1, ms, 10);
+                        g_pcDelRan.clear();
+                        at->clear();
+                        *most = 0;
+                        s_gv0 = 5.0f;
+                        if (nearFirst) {
+                            PcActor(0, 500.0);
+                            frame(20000, {newUnit(idBase + 9, 0, 8000)});
+                            PcActor(0, 30000.0);
+                        }
+                        if (units == 4)
+                            frame(20000, {newUnit(idBase, 0, 8000), newUnit(idBase + 1, 0, 8000), newUnit(idBase + 2, 0, 8000),
+                                          newUnit(idBase + 3, 0, 8000)});
+                        else
+                            frame(20000, {newUnit(idBase, 0, 8000)});
+                        if (ranFrame) ranFrame->clear();
+                        const uintptr_t a0 = reinterpret_cast<uintptr_t>(&g_pcActors[0]);
+                        for (int k = 0; k < 120 && NpcPacingTestRead().fifo; ++k) {
+                            const bool isLong = k == longAt;
+                            s_gv0 = std::max(0.0f, s_gv0 - (isLong ? 1.0f : 0.08f));
+                            if (openAt >= 0 && (k == openAt || (k > openAt && touch))) ShownHoldTestHold(0x5000, a0, true);
+                            if (k == markAt) ShownHoldNoteEquipFirst(a0);
+                            const GateFrame r = frame(isLong ? 248500 : 20000, {});
+                            *most = std::max(*most, r.ran);
+                            for (size_t i = 0; i < r.ran; ++i) {
+                                at->push_back(s_gv0);
+                                if (ranFrame) ranFrame->push_back(k);
+                            }
+                        }
+                        *heldAfter = NpcGateHoldsActor(reinterpret_cast<uintptr_t>(&g_pcActors[0]));
+                    };
+                    std::vector<float> atOff, atOn, atNear;
+                    size_t mostOff = 0, mostOn = 0, mostNear = 0;
+                    bool heldOff = true, heldOn = true, heldNear = true;
+                    dueRun(0, 860, false, &atOff, &mostOff, &heldOff);
+                    const std::vector<int> ranOff = g_pcDelRan;
+                    dueRun(1000, 870, false, &atOn, &mostOn, &heldOn);
+                    const std::vector<int> ranOn = g_pcDelRan;
+                    dueRun(1000, 880, true, &atNear, &mostNear, &heldNear);
+                    const std::vector<int> ranNear = g_pcDelRan;
+                    auto minAt = [](const std::vector<float>& v) { return v.empty() ? -1.0f : *std::min_element(v.begin(), v.end()); };
+                    printf("      (shownhold due rule: off %zu units, lowest game value at a run %.2f; on %zu units, lowest %.2f, most "
+                           "a frame %zu; near-first %zu units, lowest %.2f)\n",
+                           atOff.size(), minAt(atOff), atOn.size(), minAt(atOn), mostOn, atNear.size(), minAt(atNear));
+                    Check(ranOff == std::vector<int>({860, 861, 862, 863}) && minAt(atOff) == 0.0f,
+                          "pacing + shownhold: key off: the held units wait for the bound, past the fade's end (the gate alone)");
+                    Check(ranOn == std::vector<int>({870, 871, 872, 873}) && minAt(atOn) > 1.0f && mostOn == 1 && !heldOn,
+                          "pacing + shownhold (rev96g F10): the due rule runs a held far character's units before the last 0.25 s of "
+                          "its fade, one a frame, in order; it leaves the hold list with its last unit (F9)");
+                    Check(ranNear.size() == 5 && ranNear[0] == 889 &&
+                              std::vector<int>(ranNear.begin() + 1, ranNear.end()) == std::vector<int>({880, 881, 882, 883}) &&
+                              minAt(atNear) > 1.0f && !heldNear,
+                          "pacing + shownhold (F1): a unit queued while the character was near runs before its later gated units, "
+                          "all before the fade's last 0.25 s");
+                    // fix102 (rev102a S2 / Q3): a 250 ms frame. (a) before the spread starts (value 2.68 -> 1.68): the period
+                    // ring takes its second longest frame, so the units still go one a frame, none as due now; (b) into the
+                    // last 0.25 s (1.96 -> 0.96): due now runs the rest in the next replay, still before the fade's end
+                    std::vector<float> atL1, atL2;
+                    size_t mostL1 = 0, mostL2 = 0;
+                    bool heldL1 = true, heldL2 = true;
+                    std::vector<int> frL1;
+                    uint64_t dueL1[2] = {};
+                    ShownHoldTestDueCounts(dueL1);
+                    dueRun(1000, 900, false, &atL1, &mostL1, &heldL1, 29, -1, true, 4, &frL1);
+                    ShownHoldTestDueCounts(dueL1);
+                    const std::vector<int> ranL1 = g_pcDelRan;
+                    dueRun(1000, 910, false, &atL2, &mostL2, &heldL2, 38);
+                    const std::vector<int> ranL2 = g_pcDelRan;
+                    printf("      (shownhold due rule with a 250 ms frame: before the spread most a frame %zu, lowest value %.2f, "
+                           "frames %d %d %d %d, due units soft %llu now %llu; into the last 0.25 s most a frame %zu, lowest value "
+                           "%.2f)\n",
+                           mostL1, minAt(atL1), frL1.size() > 0 ? frL1[0] : -1, frL1.size() > 1 ? frL1[1] : -1,
+                           frL1.size() > 2 ? frL1[2] : -1, frL1.size() > 3 ? frL1[3] : -1, (unsigned long long)dueL1[0],
+                           (unsigned long long)dueL1[1], mostL2, minAt(atL2));
+                    // (today's rule may add units the due rule has released after the long frame: not counted against it)
+                    Check(ranL1 == std::vector<int>({900, 901, 902, 903}) && minAt(atL1) > 1.0f && !heldL1 &&
+                              ranL2 == std::vector<int>({910, 911, 912, 913}) && minAt(atL2) > 0.0f && !heldL2,
+                          "pacing + shownhold (fix102): a 250 ms frame before the spread: the units still run in order before "
+                          "the fade's last 0.25 s; one into it: due now runs the rest before the fade's end, in order");
+                    // fix102 (rev102a S2): the period ring: one long frame of 8 is not the spread's period, two are
+                    {
+                        for (int k = 0; k < 9; ++k) frame(20000, {});
+                        const float p0 = NpcPacingTestGatePeriodS();
+                        frame(100000, {}), frame(20000, {});
+                        const float p1 = NpcPacingTestGatePeriodS();
+                        frame(100000, {}), frame(20000, {});
+                        const float p2 = NpcPacingTestGatePeriodS();
+                        for (int k = 0; k < 8; ++k) frame(20000, {});
+                        const float p3 = NpcPacingTestGatePeriodS();
+                        printf("      (due spread period: %.4f, one 101.5 ms frame %.4f, two %.4f, 8 frames later %.4f s)\n", p0, p1,
+                               p2, p3);
+                        Check(std::fabs(p0 - 0.0215f) < 0.001f && std::fabs(p1 - (0.1f + 7 * 0.0215f) / 8) < 0.001f &&
+                                  std::fabs(p2 - 0.1f) < 0.001f && std::fabs(p3 - 0.0215f) < 0.001f,
+                              "pacing + shownhold (fix102 S2): the due spread's period: one 100 ms hitch of the last 8 frames counts "
+                              "as their mean, two in full, and they leave the ring after 8 frames");
+                    }
+                    // fix102 (rev102a M1 / M2): equipment ran before the appearance in frame 5 (value 4.52, ~0.9 s before the
+                    // units would be due). Before: all units soft-due at once at rate 2. Now: a deadline 0.1 s later in the
+                    // spread: 4 units one a frame from then, done within 0.225 s; 1 unit: the room rule keeps it 3 frames,
+                    // then it runs (~0.1 s after the mark); a hold not called for 0.1 s (its actor gone, opened at frame 0)
+                    // is not marked by a later equipment unit at its address: the units run as unmarked
+                    std::vector<float> atU4, atU1, atUs, atUn;
+                    std::vector<int> frU4, frU1, frUs, frUn;
+                    size_t mostU4 = 0, mostU1 = 0, mostUs = 0, mostUn = 0;
+                    bool heldU = true;
+                    dueRun(1000, 920, false, &atU4, &mostU4, &heldU, -1, 5, true, 4, &frU4);
+                    const std::vector<int> ranU4 = g_pcDelRan;
+                    dueRun(1000, 930, false, &atU1, &mostU1, &heldU, -1, 5, true, 1, &frU1);
+                    dueRun(1000, 940, false, &atUs, &mostUs, &heldU, -1, 6, false, 1, &frUs, 0);
+                    dueRun(1000, 950, false, &atUn, &mostUn, &heldU, -1, -1, true, 1, &frUn);
+                    auto first = [](const std::vector<int>& v) { return v.empty() ? -1 : v.front(); };
+                    auto last = [](const std::vector<int>& v) { return v.empty() ? -1 : v.back(); };
+                    printf("      (shownhold equipment first at frame 5: 4 units ran frames %d-%d, most a frame %zu; 1 unit at frame %d; "
+                           "stale hold: frame %d; unmarked: frame %d)\n",
+                           first(frU4), last(frU4), mostU4, first(frU1), first(frUs), first(frUn));
+                    Check(ranU4 == std::vector<int>({920, 921, 922, 923}) && mostU4 == 1 && first(frU4) >= 5 && last(frU4) <= 15 &&
+                              frU1.size() == 1 && first(frU1) >= 8 && first(frU1) <= 11,
+                          "pacing + shownhold (fix102 M1): equipment ran before the appearance: the actor's units get a 0.1 s "
+                          "deadline in the spread (one a frame, not all at once; a single unit waits for room about 0.1 s)");
+                    Check(frUs.size() == 1 && frUn.size() == 1 && first(frUs) == first(frUn) && first(frUn) > 20,
+                          "pacing + shownhold (fix102 M2): a hold not called for 0.1 s (its actor gone) is not marked by an "
+                          "equipment unit at its address: those units run as unmarked ones");
+                    ShownHoldTestSetup(nullptr, nullptr, -1, 0, 10);
+                    ShownHoldTestSetup(nullptr, nullptr, -1, 0, 10);
+                    NpcPacingTestGameValue(nullptr);
+                    s_f0 = 4.0f;
+                }
+                NpcPacingTestFadeValue(nullptr);
+                SetNpcPacingHairActor(false);
+                SetNpcPacingBaseGate(0);
+                SetNpcPacingGateBounds(30, 0, 100, 0);
+                g_pcActors[2] = saveA2;
+                g_pcRoots[2] = saveR2;
+                g_pcActors[3] = saveA3;
+                g_pcRoots[3] = saveR3;
+            }
+            NpcPacingTestSetup(gf);
+        }
+
         // PacingLeanFlowDrain: a level flow reaches its bound (3 frames: the queue owes an older OT frame) and the owed
         // main queue drains before it; off: the waiting delegates drain with it (as before), on: they stay queued and
         // replay one per frame afterwards, in order
@@ -4294,6 +5139,107 @@ int wmain(int argc, wchar_t** argv)
                 Check(g_pcDelRan == std::vector<int>({100, 101, 102}) && NpcPacingTestRead().fifo == 0 && !g_pcDeadlock &&
                           NpcPacingTestRead().S == NpcPacingTestRead().E,
                       "pacing: PacingFadeAware=1, a seen actor whose fade-in is over runs at once; queue in step");
+                // FadeInUnseen (stampfix, Epic's idea from UE 5.5.0): the fade tick's caller jump, the mesh list, the static
+                // mesh class and LastRenderTime from the game's code; then the after-tick step on fakes (rev96a's age rule):
+                // a far character in its fade-in whose skinned meshes were not drawn for 200 ms gets their render time just
+                // past the engine's 1 s window; a mesh drawn lately, one already outside the window, static meshes and
+                // LastRenderTimeOnScreen are left alone; key 0, near characters, FadeOut and a finished fade likewise
+                {
+                    uint32_t jr = 0, br = 0, lo = 0, cl = 0, sr = 0;
+                    const bool fu = FadeInUnseenInfo(&jr, &br, &lo, &cl, &sr);
+                    Check(fu && jr == 0x48D18FE && br == 0x48D5A40 && lo == 0xE0 && cl == 0x384 && sr == 0x30BF250,
+                          "FadeInUnseen: fade tick caller's jump exe+0x48D18FE -> body exe+0x48D5A40, mesh list +0xE0, "
+                          "LastRenderTime +0x384, static mesh class exe+0x30BF250");
+                    if (fu) {
+                        static uint8_t mBody[0x400], mHead[0x400], mStatic[0x400], smClass[0x80], smObjClass[0x80], skObjClass[0x80];
+                        static void* smChain[8];
+                        static void* skChain[8];
+                        static uint8_t* mList[3];
+                        *reinterpret_cast<int32_t*>(smClass + 0x38) = 4;
+                        *reinterpret_cast<int32_t*>(smObjClass + 0x38) = 4;
+                        *reinterpret_cast<void**>(smObjClass + 0x30) = smChain;
+                        smChain[4] = smClass + 0x30;
+                        *reinterpret_cast<int32_t*>(skObjClass + 0x38) = 5;
+                        *reinterpret_cast<void**>(skObjClass + 0x30) = skChain;
+                        skChain[4] = skObjClass + 0x30;
+                        *reinterpret_cast<void**>(mStatic + 0x10) = smObjClass;
+                        *reinterpret_cast<void**>(mBody + 0x10) = skObjClass;
+                        *reinterpret_cast<void**>(mHead + 0x10) = skObjClass;
+                        mList[0] = mBody;
+                        mList[1] = mStatic;
+                        mList[2] = mHead;
+                        *reinterpret_cast<void**>(pComp + lo) = mList;
+                        *reinterpret_cast<int32_t*>(pComp + lo + 8) = 3;
+                        float& lb = *reinterpret_cast<float*>(mBody + cl);
+                        float& lh = *reinterpret_cast<float*>(mHead + cl);
+                        float& ls = *reinterpret_cast<float*>(mStatic + cl);
+                        float& onB = *reinterpret_cast<float*>(mBody + cl + 4);
+                        *reinterpret_cast<int32_t*>(pComp + 0xD8) = 1;
+                        *reinterpret_cast<float*>(pComp + 0xBC) = 4.5f;
+                        *reinterpret_cast<double*>(pRoot + 0x280) = 30000.0;  // far
+                        struct U {
+                            static double Now() { return 100.0; }
+                            static const uint8_t* Sm() { return smClass; }
+                        };
+                        const float expired = static_cast<float>(100.0 - 1.0) - 0.001f;
+                        FadeInUnseenTestSlack(0.0);  // the last two frames' time: none (rev96d A2 below)
+                        // drawn 16 ms ago (in view): untouched at any dither
+                        lb = lh = 99.984f;
+                        ls = onB = 99.5f;
+                        int r = FadeInUnseenTestTick(pComp, 1, &U::Now, &U::Sm);
+                        const bool drawn = r == 0 && lb == 99.984f && lh == 99.984f;
+                        *reinterpret_cast<float*>(pComp + 0xBC) = 1.0f;
+                        r = FadeInUnseenTestTick(pComp, 1, &U::Now, &U::Sm);
+                        const bool drawnLow = r == 0 && lb == 99.984f;
+                        Check(drawn && drawnLow, "FadeInUnseen: a far fading-in body drawn 16 ms ago keeps its render time (dither 4.5 and 1.0)");
+                        // not drawn for 300 / 500 ms (occluded after its first frames): expired; the static mesh and the
+                        // on-screen time are kept; one already outside the 1 s window is not touched
+                        lb = 99.7f;
+                        lh = 99.5f;
+                        r = FadeInUnseenTestTick(pComp, 1, &U::Now, &U::Sm);
+                        const bool exp = r == 2 && lb == expired && lh == expired && ls == 99.5f && onB == 99.5f;
+                        lb = 98.0f;
+                        lh = -1000.0f;
+                        r = FadeInUnseenTestTick(pComp, 1, &U::Now, &U::Sm);
+                        const bool outside = r == 0 && lb == 98.0f && lh == -1000.0f;
+                        Check(exp && outside, "FadeInUnseen: a far fading-in body not drawn for 300-500 ms leaves the 1 s window; "
+                                              "static meshes, the on-screen time and old times kept");
+                        // rev96d A6 / A2: the window's edge (200 ms): 180 ms kept, 250 ms expired; after a 250 ms hitch (the
+                        // last two frames took 0.25 s) a body last stamped 300 ms ago is still a drawn one and is kept,
+                        // 500 ms is not
+                        lb = lh = 99.82f;
+                        const bool edgeKept = FadeInUnseenTestTick(pComp, 1, &U::Now, &U::Sm) == 0 && lb == 99.82f;
+                        lb = lh = 99.75f;
+                        const bool edgeExp = FadeInUnseenTestTick(pComp, 1, &U::Now, &U::Sm) == 2 && lb == expired;
+                        FadeInUnseenTestSlack(0.25);
+                        lb = lh = 99.70f;
+                        const bool hitchKept = FadeInUnseenTestTick(pComp, 1, &U::Now, &U::Sm) == 0 && lb == 99.70f;
+                        lb = lh = 99.5f;
+                        const bool hitchExp = FadeInUnseenTestTick(pComp, 1, &U::Now, &U::Sm) == 2 && lb == expired;
+                        FadeInUnseenTestSlack(0.0);
+                        Check(edgeKept && edgeExp && hitchKept && hitchExp,
+                              "FadeInUnseen: 180 ms kept, 250 ms dropped; after a 250 ms hitch 300 ms kept, 500 ms dropped (rev96d A2)");
+                        lb = lh = 99.7f;
+                        r = FadeInUnseenTestTick(pComp, 0, &U::Now, &U::Sm);
+                        const bool off = r == 0 && lb == 99.7f;
+                        *reinterpret_cast<double*>(pRoot + 0x280) = 0.0;  // near
+                        r = FadeInUnseenTestTick(pComp, 1, &U::Now, &U::Sm);
+                        const bool nearKept = r == 0 && lb == 99.7f;
+                        *reinterpret_cast<double*>(pRoot + 0x280) = 30000.0;
+                        *reinterpret_cast<int32_t*>(pComp + 0xD8) = 2;  // FadeOut
+                        r = FadeInUnseenTestTick(pComp, 1, &U::Now, &U::Sm);
+                        const bool outKept = r == 0 && lb == 99.7f;
+                        *reinterpret_cast<int32_t*>(pComp + 0xD8) = 0;  // fade over
+                        r = FadeInUnseenTestTick(pComp, 1, &U::Now, &U::Sm);
+                        const bool doneKept = r == 0 && lb == 99.7f;
+                        Check(off && nearKept && outKept && doneKept,
+                              "FadeInUnseen: key 0, a near character, FadeOut and a finished fade are left alone");
+                        *reinterpret_cast<void**>(pComp + lo) = nullptr;
+                        *reinterpret_cast<int32_t*>(pComp + lo + 8) = 0;
+                        *reinterpret_cast<int32_t*>(pComp + 0xD8) = 0;
+                        FadeInUnseenTestSlack(-1.0);
+                    }
+                }
                 SetNpcPacingFadeAware(0);
                 NpcPacingTestRendered(nullptr);
                 NpcPacingTestFade(reinterpret_cast<const uint8_t* (*)()>(fcls));
@@ -4383,6 +5329,620 @@ int wmain(int argc, wchar_t** argv)
         for (size_t i = 0; i < n && i < 8; ++i) off = off && bwSites[i][0] == 0x85;
         Check(off, "busywait off: every site is jne again");
         Check(FindBusyWaitFlagCheck(), "busywait: found again after a toggle");
+    }
+
+    // CreatureAnimPreload: QueuedCreature's queue step (build 19115871: exe+0x67EBF8A, call QueueModelAnims exe+0x67E9A00 at
+    // exe+0x67EBFB5); flag7's immediate exe+0x67EBFAA 0 -> 1 and back, flag6's (exe+0x67EBFAF) untouched.
+    if (Installed(FindCreatureAnimPreload(), "creature queue step found")) {
+        uint8_t* site = CreatureAnimPreloadSite();
+        Check(site == game.base + 0x67EBFAA && *site == 0 && site[-1] == 0x30 && site[-4] == 0xC6 && site[5] == 1,
+              "creatureanim: flag7 byte exe+0x67EBFAA (mov byte [rsp+30h], 0), flag6 = 1 next to it");
+        Check(site + 11 + 5 + *reinterpret_cast<int32_t*>(site + 12) == game.base + 0x67E9A00,
+              "creatureanim: the call after it goes to QueueModelAnims exe+0x67E9A00");
+        SetCreatureAnimPreload(true);
+        Check(*site == 1 && site[5] == 1, "creatureanim on: flag7 = 1, flag6 unchanged");
+        SetCreatureAnimPreload(false);
+        Check(*site == 0, "creatureanim off: flag7 = 0 again");
+        const char* caWhy = "";
+        SetCreatureAnimPreload(true);
+        Check(CreatureAnimPreloadLocate(game, &caWhy) == nullptr, "creatureanim: a site whose byte is already 1 is refused (a game build's own)");
+        SetCreatureAnimPreload(false);
+        Check(CreatureAnimPreloadLocate(game, &caWhy) == site, "creatureanim: located again after on / off (byte 0)");
+    }
+    {
+        // Fakes: the locate step accepts only one site whose call reaches the prologue with the flag test after it.
+        std::vector<uint8_t> img(0x2000, 0xCC);
+        const Pattern site = ParsePattern(
+            "8B 43 10 4C 8B CB 48 8B 0D ?? ?? ?? ?? 48 8B D7 48 C1 F8 10 44 0F B6 C0 48 8B 43 28 C6 44 24 30 ?? "
+            "C6 44 24 28 01 48 89 44 24 20 E8 ?? ?? ?? ??");
+        const Pattern pro = ParsePattern("40 55 53 57 41 54 41 55 41 56 41 57 48 8D AC 24 60 FE FF FF 48 81 EC A0 02 00 00");
+        const Pattern dec = ParsePattern("40 38 B5 10 02 00 00 0F 84 11 22 33 44 40 38 B5 08 02 00 00 0F 84");
+        auto put = [&](size_t at, const Pattern& p) {
+            for (size_t i = 0; i < p.size(); ++i) img[at + i] = p.care[i] ? p.bytes[i] : 0;
+        };
+        auto call = [&](size_t at, size_t fn) {
+            const int32_t rel = static_cast<int32_t>(fn) - static_cast<int32_t>(at + 43 + 5);
+            memcpy(&img[at + 44], &rel, 4);
+        };
+        auto locate = [&]() {
+            GameModule fake{};
+            fake.base = img.data();
+            fake.text = {img.data(), img.data() + img.size()};
+            const char* why = "";
+            return CreatureAnimPreloadLocate(fake, &why);
+        };
+        put(0x100, site), call(0x100, 0x800), put(0x800, pro), put(0x800 + 0x250, dec);
+        Check(locate() == img.data() + 0x100 + 32, "creatureanim fake: one site, call to the prologue, flag test: found");
+        img[0x100 + 32] = 1;
+        Check(locate() == nullptr, "creatureanim fake: flag byte already 1 (the game's own): refused");
+        img[0x100 + 32] = 2;
+        Check(locate() == nullptr, "creatureanim fake: flag byte 2: refused");
+        img[0x100 + 32] = 0;
+        img[0x800 + 0x250] = 0x41;
+        Check(locate() == nullptr, "creatureanim fake: no flag test in the target: refused");
+        img[0x800 + 0x250] = 0x40;
+        img[0x801] = 0x56;
+        Check(locate() == nullptr, "creatureanim fake: call target is another function: refused");
+        img[0x801] = 0x55;
+        put(0x400, site), call(0x400, 0x800);
+        Check(locate() == nullptr, "creatureanim fake: two sites: refused");
+    }
+
+    // CellEvictSplit (flightrest / evfix 2026-11-13; public 1.5.0): the cell 3D removal and what is read from it, build
+    // 19115871; a module without the shapes is refused, and the key cannot be switched on before it was found
+    {
+        std::vector<uint8_t> none(0x4000, 0xCC);
+        GameModule fake{};
+        fake.base = none.data();
+        fake.text = {none.data(), none.data() + none.size()};
+        uint32_t fo[4] = {}, fg[3] = {};
+        Check(!CellEvictSplitFind(fake, fo) && !CellEvictSplitFindGates(fake, fg),
+              "evictsplit: a module without the 3D removal / Set3D block / hit-effect walk is refused (the key stays off)");
+        alignas(16) static uint8_t cesCell[0x200];
+        SetCellEvictSplit(2);  // not installed: forced to 0
+        Check(!CellEvictSplitStep(cesCell) && !CellEvictSplitTookFrame(),
+              "evictsplit: not found / not installed: CellEvictSplit=2 stays off, the paced unload is the stock one");
+        SetCellEvictSplit(0);
+        uint32_t ces[4] = {};
+        const bool cesFound = CellEvictSplitFind(game, ces);
+        Check(cesFound && ces[0] == 0x6658290 && ces[1] == 0x694FA70 && ces[2] == 0x694FC80 && ces[3] == 0x941F708,
+              "evictsplit: 3D removal exe+0x6658290, lock 0x694FA70, unlock 0x694FC80, player 0x941F708");
+        // review rev96f B1 gates (evfix): Set3D's cell-state block 0x658B9AF and the hit-effect walk 0x6741C50
+        uint32_t gates[3] = {};
+        const bool gatesFound = CellEvictSplitFindGates(game, gates);
+        Check(gatesFound && gates[0] == 0x94807F4 && gates[1] == 0x8FAFCB0 && gates[2] == 0x94918C8,
+              "evictsplit gates: arrow count 0x94807F4, ProcessLists 0x8FAFCB0, MagicHitEffect RTTI 0x94918C8");
+        // fix102 (rev102b S3): the refusal branches, on a copy of the game's code from Set3D's block (0x658B9AF) to past the
+        // ProcessLists getter (0x674B050): the copy is found as the game is; a wrong second lock lea, a notify call to
+        // another place, a getter of another shape or out of the code each leave the key off
+        if (cesFound && gatesFound) {
+            constexpr uint32_t lo = 0x658B000, hi = 0x674C000;
+            // static: the pattern-search check at the end repeats every search of the self-test on its range
+            static std::vector<uint8_t> img;
+            img.assign(game.base + lo, game.base + hi);
+            GameModule cp{};
+            cp.base = reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(img.data()) - lo);
+            cp.text = {img.data(), img.data() + img.size()};
+            auto at = [&](uint32_t rva) { return img.data() + (rva - lo); };
+            uint32_t co[4] = {}, cg[3] = {};
+            const bool copyOk = CellEvictSplitFind(cp, co) && CellEvictSplitFindGates(cp, cg) &&
+                                memcmp(co, ces, sizeof co) == 0 && memcmp(cg, gates, sizeof cg) == 0;
+            auto bump = [&](uint32_t rva, int32_t by) {
+                int32_t v;
+                memcpy(&v, at(rva), 4);
+                v += by;
+                memcpy(at(rva), &v, 4);
+            };
+            bump(0x6658290 + 0x58 + 3, 8);  // the unlock's lock object lea no longer equals the lock's
+            const bool lockRefused = !CellEvictSplitFind(cp, co);
+            bump(0x6658290 + 0x58 + 3, -8);
+            bump(0x658B9AF + 0x1D + 1, 16);  // Set3D's notify call goes elsewhere
+            const bool notifyRefused = !CellEvictSplitFindGates(cp, cg);
+            bump(0x658B9AF + 0x1D + 1, -16);
+            uint8_t* const getter = RipTarget(at(0x658B9AF + 0x12), 1, 5);
+            const bool getterInCopy = getter >= img.data() && getter + 8 <= img.data() + img.size();
+            bool shapeRefused = false, rangeRefused = false;
+            if (getterInCopy) {
+                const uint8_t ret = getter[7];
+                getter[7] = 0x90;  // not `mov rax,[rip+X]; ret`
+                shapeRefused = !CellEvictSplitFindGates(cp, cg);
+                getter[7] = ret;
+                bump(0x658B9AF + 0x12 + 1, 0x01000000);  // the getter call out of the code
+                rangeRefused = !CellEvictSplitFindGates(cp, cg);
+                bump(0x658B9AF + 0x12 + 1, -0x01000000);
+            }
+            const bool restored = CellEvictSplitFind(cp, co) && CellEvictSplitFindGates(cp, cg);
+            Check(copyOk && lockRefused && notifyRefused && getterInCopy && shapeRefused && rangeRefused && restored,
+                  "evictsplit (fix102 S3): a copy of the code is found as the game; a different lock object, a notify call "
+                  "elsewhere, a getter of another shape or outside the code each refuse (the key stays off)");
+        }
+        // fix102 (rev102b M1): the split decision on fake objects (every guard of rev96f B1 / F1)
+        {
+            using namespace ces;
+            CellEvictSplitFakes fk{&Lock, &Unlock, &depth, &player, &arrows, &plPtr, rttiHit};
+            CellEvictSplitTestFakes(&fk);
+            uint64_t cnt[8] = {};
+            CellEvictSplitTestCounts(cnt);
+            auto step = [&](int per) {
+                SetCellEvictSplit(per);
+                const bool r = CellEvictSplitStep(cell);
+                SetCellEvictSplit(0);
+                return r;
+            };
+            bool balanced = true;  // the lock is released on every return
+            auto stepB = [&](int per) {
+                const bool r = step(per);
+                balanced = balanced && depth == 0;
+                return r;
+            };
+            // per 0: nothing, not even the lock
+            Build("nnn");
+            const bool off = !stepB(0) && calls.empty() && locks == 0;
+            // B1.1: arrows live: the stock unload, no call
+            Build("nnn");
+            arrows = 1;
+            const bool arrowOff = !stepB(2) && calls.empty();
+            CellEvictSplitTestCounts(cnt);
+            const bool arrowCounted = cnt[2] == 1 && cnt[6] == 1;
+            // B1.3: one eligible actor and one hit target: the stock unload, no call
+            Build("nn");
+            AddHit(1);
+            const bool oneEligible = !stepB(2) && calls.empty();
+            // B1.2: a hit target is never cleared ahead; the others are, in list order
+            Build("nnn");
+            AddHit(1);
+            const bool h1 = stepB(2);
+            const bool h2 = !stepB(2);
+            const bool hitKept = h1 && h2 && calls == std::vector<int>({0, 2});
+            // N a step, in list order, statics and the player never, then the stock unload once fewer than 2 are left
+            Build("nsncsnpns");
+            const bool o1 = stepB(2), o2 = stepB(2), o3 = !stepB(2);
+            const bool order = o1 && o2 && o3 && calls == std::vector<int>({0, 2, 3, 5}) ;
+            // F1: a cell whose actors keep their 3D: at most ceil(4 / 2) + 1 = 3 steps, then the stock unload
+            Build("nnnn");
+            keep3d = true;
+            CellEvictSplitTestCounts(cnt);
+            int trueSteps = 0;
+            for (int k = 0; k < 6 && stepB(2); ++k) ++trueSteps;
+            CellEvictSplitTestCounts(cnt);
+            const bool limit = trueSteps == 3 && cnt[4] == 1 && calls.size() == 6;
+            // B1.1 mid-step: the first Set3D creates an arrow: the step ends after it, the next call is the stock unload
+            Build("nnnn");
+            arrowAfter = 1;
+            const bool m1 = stepB(2), m2 = !stepB(2);
+            const bool midArrow = m1 && m2 && calls == std::vector<int>({0});
+            // a step that clears nothing (its one actor became a hit target between the walk and the call): the stock
+            // unload, counted as an empty step
+            Build("nn");
+            hitOnBaseOf = 1, hitTarget = 0;
+            CellEvictSplitTestCounts(cnt);
+            const bool e1 = !stepB(1);
+            CellEvictSplitTestCounts(cnt);
+            const bool empty = e1 && calls.empty() && cnt[5] == 1;
+            // a creature counts as an actor; one actor without 3D does not
+            Build("cxn");
+            const bool crea1 = stepB(2), crea2 = !stepB(2);
+            const bool creature = crea1 && crea2 && calls == std::vector<int>({0, 2});
+            const bool underLock = unlocked == 0 && unlockedCalls == 0;
+            CellEvictSplitTestFakes(nullptr);
+            Check(off && arrowOff && arrowCounted && oneEligible,
+                  "evictsplit (fix102 M1): key 0: no call, no lock; arrows live: the stock unload; one eligible actor beside a "
+                  "hit target: the stock unload (no actor cleared ahead)");
+            Check(hitKept && order && creature,
+                  "evictsplit (fix102 M1): N actors a step in the game's list order (creatures too), never the player, a static "
+                  "or a hit-effect target; fewer than two left: the stock unload");
+            Check(limit && midArrow && empty,
+                  "evictsplit (fix102 M1): at most ceil(n / N) + 1 steps a cell; an arrow created mid-step ends the step and "
+                  "the split; a step that clears nothing is the stock unload");
+            Check(underLock && balanced,
+                  "evictsplit (fix102 S1): the cell's list is walked and every actor cleared under the game's lock, released "
+                  "on every return");
+        }
+    }
+    // PacingGateShownHoldMs (hold2 2026-11-13; public 1.5.0): the fade applier and the fade component's layout of build 19115871,
+    // then the decision on simulated spawn fade-ins (60 fps, 4 per second): what reaches the meshes is never below the
+    // writer's own value, the component and the actor are never written, a held far character stays at the max until its
+    // units ran / the bound / the fade's clock, then never rises, at 5 / value_release times the fade's speed (holdfix F6:
+    // 2x for the cases below released at 2.5, 3.3x at End 1.0), and the fade's end call (state 0) passes unchanged.
+    {
+        uint32_t sh[8] = {};
+        const bool shFound = ShownHoldFind(sh);
+        Check(shFound && sh[0] == 0x48CD850 && sh[1] == 0xD8 && sh[2] == 0xBC && sh[3] == 0xC0 && sh[4] == 0xD0 &&
+                  sh[5] == 0xCC && sh[6] == 0xA8 && sh[7] == 0x7A0,
+              "shownhold: applier exe+0x48CD850; fade component state +0xD8, value +0xBC, rate +0xC0, max +0xD0, floor +0xCC, "
+              "owner +0xA8; the actor's fade component +0x7A0");
+        if (shFound) {
+            alignas(16) static uint8_t shComp[0x200], shActor[0x800], shOther[0x200];
+            static uint64_t shNow;
+            static int shTick, shHeldFrom, shHeldUntil, shEnd = 20;
+            auto putF = [](uint8_t* p, uint32_t off, float v) { memcpy(p + off, &v, 4); };
+            auto putI = [](uint8_t* p, uint32_t off, int32_t v) { memcpy(p + off, &v, 4); };
+            auto putP = [](uint8_t* p, uint32_t off, const void* v) { memcpy(p + off, &v, 8); };
+            struct ShRun {
+                std::vector<float> arg, shown;  // every call in order (ticks and the floor setter's)
+                std::vector<char> isTick;
+                bool untouched = true;
+                float endArg = -1.0f, endShown = -2.0f, levelHeld = -1.0f, levelEnd = -1.0f;
+                uint64_t c[6] = {};
+            };
+            // one spawn: SetFadeState (value = max 5), then the tick at 60 fps until the fade ends (its end call: state 0).
+            // floor: the game's floor; foreign >= 0: the floor setter's own call (floor alone) after every 3rd tick
+            auto spawn = [&](int ms, int gt, int heldFrom, int heldUntil, float floor, float foreign, bool reset, bool ownComp) {
+                ShRun r;
+                shHeldFrom = heldFrom, shHeldUntil = heldUntil;
+                if (reset)
+                    ShownHoldTestSetup(+[](uintptr_t) { return shTick >= shHeldFrom && shTick < shHeldUntil; },
+                                       +[]() { return shNow; }, gt, ms, shEnd);
+                putP(shComp, 0xA8, shActor);
+                putP(shActor, 0x7A0, ownComp ? shComp : shOther);
+                putI(shComp, 0xD8, 1);
+                putF(shComp, 0xC0, 4.0f), putF(shComp, 0xD0, 5.0f), putF(shComp, 0xCC, floor);
+                float v = 5.0f;
+                for (shTick = 0; shTick < 200; ++shTick) {
+                    shNow += 16667;
+                    v -= 4.0f / 60.0f;
+                    const bool end = v < 0.0f;
+                    if (end) v = 0.0f, putI(shComp, 0xD8, 0);
+                    putF(shComp, 0xBC, v);
+                    alignas(16) static uint8_t c0[0x200], a0[0x800];
+                    memcpy(c0, shComp, sizeof c0), memcpy(a0, shActor, sizeof a0);
+                    const float arg = std::max(floor, v);
+                    const float shown = ShownHoldTestCall(shComp, shActor, arg);
+                    if (memcmp(c0, shComp, sizeof c0) || memcmp(a0, shActor, sizeof a0)) r.untouched = false;
+                    if (end) {
+                        r.endArg = arg, r.endShown = shown, r.levelEnd = ShownHoldLevel(shComp);
+                        break;
+                    }
+                    if (shTick == 10) r.levelHeld = ShownHoldLevel(shComp);
+                    r.arg.push_back(arg), r.shown.push_back(shown), r.isTick.push_back(1);
+                    if (foreign >= 0.0f && shTick % 3 == 1) {
+                        const float fs = ShownHoldTestCall(shComp, shActor, foreign);
+                        if (memcmp(c0, shComp, sizeof c0) || memcmp(a0, shActor, sizeof a0)) r.untouched = false;
+                        r.arg.push_back(foreign), r.shown.push_back(fs), r.isTick.push_back(0);
+                    }
+                }
+                ShownHoldTestCounts(r.c);
+                return r;
+            };
+            auto never = [](const ShRun& r) {  // never more visible than the game: shown >= the writer's value, every call
+                for (size_t i = 0; i < r.arg.size(); ++i)
+                    if (r.shown[i] < r.arg[i]) return false;
+                return r.endShown >= r.endArg;
+            };
+            auto same = [](const ShRun& r) {  // the game's value everywhere
+                for (size_t i = 0; i < r.arg.size(); ++i)
+                    if (r.shown[i] != r.arg[i]) return false;
+                return r.endShown == r.endArg;
+            };
+            // ticks at the max after the hold opened; the opening jump; the largest tick-to-tick rise after it and fall
+            struct ShShape {
+                int atMax = 0;
+                float openJump = 0, rise = 0, fall = 0;
+            };
+            auto shape = [](const ShRun& r) {
+                ShShape s;
+                float prev = -1.0f;
+                bool open = false;
+                for (size_t i = 0; i < r.arg.size(); ++i) {
+                    if (!r.isTick[i]) continue;
+                    const float x = r.shown[i];
+                    if (!open && x >= 5.0f) open = true, s.openJump = prev >= 0.0f ? x - prev : 0.0f;
+                    else if (open && prev >= 0.0f) s.rise = std::max(s.rise, x - prev), s.fall = std::max(s.fall, prev - x);
+                    if (open && x >= 5.0f) ++s.atMax;
+                    prev = x;
+                }
+                return s;
+            };
+            const float stockStep = 4.0f / 60.0f;
+            // (1) units run after 20 ticks; far floor 4 with the floor setter writing 2.9 in between (rev96e F3)
+            const ShRun r1 = spawn(500, 1, 1, 20, 4.0f, 2.9f, true, true);
+            const ShShape s1 = shape(r1);
+            Check(r1.untouched && never(r1) && r1.c[0] == 1 && r1.c[2] == 1 && r1.c[5] == 0 && s1.atMax == 20 && s1.rise == 0.0f &&
+                      s1.openJump <= 0.25f && r1.endShown == r1.endArg && r1.levelHeld == 5.0f && r1.levelEnd == 0.0f,
+                  "shownhold: units ran after 19 held ticks (20 at the max: the release tick shows the max): the meshes stay at 5 meanwhile (also against the floor setter's 2.9), "
+                  "then fade without rising; the fade's end call passes unchanged; nothing written");
+            // (2) held for ever, bound 500 ms: released by the bound (~30 ticks), at most twice the stock speed afterwards
+            const ShRun r2 = spawn(500, 1, 1, 1000, 0.0f, -1.0f, true, true);
+            const ShShape s2 = shape(r2);
+            Check(r2.untouched && never(r2) && r2.c[0] == 1 && r2.c[3] == 1 && s2.atMax >= 30 && s2.atMax <= 31 && s2.rise == 0.0f &&
+                      s2.fall <= 2.1f * stockStep && r2.endShown == r2.endArg,
+                  "shownhold: held for ever: released by PacingGateShownHoldMs (500 ms), then at most about twice the fade's "
+                  "speed, reaching the game's value at its end");
+            // (3) end 2.0 (released at 2.5 = end + the soft window), bound 1000 ms: the fade's own clock releases it at 0.625 s
+            const ShRun r3 = spawn(1000, 1, 1, 1000, 0.0f, -1.0f, true, true);
+            const ShShape s3 = shape(r3);
+            Check(r3.untouched && never(r3) && r3.c[0] == 1 && r3.c[4] == 1 && s3.atMax >= 36 && s3.atMax <= 37 && s3.rise == 0.0f &&
+                      s3.fall <= 2.1f * stockStep && r3.endShown == r3.endArg,
+                  "shownhold: PacingGateShownHoldEnd 2.0, a bound past it: released by the fade's clock at value 2.5; the end "
+                  "unchanged");
+            // (3b) PacingGateShownHoldEnd 0.75 (released at 1.25), bound 2000 ms: at 0.94 s, then at most about 4x
+            shEnd = 7;
+            const ShRun r3b = spawn(2000, 1, 1, 1000, 0.0f, -1.0f, true, true);
+            shEnd = 20;
+            const ShShape s3b = shape(r3b);
+            printf("      (shownhold end 0.7: %d ticks at the max, largest fall %.3f per tick)\n", s3b.atMax, s3b.fall);
+            Check(r3b.untouched && never(r3b) && r3b.c[0] == 1 && r3b.c[4] == 1 && s3b.atMax >= 55 && s3b.atMax <= 57 &&
+                      s3b.rise == 0.0f && s3b.fall <= 4.6f * stockStep && r3b.endShown == r3b.endArg,
+                  "shownhold: PacingGateShownHoldEnd 0.7: released by the fade's clock at value 1.2, then at most about 4x the "
+                  "fade's speed; the end unchanged");
+            // (4) not held / (5) found too late (value 4.6) / (6) key 0 / (7) not the game thread / (8) not the actor's own
+            const ShRun r4 = spawn(500, 1, 0, 0, 4.0f, 2.9f, true, true);
+            const ShRun r5 = spawn(500, 1, 5, 1000, 0.0f, -1.0f, true, true);
+            const ShRun r6 = spawn(0, 1, 1, 1000, 0.0f, -1.0f, true, true);
+            const ShRun r7 = spawn(500, 0, 1, 1000, 0.0f, -1.0f, true, true);
+            const ShRun r8 = spawn(500, 1, 1, 1000, 0.0f, -1.0f, true, false);
+            Check(same(r4) && r4.c[0] == 0 && same(r5) && r5.c[0] == 0 && r5.c[1] == 1 && same(r6) && same(r7) && same(r8) &&
+                      r4.untouched && r5.untouched && r8.untouched,
+                  "shownhold: the game's value when the gate holds nothing, when first held past the fade's first quarter "
+                  "unit (not hidden again), with the key 0, off the game thread, or for another actor's fade component");
+            // (9) one hold per spawn: a second spawn on the same component (after the end) is held again; within one spawn a
+            // hold that was released is not opened again although the units are held again
+            const ShRun r9a = spawn(500, 1, 1, 20, 0.0f, -1.0f, true, true);
+            const ShRun r9 = spawn(500, 1, 1, 20, 0.0f, -1.0f, false, true);
+            shHeldFrom = 1, shHeldUntil = 1000;
+            const ShRun r10 = [&] {
+                ShownHoldTestSetup(+[](uintptr_t) { return (shTick >= 1 && shTick < 10) || shTick >= 15; }, +[]() { return shNow; },
+                                   1, 500, 20);
+                return spawn(500, 1, 1, 1000, 0.0f, -1.0f, false, true);
+            }();
+            const ShShape s10 = shape(r10);
+            ShownHoldTestQueued(+[](uintptr_t) { return true; });
+            ShownHoldTestAiEarly();
+            const ShRun r11 = spawn(500, 1, 1, 1000, 0.0f, -1.0f, true, true);
+            const uint64_t early11 = ShownHoldTestAiEarly();
+            ShownHoldTestQueued(+[](uintptr_t) { return false; });
+            const ShRun r12 = spawn(500, 1, 1, 1000, 0.0f, -1.0f, true, true);
+            const uint64_t early12 = ShownHoldTestAiEarly();
+            ShownHoldTestQueued(nullptr);
+            Check(never(r11) && early11 == 1 && early12 == 0,
+                  "shownhold: a held fade that ends with the actor's units still queued is counted (its AI starts before it is "
+                  "built); none when they ran");
+            Check(r9a.c[0] == 1 && never(r9) && r9.c[0] == 1 && never(r10) && r10.c[0] == 1 && r10.c[2] == 1 && s10.atMax == 10 && s10.rise == 0.0f,
+                  "shownhold: a new spawn is held again; within one spawn a released hold never opens again");
+            // holdfix F3: a fade that is never held (the gate holds nothing) and ends with units queued is counted too
+            ShownHoldTestQueued(+[](uintptr_t) { return true; });
+            ShownHoldTestAiEarly();
+            const ShRun r13 = spawn(500, 1, 0, 0, 0.0f, -1.0f, true, true);
+            const uint64_t early13 = ShownHoldTestAiEarly();
+            ShownHoldTestQueued(nullptr);
+            Check(same(r13) && r13.c[0] == 0 && early13 == 1,
+                  "shownhold (holdfix F3): a fade never held that ends with the actor's units queued is counted (AI before built)");
+            // fix102 (rev102a M1 / M2 / S3a): the equipment-first mark and the urgent list on the hook's own slots (fake
+            // owners whose UObject InternalIndex at +0xC can change: another object at the same address)
+            {
+                alignas(16) static uint8_t own[8][0x40];
+                auto setIdx = [](uint8_t* o, int32_t v) { memcpy(o + 0xC, &v, 4); };
+                for (int i = 0; i < 8; ++i) setIdx(own[i], 100 + i);
+                auto O = [](int i) { return reinterpret_cast<uintptr_t>(own[i]); };
+                auto C = [](int i) { return static_cast<uintptr_t>(0x7000 + i * 0x10); };
+                ShownHoldTestSetup(+[](uintptr_t) { return true; }, +[]() { return shNow; }, 1, 1000, 10);
+                auto urgentLeft = [&](int i) {  // the seconds left of owner i in the urgent list, -1: not listed
+                    uintptr_t out[64];
+                    float left[64];
+                    const int n = ShownHoldUrgentOwners(out, left, 64);
+                    for (int k = 0; k < n; ++k)
+                        if (out[k] == O(i)) return left[k];
+                    return -1.0f;
+                };
+                auto touch = [&](std::initializer_list<int> live) {
+                    for (int i : live) ShownHoldTestHold(C(i), O(i), true);
+                };
+                shNow += 1000000;
+                touch({0});
+                const float u0none = urgentLeft(0);
+                ShownHoldNoteEquipFirst(O(0));
+                const float u0a = urgentLeft(0);
+                shNow += 50000, touch({0});
+                const float u0b = urgentLeft(0);
+                shNow += 60000, touch({0});
+                const float u0c = urgentLeft(0);
+                Check(u0none < 0.0f && std::fabs(u0a - 0.1f) < 1e-4f && std::fabs(u0b - 0.05f) < 1e-4f && u0c == 0.0f,
+                      "shownhold (fix102 M1): an equipment unit run during an open hold gives the actor a deadline 0.1 s later "
+                      "(the urgent list's time left falls with the clock, 0 past it)");
+                // M2: a marked hold not called for 0.1 s is not listed; another object at the owner's address is not listed
+                touch({1, 2});
+                ShownHoldNoteEquipFirst(O(1));
+                ShownHoldNoteEquipFirst(O(2));
+                const bool both = urgentLeft(1) > 0.0f && urgentLeft(2) > 0.0f;
+                shNow += 120000, touch({0, 2});
+                const float u1stale = urgentLeft(1), u2live = urgentLeft(2);
+                setIdx(own[2], 999);  // a new object at owner 2's address
+                const float u2reused = urgentLeft(2);
+                setIdx(own[2], 102);
+                Check(both && u1stale < 0.0f && u2live >= 0.0f && u2reused < 0.0f,
+                      "shownhold (fix102 M2): a marked hold not called for 0.1 s (its actor destroyed) or with another object "
+                      "at its owner's address is not urgent");
+                // M2: the sweep frees held slots not called for 2 s (not only when the table is full)
+                const int activeBefore = ShownHoldTestHold(0, 0, false);
+                for (int k = 0; k < 10; ++k) shNow += 250000, touch({0}), urgentLeft(0);
+                const int activeAfter = ShownHoldTestHold(0, 0, false);
+                Check(activeBefore == 3 && activeAfter == 1,
+                      "shownhold (fix102 M2): held slots of actors gone for 2 s are swept (the hook's active count falls)");
+                // S3a: equipment that ran before the hold opened marks it when it opens (deadline from that unit); an old note,
+                // or one for another object at the address, does not
+                ShownHoldNoteEquipFirst(O(4));
+                shNow += 30000, touch({0, 4});
+                const float u4 = urgentLeft(4);
+                ShownHoldNoteEquipFirst(O(5));
+                setIdx(own[5], 555);
+                shNow += 10000, touch({0, 4, 5});
+                const float u5 = urgentLeft(5);
+                ShownHoldNoteEquipFirst(O(6));
+                shNow += 600000, touch({0, 4, 5, 6});
+                const float u6 = urgentLeft(6);
+                printf("      (shownhold equipment-first: left %.3f / %.3f / %.3f s; before the open %.3f, reused %.3f, old %.3f)\n",
+                       u0a, u0b, u0c, u4, u5, u6);
+                Check(std::fabs(u4 - 0.07f) < 1e-4f && u5 < 0.0f && u6 < 0.0f,
+                      "shownhold (fix102 S3a): equipment that ran just before the hold opened marks it at the open (deadline "
+                      "from that unit); a note older than 0.5 s or for another object at the address does not");
+                ShownHoldTestSetup(nullptr, nullptr, -1, 0, 10);
+            }
+        }
+        // holdfix F2 (2026-11-13): the due rule's deadline spread (ShownHoldDueSpread) and the runner's order (earliest
+        // deadline first; every due-now unit; one soft-due unit a frame) on simulated frames. chars characters with units
+        // held units each that never fit (only the due rule runs them), spawned gap frames apart at fade value v0; the fade
+        // falls 4 per second; PacingGateShownHoldEnd 1.0 (due now at value 1, 0.25 s before the end), soft window 0.125 s.
+        // A unit still queued at its character's fade end = AI before built; most units in one frame = the burst.
+        {
+            struct DueSim {
+                int maxFrame = 0, leftAtEnd = 0, dueNow = 0, maxRate = 0;
+            };
+            // jump > 0: every jump-th frame takes 3x the period (rev96g delta: the model had constant periods only); the
+            // spread is given the larger of the second longest and the mean of the last 8 periods, as GatePeriodS does
+            // (fix102 S2), and the frame's
+            // rate is the highest the spread asked for in that frame (fix102 S1, the runner's g_dueRate)
+            auto sim = [](float fps, int chars, int units, int gap, float v0, int jump = 0) {
+                DueSim r;
+                const float base = 1.0f / fps, endV = 1.0f, softS = 0.5f / 4.0f;
+                std::vector<float> v(chars, v0);
+                std::vector<int> left(chars, units);
+                std::vector<float> ring(8, base);
+                for (int f = 0; f < 4000; ++f) {
+                    const float period = jump > 0 && f % jump == jump - 1 ? 3.0f * base : base;
+                    float seen1 = 0.0f, seen = 0.0f, mean = 0.0f;  // the spread's period: max(second longest, mean) of 8
+                    for (float x : ring) {
+                        mean += x / 8.0f;
+                        if (x > seen1) seen = seen1, seen1 = x;
+                        else if (x > seen) seen = x;
+                    }
+                    seen = std::max(seen, mean);
+                    bool live = false;
+                    for (int c = 0; c < chars; ++c) {
+                        if (f < c * gap || v[c] <= 0.0f) {
+                            live = live || f < c * gap;
+                            continue;
+                        }
+                        v[c] -= 4.0f * period;
+                        if (v[c] <= 0.0f) {  // the fade's end (its AI switches on)
+                            r.leftAtEnd += left[c];
+                            left[c] = 0;
+                            continue;
+                        }
+                        live = true;
+                    }
+                    ring.insert(ring.begin(), period);
+                    ring.pop_back();
+                    if (!live) break;
+                    int ran = 0, softRan = 0, frameRate = 1;
+                    for (int guard = 0; guard < 256; ++guard) {
+                        std::vector<float> t;
+                        std::vector<int> who;
+                        std::vector<uint8_t> cls;  // 0 not due, 1 soft, 2 now
+                        std::vector<float> st;
+                        std::vector<size_t> sidx;
+                        for (int c = 0; c < chars; ++c) {
+                            if (f < c * gap || v[c] <= 0.0f) continue;
+                            for (int u = 0; u < left[c]; ++u) {
+                                const bool now = v[c] <= endV;
+                                t.push_back(now ? 0.0f : (v[c] - endV) / 4.0f);
+                                who.push_back(c);
+                                cls.push_back(now ? 2 : 0);
+                                if (!now) st.push_back(t.back()), sidx.push_back(t.size() - 1);
+                            }
+                        }
+                        int rate = 1;
+                        if (!st.empty()) {
+                            std::vector<uint8_t> dd(st.size());
+                            rate = ShownHoldDueSpread(st.data(), st.size(), seen, softS, dd.data());
+                            r.maxRate = std::max(r.maxRate, rate);
+                            for (size_t k = 0; k < st.size(); ++k)
+                                if (dd[k]) cls[sidx[k]] = 1;
+                        }
+                        frameRate = std::max(frameRate, rate);
+                        size_t pick = t.size();
+                        for (size_t k = 0; k < t.size(); ++k) {
+                            const bool ok = cls[k] == 2 || (cls[k] == 1 && softRan < frameRate);
+                            if (ok && (pick == t.size() || t[k] < t[pick])) pick = k;
+                        }
+                        if (pick == t.size()) break;
+                        if (cls[pick] == 2) ++r.dueNow;
+                        else ++softRan;
+                        --left[who[pick]];
+                        ++ran;
+                    }
+                    r.maxFrame = std::max(r.maxFrame, ran);
+                }
+                return r;
+            };
+            bool allClear = true, oneAFrame = true;
+            for (float fps : {60.0f, 45.0f, 30.0f, 20.0f})
+                for (int k : {1, 4, 10}) {
+                    const DueSim one = sim(fps, 1, k, 0, 5.0f);   // one character with k held units
+                    const DueSim many = sim(fps, k, 1, 0, 5.0f);  // k characters with one unit each, spawned together
+                    const DueSim step = sim(fps, k, 2, 1, 5.0f);  // k characters with two units, a frame apart
+                    printf("      (due spread %2.0f fps, %2d units: most a frame %d / %d / %d, due-now runs %d / %d / %d)\n", fps,
+                           k, one.maxFrame, many.maxFrame, step.maxFrame, one.dueNow, many.dueNow, step.dueNow);
+                    allClear = allClear && one.leftAtEnd == 0 && many.leftAtEnd == 0 && step.leftAtEnd == 0;
+                    // port102: at 20 fps the spread's rate may take two a frame (10 characters a frame apart, 2 units each)
+                    const int most = fps < 25.0f ? 2 : 1;
+                    oneAFrame = oneAFrame && one.maxFrame <= most && many.maxFrame <= most && step.maxFrame <= most &&
+                                one.dueNow == 0 && many.dueNow == 0 && step.dueNow == 0;
+                }
+            // found late (value 1.2: 0.05 s before due now) with 10 units at 30 fps: the hard backstop (due now) clears them
+            const DueSim late = sim(30.0f, 1, 10, 0, 1.2f);
+            printf("      (due spread late 30 fps 10 units: most a frame %d, due-now runs %d)\n", late.maxFrame, late.dueNow);
+            Check(allClear && late.leftAtEnd == 0,
+                  "shownhold (holdfix F2): at 60 / 45 / 30 / 20 fps with 1, 4 and 10 held units (one or many characters) no fade "
+                  "ends with units queued; a late find is cleared by due now");
+            Check(oneAFrame,
+                  "shownhold (holdfix F2): from the fade's start the deadline spread runs at most one due unit a frame (two at "
+                  "20 fps) and never needs due now (60 / 45 / 30 / 20 fps, 1-10 units)");
+            // rev96g F2 (port102): more units than one a frame can clear (20 fps, 24 units of one character: the frames
+            // before its due now hold about 16 at 1.25 periods each) and the late find: the spread raises its rate instead
+            // of leaving the rest to one due-now frame (the late find before: 1 soft, then 9 in one due-now frame)
+            const DueSim many20 = sim(20.0f, 1, 24, 0, 5.0f);
+            const DueSim late4 = sim(30.0f, 1, 10, 0, 1.2f);
+            printf("      (due spread 20 fps 24 units: most a frame %d, rate %d, due-now runs %d; late 30 fps 10 units: most a "
+                   "frame %d, rate %d, due-now runs %d)\n",
+                   many20.maxFrame, many20.maxRate, many20.dueNow, late4.maxFrame, late4.maxRate, late4.dueNow);
+            Check(many20.leftAtEnd == 0 && many20.maxRate == 2 && many20.maxFrame <= 2 && many20.dueNow == 0 &&
+                      late4.leftAtEnd == 0 && late4.maxRate == 4 && late4.maxFrame <= 6,
+                  "shownhold (rev96g F2): when one a frame cannot meet the deadlines the spread runs the least rate that can "
+                  "(at most 4 a frame) instead of one due-now heap (late find: 4 + 6 instead of 1 + 9); due now stays the "
+                  "backstop past that");
+            // fix102 (rev102a S1): when a rate of at most 4 suffices, no unit is left to due now: 4 units 10 ms before their
+            // due now at 60 fps run together (rate 4; before: 2, then 2 as due now); 6 units 70 ms before it at 20 fps run
+            // 3 + 3 (rate 3; before: 2 + 2, then 2 as due now)
+            const DueSim fit60 = sim(60.0f, 1, 4, 0, 1.0f + 4.0f * (0.01f + 1.0f / 60.0f));
+            const DueSim fit20 = sim(20.0f, 1, 6, 0, 1.0f + 4.0f * (0.07f + 1.0f / 20.0f));
+            printf("      (due spread, the frame's rate latched: 60 fps 4 units 10 ms before due now: most a frame %d, due-now %d; "
+                   "20 fps 6 units 70 ms before: most a frame %d, due-now %d)\n",
+                   fit60.maxFrame, fit60.dueNow, fit20.maxFrame, fit20.dueNow);
+            Check(fit60.leftAtEnd == 0 && fit60.dueNow == 0 && fit60.maxFrame == 4 && fit20.leftAtEnd == 0 && fit20.dueNow == 0 &&
+                      fit20.maxFrame == 3,
+                  "shownhold (fix102 S1): the spread's rate holds for the whole frame: when a rate of 4 or less can meet the "
+                  "deadlines no unit is left to due now");
+            // fix102 (rev102a S2): 10 units 0.6 s before due now at 60 fps after one 100 ms hitch: with the period now (the
+            // mean of 8, 27 ms) none is due yet (rate 1); with the hitch as the period (the longest of 8, before) all 10
+            // were soft-due at once at rate 2
+            {
+                std::vector<float> t10(10, 0.6f);
+                std::vector<uint8_t> d10(10);
+                const int rTrue = ShownHoldDueSpread(t10.data(), 10, (0.1f + 7.0f / 60.0f) / 8.0f, 0.125f, d10.data());
+                const int nTrue = static_cast<int>(std::count(d10.begin(), d10.end(), uint8_t(1)));
+                const int rHitch = ShownHoldDueSpread(t10.data(), 10, 0.1f, 0.125f, d10.data());
+                const int nHitch = static_cast<int>(std::count(d10.begin(), d10.end(), uint8_t(1)));
+                Check(rTrue == 1 && nTrue == 0 && rHitch == 2 && nHitch == 10,
+                      "shownhold (fix102 S2): 10 units 0.6 s before due now at 60 fps after one 100 ms hitch: none due yet "
+                      "with the period now (the mean of 8; with the hitch as the period: all 10 at rate 2)");
+            }
+            // rev96g delta: frames of changing length (every 5th / 9th frame 3x as long) with 4 and 10 units at 45 / 30 fps
+            bool jumpClear = true;
+            int jumpMost = 0;
+            for (float fps : {45.0f, 30.0f})
+                for (int k : {4, 10})
+                    for (int jump : {5, 9}) {
+                        const DueSim j = sim(fps, 1, k, 0, 5.0f, jump), jm = sim(fps, k, 1, 1, 5.0f, jump);
+                        jumpClear = jumpClear && j.leftAtEnd == 0 && jm.leftAtEnd == 0;
+                        jumpMost = std::max({jumpMost, j.maxFrame, jm.maxFrame});
+                    }
+            printf("      (due spread with long frames: most a frame %d)\n", jumpMost);
+            Check(jumpClear && jumpMost <= 2,  // fix102: the second longest alone gave 3 here
+                  "shownhold (rev96g delta): with frames of changing length (3x every 5th / 9th) no fade ends with units "
+                  "queued and no frame runs more than two due units");
+        }
+        ShownHoldTestSetup(nullptr, nullptr, -1, 0, 10);
+        ShownHoldTestQueued(nullptr);
     }
 
     // GpuSceneKeepCapacity: the GPU scene buffers (build 19115871): sites, then the thunk end to end (a caller that sets edi and rsi as
@@ -4872,6 +6432,7 @@ int wmain(int argc, wchar_t** argv)
     rtm::RigTmplSelfTest(game);     // RigImportTemplate
     fpm::FarPawnSelfTest(game);     // FarPawnMoveHalfRate / FarHorseMove
     cpl::CreatePreloadSelfTest(game);  // CreatePreload
+    ipl::ImpactPreloadSelfTest(game);  // ImpactPreload
     nbl::NpcBodiesSelfTest(game);   // NpcBodiesOneLock
     rts::RtSceneSelfTest(game);     // RtSceneBufferKeep
     BufferFloorRun(game);           // InstanceBufferFloor / lab SceneBufferFloorMiB (after GpuSceneKeepCapacity's and RtSceneBufferKeep's tests)

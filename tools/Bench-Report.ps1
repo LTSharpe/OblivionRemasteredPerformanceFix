@@ -175,7 +175,11 @@ function Get-Scenes($runs) {
     foreach ($run in $runs) {
         foreach ($s in @($run.R.sessions)) {
             if ($s.kind -ne 'perf') { continue }
-            foreach ($sc in @($s.scenes)) { if (-not $map.Contains($sc.id)) { $map[$sc.id] = New-Object System.Collections.ArrayList }; [void]$map[$sc.id].Add($sc) }
+            foreach ($sc in @($s.scenes)) {
+                if (-not $map.Contains($sc.id)) { $map[$sc.id] = New-Object System.Collections.ArrayList }
+                $sc | Add-Member -NotePropertyName _dir -NotePropertyValue $run.Dir -Force
+                [void]$map[$sc.id].Add($sc)
+            }
         }
     }
     $map
@@ -195,6 +199,118 @@ function Cell($b, $t, [string]$fmt = 'F1', [switch]$LowerIsBetter) {
     $d = if ($b) { ($t - $b) / $b * 100 } else { 0 }
     $mark = if ([math]::Abs($d) -lt 5) { ' ~' } else { '' }
     '{0} -> {1} ({2:+0;-0}%{3})' -f $b.ToString($fmt), $t.ToString($fmt), $d, $mark
+}
+
+
+# ---------------------------------------------------------------- rendered frames from PresentMon (2026-11-12, worker dropcal)
+# Stock has no per-frame log of the game thread, so stock and fix are compared through the runner's PresentMon capture
+# (perf-frames.csv, written by every run). With frame generation the game presents two frames per rendered frame, back to
+# back: a rendered frame = the pair, its period the sum of the two MsBetweenPresents. Reference implementation and tests:
+# tools\analysis\report_line.py (the same numbers; the script checks them against each other).
+if (-not ('PmReport' -as [type])) {
+    try { Add-Type -Language CSharp -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+public class PmLine {
+    public int Frames, Ge25, Ge33, Drops, Mild, Groups;
+    public double Seconds, Fps, MeanMs, P99Ms, WorstMs, Ge25Pct, Ge33Pct, OverPerFrame;
+}
+public static class PmReport {
+    const double CapMs = 1000.0 / 60.0;
+    public static PmLine Read(string csv, double t0, double t1, bool frameGen, double graceS) {
+        var cpuL = new List<double>(); var gapL = new List<double>();
+        using (var sr = new StreamReader(csv)) {
+            string h = sr.ReadLine(); if (h == null) return null;
+            string[] hs = h.TrimStart('\uFEFF').Split(',');
+            int ic = Array.IndexOf(hs, "CPUStartQPCTimeInMs"), ib = Array.IndexOf(hs, "MsBetweenPresents");
+            if (ic < 0 || ib < 0) return null;
+            string line; double lo = t0 - (frameGen ? 1000.0 : 0.0);
+            while ((line = sr.ReadLine()) != null) {
+                string[] f = line.Split(',');
+                double c, b;
+                if (f.Length <= Math.Max(ic, ib)) continue;
+                if (!double.TryParse(f[ic], NumberStyles.Float, CultureInfo.InvariantCulture, out c)) continue;
+                if (!double.TryParse(f[ib], NumberStyles.Float, CultureInfo.InvariantCulture, out b)) continue;
+                double e = c + b;
+                if (e >= lo && e <= t1) { cpuL.Add(c); gapL.Add(b); }
+            }
+        }
+        int m = gapL.Count;
+        var T = new List<double>(); var P = new List<double>();
+        if (!frameGen) {
+            for (int i = 0; i < m; i++) { double e = cpuL[i] + gapL[i]; if (e >= t0) { T.Add(e); P.Add(gapL[i]); } }
+        } else {
+            int first = -1, ncore = 0;
+            for (int i = 0; i < m; i++) if (cpuL[i] + gapL[i] >= t0) { if (first < 0) first = i; ncore++; }
+            if (first < 0 || ncore <= 3) return null;
+            double s0 = 0, s1 = 0; int n0 = 0, n1 = 0, half = ncore / 2;
+            for (int i = first; i < m && n0 < half; i += 2) { s0 += gapL[i]; n0++; }
+            for (int i = first + 1; i < m && n1 < half; i += 2) { s1 += gapL[i]; n1++; }
+            double m0 = s0 / Math.Max(n0, 1), m1 = s1 / Math.Max(n1, 1);
+            int ph = (m0 < m1) ? first % 2 : (first + 1) % 2;
+            int k = (m - ph) / 2 * 2;
+            for (int j = 0; j < k; j += 2) {
+                double e = cpuL[ph + j + 1] + gapL[ph + j + 1];
+                if (e >= t0 && e <= t1) { T.Add(e); P.Add(gapL[ph + j] + gapL[ph + j + 1]); }
+            }
+        }
+        int n = T.Count;
+        var r = new PmLine();
+        if (n == 0) return r;
+        double[] t = T.ToArray(), per = P.ToArray(), st = new double[n];
+        for (int i = 0; i < n; i++) st[i] = t[i] - per[i];
+        // play = not a menu-length gap; grace = the first graceS seconds and 3 s after each gap of 1 s or more
+        var play = new bool[n]; var gok = new bool[n]; double until = st[0] + graceS * 1000.0;
+        for (int i = 0; i < n; i++) {
+            play[i] = per[i] < 1000.0;
+            if (per[i] >= 1000.0) until = Math.Max(until, t[i] + 3000.0);
+            gok[i] = st[i] >= until;
+        }
+        var x = new List<double>(); double sum = 0, over = 0, worst = 0;
+        for (int i = 0; i < n; i++) if (play[i] && gok[i]) {
+            x.Add(per[i]); sum += per[i]; if (per[i] > worst) worst = per[i];
+            if (per[i] >= 25.0) r.Ge25++; if (per[i] >= 33.3) r.Ge33++;
+            if (per[i] > CapMs) over += per[i] - CapMs;
+        }
+        int c2 = x.Count; if (c2 == 0) return r;
+        r.Frames = c2; r.Seconds = sum / 1000.0; r.Fps = c2 / r.Seconds; r.MeanMs = sum / c2; r.WorstMs = worst;
+        r.Ge25Pct = 100.0 * r.Ge25 / c2; r.Ge33Pct = 100.0 * r.Ge33 / c2; r.OverPerFrame = over / c2;
+        double[] xs = x.ToArray(); Array.Sort(xs);
+        double pos = (c2 - 1) * 0.99; int pl = (int)Math.Floor(pos); int ph2 = Math.Min(pl + 1, c2 - 1);
+        r.P99Ms = xs[pl] + (xs[ph2] - xs[pl]) * (pos - pl);
+        // bursts of frames >= 25 ms merged when less than 0.5 s apart; peak >= 28 = drop, 25-28 = mild; sudden = the
+        // peak is >= 11 (mild: 8) ms above the median of the half second before (needs 8 play frames, else counted)
+        var groups = new List<List<int>>();
+        for (int i = 0; i < n; i++) {
+            if (!(per[i] >= 25.0 && play[i])) continue;
+            if (groups.Count > 0) { var g = groups[groups.Count - 1]; if (st[i] - t[g[g.Count - 1]] < 500.0) { g.Add(i); continue; } }
+            groups.Add(new List<int> { i });
+        }
+        r.Groups = groups.Count;
+        foreach (var g in groups) {
+            int i0 = g[0], ip = g[0];
+            foreach (int i in g) if (per[i] > per[ip]) ip = i;
+            double peak = per[ip];
+            int j0 = 0; double cut = st[i0] - 500.0;
+            while (j0 < n && t[j0] <= cut) j0++;
+            var bs = new List<double>();
+            for (int i = j0; i < i0; i++) if (play[i]) bs.Add(per[i]);
+            bool have = bs.Count >= 8; bool sudden = true;
+            if (have) {
+                bs.Sort(); int bc = bs.Count;
+                double med = (bc % 2 == 1) ? bs[bc / 2] : (bs[bc / 2 - 1] + bs[bc / 2]) / 2.0;
+                sudden = (peak - med) >= (peak >= 28.0 ? 11.0 : 8.0);
+            }
+            if (!gok[i0] || !sudden) continue;
+            if (peak >= 28.0) r.Drops++; else r.Mild++;
+        }
+        return r;
+    }
+}
+'@
+    } catch { Write-Warning "the PresentMon reader did not compile ($($_.Exception.Message)): the 'Rendered frames' section is left out" }
 }
 
 # ---------------------------------------------------------------- report
@@ -314,6 +430,48 @@ if ($moving.Count) {
         $b = $bs[$id]; $t = $ts[$id]
         $md.Add("| $id | $(Cell (Value $b fps) (Value $t fps)) | $(Cell (Value $b low1) (Value $t low1)) | $(Cell (Value $b worstMs) (Value $t worstMs) 'F0') | $(Cell (Value $b hitches) (Value $t hitches) 'F0') | $(Cell (Value $b threads.GameThread.msPerFrame) (Value $t threads.GameThread.msPerFrame) 'F2') | $(Cell (Value $b gpuBusyMs) (Value $t gpuBusyMs) 'F1') |")
     }
+}
+
+# Rendered frames from PresentMon: the same source for stock and fix (the stock side has no frame log of its own).
+$pmRows = New-Object System.Collections.Generic.List[string]
+foreach ($id in $(if ('PmReport' -as [type]) { $moving } else { @() })) {
+    $side = @{}
+    foreach ($pair in @(@('stock', $bs[$id]), @('fix', $ts[$id]))) {
+        $res = New-Object System.Collections.ArrayList
+        foreach ($sc in $pair[1]) {
+            $csv = if ($sc._dir) { Join-Path $sc._dir 'perf-frames.csv' } else { $null }
+            if (-not $csv -or -not (Test-Path -LiteralPath $csv) -or $null -eq $sc.t0Ms -or $null -eq $sc.t1Ms) { continue }
+            $grace = if ($sc.type -eq 'walk') { 5.0 } else { 3.0 }
+            $o = [PmReport]::Read($csv, [double]$sc.t0Ms, [double]$sc.t1Ms, [bool]$sc.frameGen, $grace)
+            if ($o -and $o.Frames -gt 0) { [void]$res.Add($o) }
+        }
+        $side[$pair[0]] = $res
+    }
+    if (-not $side.stock.Count -or -not $side.fix.Count) { continue }
+    $pm = { param($name, $fmt) $b = Median @($side.stock | ForEach-Object { $_.$name }); $t = Median @($side.fix | ForEach-Object { $_.$name }); '{0} -> {1}' -f $b.ToString($fmt), $t.ToString($fmt) }
+    $pmRows.Add("| $id | $(& $pm 'Fps' 'F0') | $(& $pm 'Ge25Pct' 'F1') | $(& $pm 'Ge33Pct' 'F2') | $(& $pm 'WorstMs' 'F0') | $(& $pm 'OverPerFrame' 'F2') | $(& $pm 'Drops' 'F0') |")
+}
+if ($pmRows.Count) {
+    $md.Add('')
+    $md.Add('## Rendered frames, stock against fix (from PresentMon)')
+    $md.Add('')
+    $md.Add('The same source for both sides: the PresentMon capture of each run, because the stock game has no frame log of its own. With frame')
+    $md.Add('generation the game presents two frames per rendered frame, so a rendered frame is the pair of presents (its time the sum of the two')
+    $md.Add('gaps); without it every present is a frame. Only the timed part of each flight or ride counts (without its first 3 s / 5 s). Cells are')
+    $md.Add('stock -> fix (medians over the runs). Rendered fps = rendered frames per second. Frames >= 25 ms and >= 33 ms are shares of the')
+    $md.Add('rendered frames. Over 16.7 = mean of (frame - 16.7 ms, at least 0) per rendered frame: how far the game is, on average, behind a')
+    $md.Add('steady 60 fps.')
+    $md.Add('')
+    $md.Add('| Scene | rendered fps | frames >= 25 ms (%) | frames >= 33 ms (%) | worst frame (ms) | ms over 16.7 per frame | sudden drops (PresentMon) |')
+    $md.Add('|---|---|---|---|---|---|---|')
+    foreach ($row in $pmRows) { $md.Add($row) }
+    $md.Add('')
+    $md.Add('Sudden drops (PresentMon reading) = bursts of rendered frames >= 25 ms (closer than 0.5 s counted as one) whose worst frame is >= 28 ms')
+    $md.Add('and at least 11 ms above the median of the half second before: the stutter you see as the frame rate falling suddenly from 60 to 20-30 and')
+    $md.Add('back. **Compare this number only with other PresentMon counts** (stock with fix, here), not with the fix log''s own drop count:')
+    $md.Add('PresentMon sees the presented frame cadence, which adds single-frame spikes the game itself does not have, so it counts about 3-5')
+    $md.Add('times as many. A stock run that is slow all along (it often never holds 60) merges its slow stretches into a few long bursts, so its')
+    $md.Add('drop count says little: read the shares and the ms over 16.7.')
 }
 # What the fix log said on this PC: which fixes found their code. Only lines that say something is off or missing.
 $notes = @($testRuns | ForEach-Object { $_.R.sessions } | ForEach-Object { $_.perfFixLog } |

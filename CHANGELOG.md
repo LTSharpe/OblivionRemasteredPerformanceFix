@@ -9,6 +9,183 @@ Downloads, checksums and build attestations: https://github.com/LTSharpe/Oblivio
 Bug fixes say whose bug it was: **game bug** = also happens without OblivionPerfFix (in the game, its engine or a
 driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 
+## 1.5.0-beta
+2026-11-15. For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Numbers marked "ours" are from our
+test PC (Ryzen 7 5800X, RX 9070 XT: one PC with an AMD graphics card; nothing here was tested on an NVIDIA card).
+
+**In short:** fewer sudden drops while characters arrive and while you travel, mostly in towns, at city gates and on
+roads. Three of our own timing problems in the character pacing are fixed (our bug, there since 1.0.0-beta), three waits
+the game makes for the disk or for itself are removed (the first weapon hit on each surface, a returning creature's
+animations, the next row of cells), and a cell you leave, a bow draw and a new row of cells cost less in one frame
+(ideas from Epic's later engine versions, credited). Everything is on by default except where a line says otherwise;
+every key has its own switch (`<Key>=0` goes back to 1.4.0's behaviour).
+- **Our bug, fixed:** hair steps of far characters piling up into one long frame (`PacingHairActor`); the area set-up
+  giving up on far characters too early (`PacingFlowProgress`, `CreatePreloadEarly`); the far characters' steps landing on
+  frames that were already slow (`PacingBaseGate`, an improvement of our pacing).
+- **Game bug, fixed:** the first weapon hit on each kind of surface froze the game for a moment (`ImpactPreload`).
+- **Game behaviour, restored from the 2006 game:** the next row of cells is loaded ahead (`RowPreload`); a returning
+  creature's animations load in the background (`CreatureAnimPreload`).
+- **Engine behaviour, as Epic changed it in later Unreal Engine versions:** a cell behind you leaves the world over a few
+  frames (`StreamOutEndPlaySlice`, UE 5.6); a bow draw no longer waits for every background load (`ResetLoadersNoFlush`,
+  UE 5.4); far characters hidden behind buildings do not animate in their first second (`FadeInUnseen`, UE 5.5); a
+  smaller streaming budget per frame while riding (`StreamInBudget`, UE 5.6's idea).
+- **New in the same spirit:** several file reads at once (`ParallelFileReads`), indirect argument buffers from the shared
+  buffer memory (`IndirectArgBufferPool`, UE 5.5's setting), a busy cell you left unloaded in steps (`CellEvictSplit`) and a
+  far character kept faded out until it is built (`PacingGateShownHoldMs`).
+
+**What was tested.** On our test PC only: the exported source builds and passes its self-test against the game's exe;
+hidden smoke runs with the shipped ini and with 1.4.0's ini; our crash repro (8 far teleports, each followed by mounting a
+horse; `bench/scenarios/east-crash.json`) 8 of 8 clean, with the public and with the lab build; the keys were played before
+the release on lab builds (our own play, no crash seen); the last review fixes of the shown-hold key and the cell-unload
+key were checked in one hidden Imperial City flight and the crash repro; and the release candidate itself (this build with
+these defaults) was played by us on 2026-11-15, about 13 minutes on the roads from the Old Bridge to Bravil and from the
+Old Bridge to the Fort Alessia bridge: no crash, and three short stutters we noticed (approaching Vilverin, the Ayleid
+wall approaching Sercen, approaching Aleswell); the two roads named ran without a stutter we noticed. Not tested: NVIDIA or Intel cards, the Game
+Pass build, the OBSE64 route (these keys install only with the `version.dll` package, see the README list), Linux/Proton.
+This is a beta: please report what you see, with `OblivionPerfFix.log`.
+
+Details:
+
+- **New: far characters arriving out of sight no longer animate for their first second**
+  (`FadeInUnseen`, part of `NpcCreationPacing`; **engine behaviour**, also without OblivionPerfFix): the engine counts a
+  new character as seen when it is drawn in its first frames, before it knows whether something hides it, and then
+  animates it at full rate for a whole second; a crowd arriving behind the Imperial City Waterfront's buildings did that
+  every time (up to 15 animation updates a frame instead of 4). Now a far character that is still fading in and has not
+  been drawn for 0.2 s no longer counts as seen; one that is drawn animates exactly as before. In our Waterfront test the
+  arrival's animation work ended after 0.3 s instead of 1.0 s and the frames' time over 16.7 ms in it fell by about half
+  (cold start, 4K, frame generation, 60 fps cap; ours); on the whole Imperial City flight (warm) the Waterfront's frames of
+  25 ms or more went from 20 to 15 per flight, while its two short drops remain (other work of the arriving characters).
+  Its animation starts when it is first seen, as for any hidden character in the game. Equivalent, not identical: what is
+  drawn differs in one way, the pose of such a character when it first comes into view (the game would have animated it
+  unseen for up to a second, here it starts when seen; in our tests we saw no odd pose, and nothing jumps once it is
+  seen). The idea is Epic's (credit: Epic Games, UE 5.5.0, commit
+  8dd2cb4237: a new object counts as drawn only once that is known), done here for far characters only.
+  `FadeInUnseen=0`: as in 1.4.0 (live after a start with 1).
+- **New: a smaller per-frame streaming budget while riding** (`StreamInBudget`, 0 / 1 / 2): when a new
+  row of cells streams in, the engine's own two budgets (adding objects 4 ms, reading files 5 ms per frame) are lowered to
+  1 / 3 ms (1) or 2 / 3 ms (2) while you play, so the burst's slowest frame at Memorial Cave went from 28.8 to 22.4 ms
+  (ours, 4K, frame generation, 60 fps cap). Far cells finish up to about 0.8 s later (we measured 0.4-0.8 s; 0.15 s with 2); loading screens
+  keep the game's budgets; your own Engine.ini or console values are kept. The idea is Epic's (Unreal Engine 5.6's shared
+  streaming budget), done with 5.3's own settings. Equivalent: the same work in the same order. On at 1; `StreamInBudget=0`: the game's budgets (live).
+- **New: indirect argument buffers from the engine's shared buffer memory** (`IndirectArgBufferPool`; **engine
+  behaviour**, also without OblivionPerfFix): the engine made each of the small buffers that tell the graphics card how
+  much to draw as a separate block of video memory, each with its own driver call on the render thread. With 1 they come
+  from the shared buffer memory like every other buffer: separate blocks per ride 401 -> 11 on the road to Bravil, and the
+  indirect-argument ones 188 / 102 -> 0 on the Imperial City flight and 496 -> 0 in our crash test of 16 far teleports
+  (ours). Less memory-creation work on the render thread, a small gain: in our tests it removed no drop you would see by
+  itself. Only where the buffers sit in memory changes: our crash test ran clean, 7 views compared equal and video memory
+  stayed within 0.1 GB. This is Unreal Engine's own setting `d3d12.AllowPoolAllocateIndirectArgBuffers`, on by default
+  since UE 5.5 (credit: Epic Games, UE 5.5, commit 97aba58adb); your own Engine.ini line for it still wins.
+  On by default; `IndirectArgBufferPool=0` switches it off (start-up only; `version.dll` package only).
+- **New: several file reads at once** (`ParallelFileReads`; **engine behaviour**, also without
+  OblivionPerfFix): the engine reads the game's container file with one reader that handles a single 256 KB block at a
+  time, so blocks wanted at the same moment wait behind each other. The case you can see: when a newly loaded area first
+  uses its textures, the render thread waits for the lowest-detail piece of each (23-28 blocks), 8-9 ms on a fast NVMe
+  drive, and that frame takes about 31 ms: a hitch at the same place on the first visit in every session (we measured it
+  at the waterfall on the road to Bravil). With `ParallelFileReads=8` up to 8 blocks are read at the same time, with the
+  engine's own queue order, buffers and hand-over: that wait went from 8.1-9.1 ms to 0.7-4.7 ms and the frame from
+  30-33 ms to 23-29 ms (25 ms in the middle of our runs); over the whole ride to Bravil a world piece's block waited 9 ms instead of 19 ms (median) (ours, 4K, frame
+  generation, 60 fps cap; 282,000 blocks per ride, none failed). The same bytes are read; nothing else changes. On a hard
+  disk, or with the engine's own block cache switched on, the game's reader is kept. Unreal Engine 5.7 replaces this
+  backend with a new one; this is our own change to the 5.3 reader. On by default (`ParallelFileReads=8`; 0 = the game's reader); the setting
+  is read at start-up, then live. Works with both packages (tested with the `version.dll` package).
+- **New: a busy cell you left is unloaded in steps** (`CellEvictSplit`, part of `CellBufferPacedEvict`;
+  **game behaviour**, also without OblivionPerfFix, where such a cell is unloaded inside the crossing frame): the old
+  engine unloads a cell you left in one step, and a cell with many people in it made that one frame long (about
+  20 ms for one cell of the Imperial City Waterfront with ten characters, ours). With `CellEvictSplit=2` the bodies of
+  two of its characters are unloaded per frame, with the game's own call for each and in the game's order, before the
+  rest of the cell and the cell itself are unloaded: 5-6 steps of 3-5 ms instead of one of 21 ms. The game thread's
+  longest frame at that unload went from about 24 ms to 17-18 ms (ours, two hidden runs, 4K, frame generation, 60 fps
+  cap, game thread only); what you see on screen at that spot did not change measurably in the flight we watched. While
+  any arrow is in the world, and for a character that a spell effect is on, the
+  game's own unload is used (taking those out early would remove the arrows or end the effect differently from the game).
+  The same cells and characters are unloaded, a few frames apart, far behind you. A small gain: in our tests it removed no
+  drop you would see by itself. Live; `version.dll` package only (it needs `CellBufferPacedEvict`).
+- **New: a far character stays faded out until it is built** (`PacingGateShownHoldMs` with
+  `PacingGateShownHoldEnd`, part of `NpcCreationPacing`; improves our own `PacingBaseGate`, new in this release): while
+  the gate makes a far character's body or clothes step wait for a frame with room, that character's fade-in already
+  runs, so its unfinished body can start to show faintly (**our side effect** of `PacingBaseGate`; with this key off it
+  still can), and the steps the end of its fade-in forces out land on slow frames. With
+  `PacingGateShownHoldMs=1000` (and `PacingGateShownHoldEnd=10`) such a character stays fully faded out until its steps
+  have run (at most 1 s), and those steps run before its fade-in ends, one a frame (a few a frame only at low frame rates
+  when one a frame cannot make it); it then fades in a little faster (up to about 3 times when the hold lasted its full
+  window) and is fully visible when the game's own fade-in ends. On the Imperial City flight fewer steps were forced into slow frames (3-5 per flight against 6-10, ours; measured on the
+  build before this release's review fixes, which changed the rule that picks when each step runs);
+  the frames of 28 ms or more did not differ clearly in our few flights. This changes what you see in one way: when such a
+  character becomes visible (later in its fade-in, then faster; never earlier or more visible than in the game); one whose
+  weapon was made before its body can show the weapon without the body, usually for about 0.1-0.2 s (at most until the
+  hold ends, under a second). Its fade-in timing, its AI and
+  everything the game reads are the game's. On by default (`PacingGateShownHoldMs=0` = the game's fade); the setting is
+  read at start-up, then live; `version.dll` package only.
+
+- **Fixed: hair steps of far-away characters could pile up into one long frame** (`PacingHairActor`, part of
+  `NpcCreationPacing`; **our bug**, there since 1.0.0-beta): a character's hair step was never matched to its character, so
+  it counted as near; behind a row of far characters waiting their turn it waited too and then ran at once with all the
+  others (14 hair steps on top of a character's other steps, one 43 ms frame at the Imperial City Waterfront, ours). Hair
+  steps now wait or run like their character's other steps; once a waiting character starts to fade in, its steps and
+  the ones queued before it run at the pace that normally finishes them before it shows (hair landing late was seen on
+  our 4K Waterfront flights before this), never more than 2 steps in one frame and, besides the first step, about 16 ms
+  of them, so the catching up adds little to any one frame (the first step runs at its real cost). With a very deep
+  queue of large steps a character can still begin to show a little before its last step. Timing only, in the game's order.
+  `PacingHairActor=0`: as in 1.4.0 (live).
+- **Fixed: a far-away character could still make the game wait for the disk when an area finished loading**
+  (`PacingFlowProgress` and `CreatePreloadEarly`, parts of `NpcCreationPacing` / `CreatePreload`; **our gaps**, since
+  1.0.0-beta and 1.3.0-beta): an area's set-up waits for far characters still owed to it, but gave up after three frames
+  while one of them was waiting for its files to load in the background, or while they came one per frame from earlier
+  frames; the rest was then created at once (24-28 ms waiting for the disk, or two creations in one frame, at the Imperial
+  City Waterfront; ours). The set-up now keeps waiting while the line moves (still at most eight frames; the world logic
+  pauses for those frames, as during the one long frame before), which removed those waits. In addition, a character held
+  back for the frame's budget now asks for its files at once, a head start of a frame or more (no gain we could measure
+  on its own). Timing only, in the game's order. `PacingFlowProgress=0` / `CreatePreloadEarly=0`: as in 1.4.0 (live).
+- **Improved: the next row of cells is loaded ahead again while you travel** (`RowPreload`; **game behaviour**, also
+  without OblivionPerfFix): the original 2006 game loaded the row of cells you were heading into on a background thread;
+  the remaster still asks for that row but never loads it, so every cell-row crossing read the whole row from the game
+  files in one frame while the game waited. The cells the game asks for are now loaded with its own loader, one per quiet
+  frame before the crossing, and kept with the cells you have just left; the crossing only switches them on. The same cells
+  with the same contents; nothing appears earlier. `RowPreload=0`: as in 1.4.0 (start-up, then live).
+- **Fixed: the first weapon hit on each kind of surface froze the game for a moment** (`ImpactPreload`; **game bug**,
+  also without OblivionPerfFix): the first hit on metal, cloth, stone and so on in a session made the game load that hit's
+  effect and the blood effect from disk while it waited (65 ms of an 84 ms frame near Mortal Camp; ours). The game's own
+  list of these effects, for every surface, is now loaded in the background when the game's settings are ready (at the
+  main menu) and kept loaded, so each hit shows the same effect without the wait. Costs some memory for the session.
+  `ImpactPreload=0`: as in 1.4.0 (start-up, then live).
+- **Improved: fewer sudden drops while new characters arrive** (`PacingBaseGate`, part of `NpcCreationPacing`, with
+  `PacingGateBoundFrames`, `PacingGateCalmMs`, `PacingGateNearM`; improves **our own pacing**, there since 1.0.0-beta): a
+  far-away character's body, clothes and hair steps (7-14 ms each) waited only for the frame's time budget, which is
+  decided before the frame's own work is known, so while characters arrived (frames of 16-26 ms) one often landed on a
+  frame that was already slow and the frame took 25-36 ms (the Imperial City Waterfront, in our tests). Each waiting step
+  is now decided on its own: a step of a character that is at least 100 m away and either out of sight or still at the
+  faint first stage of its fade-in runs only after the frame's world update and only if the frame then stays within
+  25 ms, or on a calm frame (one a frame, so such a frame can go over 25 ms); at most one large step a frame, oldest
+  first, and none waits longer than `PacingGateBoundFrames` (45 frames: 0.75 s at 60 fps, 1.5 s at 30 fps). A character
+  that comes near, or whose fade-in goes on,
+  has its steps run as before, ahead of the waiting ones. So a far character may be finished up to 45 frames later; one
+  drawn at that faint first stage shows it that much longer. On the Imperial City flight in our tests (4K, frame
+  generation, 60 fps cap; three flights each way in one game) the Waterfront's frames of 28 ms or more went from 19 to
+  10 per flight on average (10-24 without, 7-14 with); its short drops remain. Timing only (our own steps; each character's
+  steps keep the game's order). `PacingBaseGate=0`: as in 1.4.0 (live).
+- **Improved: a cell behind you leaves the world over a few frames instead of in one long one**
+  (`StreamOutEndPlaySlice`; engine behaviour, changed by Epic in Unreal Engine 5.6): when a cell is streamed out, the
+  engine tells all its objects at once that they are leaving, and in this game each of them then unhooks itself from
+  lists the whole world shares: one frame of 4-14 ms per cell on a ride (3 of the 9 slowest frames of a 15-minute ride;
+  ours). As Epic's Unreal Engine 5.6 can do it (credit: Epic Games, UE 5.6.0, commit dfeb9ecce7), that step now goes a
+  few objects at a time within the engine's own limit of 1 ms per frame. The same objects in the same order; the hidden
+  cell leaves the world's list a few frames later. `StreamOutEndPlaySlice=0`: as in 1.4.0 (start-up, then live).
+- **Fixed: drawing a bow could freeze the game while something loaded in the background** (`ResetLoadersNoFlush`;
+  engine behaviour, fixed by Epic in Unreal Engine 5.4): renaming an object (the bow draw renames the arrow) made the
+  game wait for every background load in flight, up to about 20 ms (ours), though the rename needs none of them. As in
+  Unreal Engine 5.4 (credit: Epic Games, UE 5.4.0, commit 0d790f0ba5), it now waits only for a package with an
+  old-style loader attached, which this game's packages do not have. `ResetLoadersNoFlush=0`: as in 1.4.0 (start-up,
+  then live).
+- **Improved: a creature that comes back no longer loads its animations while the game waits** (`CreatureAnimPreload`;
+  **game behaviour**, also without this mod and the same in the 2006 game): when a kind of creature returned after all
+  of its kind had unloaded (a horse, a mudcrab, a deer by a road you rode before), the game found its skeleton still
+  loaded, did not ask for its animation files ahead, and then loaded them one by one in the foreground, pausing its
+  background loaders for each: up to 64 ms in one frame of a recorded ride (ours). The creature's loading step now asks
+  for them the way the game already does for summoned creatures, so the background loader reads them first; same
+  files, same animations, and in our tests the creature was ready as soon as or sooner than before.
+  `CreatureAnimPreload=0`: as in 1.4.0 (live).
+
 ## 1.4.0-beta
 2026-11-11. For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Numbers marked "ours" are from our
 test PC (Ryzen 7 5800X, RX 9070 XT: one PC with an AMD graphics card; nothing here was tested on an NVIDIA card).

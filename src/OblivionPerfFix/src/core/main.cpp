@@ -55,6 +55,7 @@ std::atomic<bool> g_bodiesHooked{false};     // ParallelStaticBodies installed
 std::atomic<bool> g_sceneAddHooked{false};   // PipelinedSceneAdd installed
 std::atomic<bool> g_navmeshFound{false};     // NavmeshBuildNoBusyWait's site found
 std::atomic<bool> g_busyWaitFound{false};    // BusyWaitFlagCheck's sites found
+std::atomic<bool> g_creatureAnimFound{false}; // CreatureAnimPreload's flag byte found
 std::atomic<bool> g_flushHooked{false};      // PhysicsFlushParallel installed
 std::atomic<bool> g_flushTried{false};       // PhysicsFlushParallel looked for while the game runs (switched on after start-up)
 std::atomic<bool> g_clearHooked{false};      // InstanceClearReserve installed
@@ -172,6 +173,8 @@ DWORD WINAPI MonitorThread(LPVOID)
         SetObjectReplaceGuardMode(cfg.objectReplaceGuard);
         SetTaskWaitGuardMode(cfg.taskWaitDeadlockGuard);  // no-op unless installed at start-up
         PsoCompileThreadPoolTick(cfg.psoCompileThreadPool, cfg.psoCompileThreadPoolPriority);  // start-up only: later changes are only logged
+        IndirectArgBufferPoolTick(cfg.indirectArgBufferPool);  // start-up only: later changes are only logged
+        SetParallelFileReads(cfg.parallelFileReads);  // ParallelFileReads: live once installed at start-up
         TaskWaitGuardTick();
         SetFrameGenCameraInfoEnabled(cfg.frameGenCameraInfo);
         SetFrameGenPacingTuning(cfg.frameGenPacingTuning);
@@ -195,6 +198,9 @@ DWORD WINAPI MonitorThread(LPVOID)
         SetFarPawnMove(cfg.farPawnMoveHalfRate, cfg.farPawnMoveHz, cfg.farHorseMove);  // FarPawnMove: no effect unless installed
         SetCreatePreload(cfg.createPreload);          // CreatePreload: no effect unless installed at start-up
         SetCreatePreloadNear(cfg.createPreloadNear);
+        SetCreatePreloadEarly(cfg.createPreloadEarly);  // CreatePreloadEarly: live
+        SetImpactPreload(cfg.impactPreload);          // ImpactPreload: no effect unless installed at start-up
+        SetRowPreload(cfg.rowPreload);                // RowPreload: no effect unless installed at start-up
         SetOtFrameTrim(cfg.otFrameTrim);              // OtFrameTrim: no effect unless installed at start-up
         SetLooseMissCache(cfg.looseMissCache);        // LooseMissCache: no effect unless installed at start-up
         if (g_lumenHooked) SetLumenKeepCapacityEnabled(cfg.lumenKeepArrayCapacity && !relief.lumen);
@@ -213,7 +219,13 @@ DWORD WINAPI MonitorThread(LPVOID)
                          cfg.pacingFlowWait, cfg.pacingFlowWaitFrames);
         if (g_pacingHooked) SetNpcPacingFadeAware(cfg.pacingFadeAware);
         if (g_pacingHooked) SetNpcPacingOwnerWalk(cfg.pacingOwnerWalk);  // PacingOwnerWalk (mkusm, PR #25): live
+        if (g_pacingHooked) SetNpcPacingHairActor(cfg.pacingHairActor);  // PacingHairActor: live
         if (g_pacingHooked) SetNpcPacingLeanFlowDrain(cfg.pacingLeanFlowDrain);  // PacingLeanFlowDrain: live
+        if (g_pacingHooked) SetNpcPacingFlowProgress(cfg.pacingFlowProgress);  // PacingFlowProgress: live
+        if (g_pacingHooked) SetNpcPacingGateBounds(cfg.pacingGateBoundFrames, cfg.pacingGateCalmMs, cfg.pacingGateNearM, cfg.pacingGateFadeHoldMs);
+        if (g_pacingHooked) SetNpcPacingBaseGate(cfg.pacingBaseGate);  // PacingBaseGate: live
+        if (g_pacingHooked) SetFadeInUnseen(cfg.fadeInUnseen, cfg.fadeInUnseenWindowMs);  // FadeInUnseen: live
+        if (g_pacingHooked) SetShownHold(cfg.pacingGateShownHoldMs, cfg.pacingGateShownHoldEnd);  // PacingGateShownHoldMs/End: live (0 when not installed)
         SetHitchLedger(cfg.hitchLedger, cfg.hitchLedgerMs);  // diagnostic: no-op unless installed at start-up
         SetTickSplit(cfg.hitchLedger && cfg.hitchLedgerTickSplit);  // diagnostic: no-op unless installed at start-up
         SetDoorDiagEarlyStream(cfg.doorDiagEarlyStream);     // diagnostic DoorDiag's experiment (no-op unless installed)
@@ -240,7 +252,10 @@ DWORD WINAPI MonitorThread(LPVOID)
         if (g_destroyBatch) SetPhysicsDestroyBatch(cfg.physicsDestroyBatch, cfg.physicsDestroyBatchMin);  // PhysicsDestroyBatch: live once installed
         SetBodyRemovalSpread(cfg.bodyRemovalSpread, cfg.bodyRemovalSpreadPerFrame, cfg.bodyRemovalSpreadMaxFrames,
                              cfg.bodyRemovalSpreadMin, cfg.bodyRemovalSpreadNearM);  // BodyRemovalSpread: no-op unless installed
+        SetStreamOutEndPlaySlice(cfg.streamOutEndPlaySlice);  // StreamOutEndPlaySlice: no-op unless installed at start-up
+        SetResetLoadersNoFlush(cfg.resetLoadersNoFlush);      // ResetLoadersNoFlush: no-op unless installed at start-up
         SetStreamRegisterGranularity(cfg.streamRegisterGranularity);  // the key (live); applied on the game thread at AddToWorld
+        SetStreamInBudget(cfg.streamInBudget);  // StreamInBudget (live); applied on the game thread at AddToWorld
         if (g_lumenNarrowHooked) SetLumenCardsNarrow(cfg.lumenCardsNarrow);  // LumenCardsNarrow: live once installed (render thread forgets on a change)
         if (g_lumenScanHooked) SetLumenScanCull(cfg.lumenScanCull);  // LumenScanCull: live once installed (any change marks every block dirty)
         SetWaterInfoSkip(cfg.waterInfoSkip);  // WaterInfoSkip: live once installed (no-op otherwise)
@@ -262,12 +277,14 @@ DWORD WINAPI MonitorThread(LPVOID)
         SetAnimTeardownParallel(ParallelHelpersAllowed(cfg) ? cfg.animTeardownParallel : 0);    // AnimTeardownParallel: no-op unless installed at start-up
         SetCellBufferPacedEvict(cfg.cellBufferPacedEvict);    // CellBufferPacedEvict: no-op unless installed at start-up
         SetCellBufferEvictDelay(cfg.cellBufferEvictDelayMs);  // CellBufferEvictDelayMs (otunload; public 1.3.0): live
+        SetCellEvictSplit(cfg.cellEvictSplit);                // CellEvictSplit (public 1.5.0): live once found (0 when not)
         HdrMenuMonitorTick();                                 // HdrMenuRows: reads Save_Settings.sav once (no-op unless installed)
         SetHdrGamma22(cfg.hdrGamma22, cfg.hdrGamma22White);   // HdrGamma22 (trade-off): live (no-op unless installed)
         HdrGammaMonitorTick();                                // ... fits a curve the game thread asked for
         SetPhysicsPushParallel(ParallelHelpersAllowed(cfg) ? cfg.physicsPushParallel : 0, cfg.physicsPushMin);  // PhysicsPushParallel: no-op unless installed
         if (g_navmeshFound) SetNavmeshBuildNoBusyWait(cfg.navmeshBuildNoBusyWait);
         if (g_busyWaitFound) SetBusyWaitFlagCheck(cfg.busyWaitFlagCheck);
+        if (g_creatureAnimFound) SetCreatureAnimPreload(cfg.creatureAnimPreload);
         if (g_gpuSceneHooked) SetGpuSceneKeepCapacityEnabled(cfg.gpuSceneKeepCapacity && !relief.shared);
         if (g_allocTrimHooked) {
             SetAllocatorTrim(cfg.commandAllocatorTrim, cfg.allocatorTrimWindowSeconds);
@@ -294,6 +311,9 @@ DWORD WINAPI MonitorThread(LPVOID)
             LogCollisionPrepareStats();
             if (g_destroyBatch) LogPhysicsDestroyBatchStats();
             LogBodyRemovalSpreadStats();  // no-op unless installed (the lab logs every 5 s instead)
+            LogStreamOutEndPlaySliceStats();  // StreamOutEndPlaySlice (no line when no level was removed)
+            LogResetLoadersNoFlushStats();    // ResetLoadersNoFlush (no line when not called)
+            LogParallelFileReadsStats();      // ParallelFileReads (no line when nothing was read since the last)
             StreamGranLogStats();         // StreamRegisterGranularity (no-op unless active)
             if (g_lumenNarrowHooked) LogLumenCardsNarrowStats();  // LumenCardsNarrow (no line when nothing ran)
             if (g_lumenScanHooked) LogLumenScanCullStats(false);  // LumenScanCull (no line when nothing ran; MISMATCH lines of the proof)
@@ -341,8 +361,11 @@ DWORD WINAPI MonitorThread(LPVOID)
             if (g_physAnimHooked) LogPhysAnimNoEmptyLockStats();
             LogRigTraceReuseStats();
             LogRigImportTemplateStats();
+            LogCellEvictSplitStats();  // CellEvictSplit (a line when steps ran)
             LogFarPawnMoveStats();  // FarPawnMoveHalfRate / FarHorseMove (no line when nothing qualified)
             LogCreatePreloadStats();  // CreatePreload (no line when nothing waited)
+            LogImpactPreloadStats();  // ImpactPreload (a line when its state or count changed)
+            LogRowPreloadStats();     // RowPreload (a line when its counts changed)
             LogOtFrameTrimStats();    // OtFrameTrim (no line when the frame-start sleep did not run)
             LogLooseMissCacheStats(); // LooseMissCache (no line when nothing was answered from memory)
             LogChaosMaxPayloadSizeLive();
@@ -548,6 +571,12 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
     // PsoCompileThreadPool: two console variables located always (no patching); the pool size is written once, here, and only
     // with the guard above installed in mode 1 (UE treats the size as constant; the pool alone runs into the deadlock).
     if (FindPsoCompileThreadPool()) SetPsoCompileThreadPool(cfg.psoCompileThreadPool, cfg.psoCompileThreadPoolPriority);
+    // IndirectArgBufferPool: one console variable's int, written here (before the exe's static initialisers register it, long
+    // before the RHI starts); version.dll route only.
+    SetIndirectArgBufferPool(cfg.indirectArgBufferPool, beforeGameCode);
+    // ParallelFileReads: the engine's container reader (one vtable slot, and its ServiceNotify) replaced when the key is >= 2 at
+    // start-up; either route (the reader thread fetches the slot at every call). Live afterwards.
+    InstallParallelFileReads(cfg.parallelFileReads);
     // FrameGenAsyncCompute: a console variable the game registers during its start-up, set by a short-lived thread as soon as it exists
     // (before the renderer and frame generation start). Start-up only.
     if (cfg.frameGenAsyncCompute) ApplyFrameGenAsyncCompute(beforeGameCode);
@@ -660,7 +689,24 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
                          cfg.pacingFlowWaitFrames);
         if (g_pacingHooked) SetNpcPacingFadeAware(cfg.pacingFadeAware);
         if (g_pacingHooked) SetNpcPacingOwnerWalk(cfg.pacingOwnerWalk);  // PacingOwnerWalk (mkusm, PR #25): live
+        if (g_pacingHooked) SetNpcPacingHairActor(cfg.pacingHairActor);  // PacingHairActor: live
         if (g_pacingHooked) SetNpcPacingLeanFlowDrain(cfg.pacingLeanFlowDrain);  // PacingLeanFlowDrain: live
+        if (g_pacingHooked) SetNpcPacingFlowProgress(cfg.pacingFlowProgress);  // PacingFlowProgress: live
+        if (g_pacingHooked) SetNpcPacingGateBounds(cfg.pacingGateBoundFrames, cfg.pacingGateCalmMs, cfg.pacingGateNearM, cfg.pacingGateFadeHoldMs);
+        if (g_pacingHooked) SetNpcPacingBaseGate(cfg.pacingBaseGate);  // PacingBaseGate: live
+        // FadeInUnseen: one rel32 in the fade tick's caller, written at start-up only when != 0; then live. The same hook
+        // carries the lab fade hold of PacingBaseGate (PacingGateFadeHoldMs, gate2; rev96e F10: installed for it only when
+        // the key is set at start-up).
+        const bool fadeHook = cfg.fadeInUnseen != 0;
+        if (g_pacingHooked && fadeHook && InstallFadeInUnseen(beforeGameCode))
+            SetFadeInUnseen(cfg.fadeInUnseen, cfg.fadeInUnseenWindowMs);
+        // PacingGateShownHoldMs (hold2; public 1.5.0): the fade applier's entry, start-up only when > 0 (not on the OBSE64
+        // route: the log says so), then live
+        if (g_pacingHooked && cfg.pacingGateShownHoldMs > 0) {
+            if (InstallShownHold(beforeGameCode)) SetShownHold(cfg.pacingGateShownHoldMs, cfg.pacingGateShownHoldEnd);
+        } else if (g_pacingHooked) {
+            Log("[shownhold] PacingGateShownHoldMs off in OblivionPerfFix.ini (takes a restart to switch on)");
+        }
     } else Log("[pacing] disabled in OblivionPerfFix.ini (takes a restart to switch on)");
     // ClothRegisterLite: installed only if != 0 at startup and only as version.dll (the cloth component's native function table is
     // read when the engine registers the class); afterwards the ini switches it live. The lab's ClothRegisterSkip uses the same
@@ -764,6 +810,11 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
         g_busyWaitFound = true;
         SetBusyWaitFlagCheck(cfg.busyWaitFlagCheck);
     }
+    // CreatureAnimPreload: one byte in the creature queue step, located always; the ini switches it live.
+    if (FindCreatureAnimPreload()) {
+        g_creatureAnimFound = true;
+        SetCreatureAnimPreload(cfg.creatureAnimPreload);
+    }
     // NavLinkFast: findConnectingPolys' and addTile's connectExtLinks calls, written only before game code runs and only when
     // the key is not 0 at start-up (then live: 1 fast, 0 the game's search, timed; lab: 2 fast + compared, 3 = 0).
     if (cfg.navLinkFast != 0) {
@@ -847,8 +898,9 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
     } else Log("[gpushot] GpuMenuShot off in OblivionPerfFix.ini (takes a restart to switch on)");
     // StreamRegisterGranularity: an AddToWorld entry detour (found from the console variable's only read), only if != 0 at
     // start-up, then live 0..9 (after the lab's BodyAddProbe: shares its hook when both are on).
-    if (cfg.streamRegisterGranularity) InstallStreamRegisterGranularity(beforeGameCode, labAddHook);
-    else Log("[streamgran] StreamRegisterGranularity off in OblivionPerfFix.ini (takes a restart to switch on)");
+    // StreamInBudget (gatefix 2026-11-12) shares that hook: installed when either key is on.
+    if (cfg.streamRegisterGranularity || cfg.streamInBudget) InstallStreamRegisterGranularity(beforeGameCode, labAddHook);
+    else Log("[streamgran] StreamRegisterGranularity and StreamInBudget off in OblivionPerfFix.ini (takes a restart to switch on)");
     // HitchLedger's OblivionThread grid-change timer: last (the lab's CellRowDiag times the same entry and wins there).
     if (cfg.hitchLedger) InstallHitchLedgerGrid(beforeGameCode);
     // CellBufferPacedEvict: the TES constructor's buffer clamp, the grid change's entry (chained after CellRowDiag's and
@@ -857,7 +909,16 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
         if (InstallCellBufferPacedEvict(beforeGameCode)) {
             SetCellBufferPacedEvict(cfg.cellBufferPacedEvict);
             SetCellBufferEvictDelay(cfg.cellBufferEvictDelayMs);  // CellBufferEvictDelayMs: from the first crossing (then live)
+            // CellEvictSplit (public 1.5.0): finds only (no code written); runs inside the paced unload, so the OBSE64 route,
+            // where CellBufferPacedEvict stays off, never splits
+            if (InstallCellEvictSplit()) SetCellEvictSplit(cfg.cellEvictSplit);
+        } else if (cfg.cellEvictSplit) {
+            Log("[evictsplit] CellEvictSplit=%d not available: it needs CellBufferPacedEvict, which is not installed",
+                cfg.cellEvictSplit);
         }
+    } else if (cfg.cellEvictSplit) {
+        Log("[evictsplit] CellEvictSplit=%d not available: it needs CellBufferPacedEvict (0 in OblivionPerfFix.ini)",
+            cfg.cellEvictSplit);
     }
     // PhysicsDestroyBatch: three call sites in the step's DestroyPendingProxies path, only if != 0 at start-up (then
     // live); before the lab's PhysWaitProbe, whose entry detours would fail this code's entry check.
@@ -911,8 +972,22 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
         if (g_pacingHooked && InstallCreatePreload(beforeGameCode)) {
             SetCreatePreload(cfg.createPreload);
             SetCreatePreloadNear(cfg.createPreloadNear);
+            SetCreatePreloadEarly(cfg.createPreloadEarly);
         } else if (!g_pacingHooked) Log("[createpreload] CreatePreload: needs NpcCreationPacing, not installed");
     } else Log("[createpreload] CreatePreload off in OblivionPerfFix.ini (takes a restart to switch on)");
+    // ImpactPreload (impactload): the impact table's hit-effect classes and the blood effect class loaded in the background
+    // and kept; start-up install when != 0 (runs from NpcCreationPacing's frame-end hook), then live 0/1.
+    if (cfg.impactPreload) {
+        if (g_pacingHooked && InstallImpactPreload(beforeGameCode)) SetImpactPreload(cfg.impactPreload);
+        else if (!g_pacingHooked) Log("[impactpreload] ImpactPreload: needs NpcCreationPacing, not installed");
+    } else Log("[impactpreload] ImpactPreload off in OblivionPerfFix.ini (takes a restart to switch on)");
+    // RowPreload (rowpreload): the grid change's three cell-request calls redirected; runs from CellBufferPacedEvict's grid hook
+    // (installed above) and reads the menu state from NpcCreationPacing's frame-end hook; start-up when != 0, then live 0/1.
+    if (cfg.rowPreload) {
+        if (!g_pacingHooked) Log("[rowpreload] RowPreload: needs NpcCreationPacing, not installed");
+        else if (!CellBufferPacedEvictInstalled()) Log("[rowpreload] RowPreload: needs CellBufferPacedEvict, not installed");
+        else if (InstallRowPreload(beforeGameCode)) SetRowPreload(cfg.rowPreload);
+    } else Log("[rowpreload] RowPreload off in OblivionPerfFix.ini (takes a restart to switch on)");
     // OtFrameTrim (fightcost; public 1.3.0): the OT frame-start sleep's call and the node profiler timer's entry; start-up
     // install when != 0, then live 0..3.
     if (cfg.otFrameTrim) InstallOtFrameTrim(beforeGameCode, cfg.otFrameTrim);
@@ -932,6 +1007,13 @@ void Init(const char* loadedVia, bool proxyOk, bool beforeGameCode)
     // are in (it drains at their post-actor tick), then live. After the lab's probes (as in the lab, where it was first run).
     InstallBodyRemovalSpread(beforeGameCode, cfg.bodyRemovalSpread, cfg.bodyRemovalSpreadPerFrame, cfg.bodyRemovalSpreadMaxFrames,
                              cfg.bodyRemovalSpreadMin, cfg.bodyRemovalSpreadNearM, g_pacingHooked, g_iniPath.c_str());
+    // StreamOutEndPlaySlice (epicport; Epic UE 5.6.0 dfeb9ecce7): a streamed-out level's EndPlay in batches inside
+    // RemoveFromWorld's time limit; chained after BodyRemovalSpread on the same call, so installed after it. Start-up when
+    // != 0 (lab: always), then live.
+    InstallStreamOutEndPlaySlice(beforeGameCode, cfg.streamOutEndPlaySlice);
+    // ResetLoadersNoFlush (epicport; Epic UE 5.4.0 0d790f0ba5): ResetLoaders of a package without a loader linker does not
+    // wait for every load in flight (the bow-draw rename). Start-up when on (lab: always, counting), then live.
+    InstallResetLoadersNoFlush(beforeGameCode, cfg.resetLoadersNoFlush);
     // InstanceBufferFloor: the GPU scene instance buffer at 192 MiB at its first large need (inside GpuSceneKeepCapacity's reserve;
     // no patch of its own; the lab build also patches lab SceneBufferFloorMiB and times the buffer's creations); start-up only.
     InstallBufferFloor(beforeGameCode, cfg.instanceBufferFloor, g_gpuSceneHooked, g_iniPath.c_str());
@@ -995,7 +1077,7 @@ struct OBSEPluginVersionData {
 extern "C" {
 __declspec(dllexport) OBSEPluginVersionData OBSEPlugin_Version = {
     OBSEPluginVersionData::kVersion,
-    0x010400,  // plugin version 1.4.0
+    0x010500,  // plugin version 1.5.0
     "OblivionPerfFix",
     "OblivionPerfFix",
     // Addresses come from byte-pattern scans and we use no OBSE game structures,

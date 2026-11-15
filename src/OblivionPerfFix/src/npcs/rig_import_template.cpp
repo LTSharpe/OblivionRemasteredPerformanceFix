@@ -657,6 +657,7 @@ Sites Discover(const GameModule& game)
 
 }  // namespace
 
+
 void SetRigImportTemplate(int mode)
 {
     const int want = mode ? 1 : 0;

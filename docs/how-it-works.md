@@ -550,6 +550,79 @@ time slow frames cost. `InstanceBufferFloor=0` turns it off (at start-up).
 
 ---
 
+<a id="indirectargbufferpool"></a>
+
+### Indirect argument buffers from the shared buffer memory (`IndirectArgBufferPool`)
+
+**The problem.** Many draws and compute passes get their size from a small buffer the graphics card writes itself (an
+"indirect argument" buffer). In the engine version the game uses (5.3) each such buffer is made as a separate block of
+video memory with its own call into the graphics driver on the render thread, while every other buffer comes from the
+engine's shared buffer memory. A ride makes hundreds of them: 401 on one ride to Bravil (ours).
+
+**What we did.** The fix switches on the engine's own setting `d3d12.AllowPoolAllocateIndirectArgBuffers`, so these
+buffers come from the shared buffer memory like the others. The setting can only be set while the game starts (the engine
+then reads it at every allocation), so the fix sets it before the engine registers it: then it is the setting's starting
+value, as in Unreal Engine 5.5 and later, where it is on by default (credit: Epic Games, UE 5.5, commit 97aba58adb). If the
+engine has already registered it, the fix leaves it alone. A line for that setting in your own Engine.ini is applied after
+it and wins. Epic had made these buffers separate in 2021 as a precaution against graphics card crashes; a fix for the same
+problem in the engine's command handling followed the next day, years before the version the game uses.
+
+**Why the image can't change.** The same buffers with the same contents are used by the same commands; only where they
+sit in video memory differs. In our tests the separate blocks per ride went from 401 to 11 on the road to Bravil, and the
+indirect-argument ones from 188 / 102 to 0 on the Imperial City flight and from 496 to 0 in our crash test (16 far
+teleports), which ran clean; 7 views compared equal and video memory stayed within 0.1 GB. The gain is small: less
+memory-creation work on the render thread; it removed no drop you would see by itself. The self-test finds the setting in
+the game file (its name, how it is registered, its one use) and checks the start-up rules on it.
+On by default; `IndirectArgBufferPool=0` switches it off (start-up only; not with OBSE64).
+
+---
+
+<a id="parallelfilereads"></a>
+
+### Several file reads at once (`ParallelFileReads`)
+
+**The problem.** Everything the game streams in comes out of its container file through the engine's file backend. On
+Windows the engine version the game uses (5.3) has one reader for it: a thread that takes one queued 256 KB block, reads
+it, waits for it, hands it on, and only then takes the next. A block that Windows does not have in memory takes
+0.3-0.5 ms on a fast NVMe drive, so a burst of blocks costs that many times in a row, whatever the drive could do at once.
+You see it where the render thread has to wait for such a burst: when a newly loaded area's materials first use their
+virtual textures, the engine asks for the lowest-detail piece of each texture and waits until all have arrived, so that no
+texture is ever drawn as a flat colour. At the waterfall on the road to Bravil that is 23-28 blocks, all requested within
+0.2 ms; the reader needs 8-9 ms for them, and the render thread waits exactly that long (ours, with a probe that logs
+every request and every read). The frame takes 30-33 ms instead of 17. It happens on the first visit in every game
+session, because the blocks are read once and Windows has dropped them again by the next session.
+
+**What we did.** The game opens the container in a mode that lets Windows take several reads at once. The fix replaces
+the reader's one function with a version that starts up to N reads before it waits and then waits for the first one to
+finish (or for a new request). Everything else is the engine's own and unchanged: the queue decides the order as before,
+the blocks land in the engine's own read buffers, and finished blocks go to the same list the original puts them on, with
+the same wake-up of the thread that unpacks them. A block that fails is tried ten times in all, like the original does.
+The engine's own reader is called instead when its block cache is switched on (it is off in the game), when the drive
+reports that it has to seek (a hard disk: several reads at once could keep an urgent block waiting there), or when the
+file is not what the fix expects.
+
+**Why nothing else can change.** The same bytes are read from the same places into the same buffers; the code that
+unpacks and uses them is untouched. Blocks of one burst can reach that code in another order than they were started in;
+it handles each block on its own (a piece that is spread over two blocks is put together by its position and counted
+off), so the order does not matter. Like the original, the reader only returns to its caller when none of its reads is
+still running. The fix checks the reader's whole function byte for byte before it replaces it: every position in the
+engine's objects it uses appears in that code, except two (the file's size and its Windows handle), and those two are
+checked against Windows the first time each container file is read (a disk file of exactly the size the engine
+recorded). The self-test runs the replacement against stand-ins for the engine's objects and a real file: every block's
+bytes, each request handed on exactly once, no read left running at a return, several reads really running at once, a
+cancelled request, a read error, a failed read tried again, too few buffers, a request that arrives during a slow read,
+and the cases that go back to the engine's reader.
+With 8 in flight (ours; 16 was no better): the wait at the waterfall 8.1-9.1 ms -> 0.7-4.7 ms (it follows how many
+blocks that moment needs), that frame 30-33 -> 23-29 ms (25 ms in the middle of our runs); over the whole ride to Bravil a world piece's block waited 9 ms instead of 19 ms (median) and a texture
+piece's block at most 13 ms instead of 217 ms in 99 of 100 cases; 282,000 blocks, none failed. What is left of that
+frame is other work (memory the graphics driver sets up for the new area). An urgent block that arrives while all 8 are
+busy can wait a little longer than with the game's reader (about 1.6 ms instead of 0.9 ms by our reckoning); in our
+measurements every kind of block arrived sooner. Unreal Engine 5.7 replaces this backend with a new one; ours is a
+change to the 5.3 reader.
+On by default (`ParallelFileReads=8`; a restart to change it from 0, then the number is live, 0 = the game's reader). Tested with the `version.dll` package; with OBSE64 it is installed the same way.
+
+---
+
 <a id="naniteinitialrootpages"></a>
 
 ### Nanite's page block starts big enough (`NaniteInitialRootPages`)
@@ -1134,6 +1207,54 @@ game itself shows at about 40 fps). Measured in the lab on the Kvatch road's arr
 16.7 ms -42 % at your kind of settings, -50 % at low resolution; door loading screens as before.
 `StreamRegisterGranularity=0` is the game's 10 (live).
 
+<a id="streaminbudget"></a>
+
+### A smaller per-frame budget for a new row of cells (`StreamInBudget`, equivalent)
+
+**The problem.** Riding across the land, a whole row of cells streams in at once. The engine reads their files up to
+5 ms per frame (`s.AsyncLoadingTimeLimit`) and then adds their objects to the world up to 4 ms per frame
+(`s.AdaptiveAddToWorld.AddToWorldTimeSliceMax`, the game's own values), and the next physics step takes the new
+collision bodies at the same rate. On top of the frame's own work that gives a burst of 22-29 ms frames (Memorial Cave on
+the east road, `bench/scenarios/east-memorial.json`; ours).
+
+**What we did.** While you play, the two budgets are lower: 1 = 1 ms for adding objects and 3 ms for reading files,
+2 = 2 ms and 3 ms (the engine's own variables, set the way the game sets its own values; loading screens keep the game's
+4 and 5 ms; if your Engine.ini or the console sets either variable, yours is kept). The idea is Epic's: Unreal Engine 5.6
+gives streaming one shared time budget per frame (`s.UseUnifiedTimeBudgetForStreaming`); this does the same with 5.3's
+own two settings.
+
+**What changes (equivalent, not identical).** The same files and objects, in the same order, by the engine's own code,
+spread over more frames: in our runs at 4K with frame generation (60 fps cap) the burst's slowest frame went from 28.8 to
+22.4 ms with 1 (22.6 with 2), and the time over 16.7 ms in the burst from 118 to 21 ms. The price: the far cells of the
+row finish later, by about 0.8 s with 1 and 0.15 s with 2 (they stream in from hundreds of metres away); door loading
+screens took as long as before. Over a longer ride the total streaming work is the same and every backlog drains.
+`StreamInBudget=0` is the game's budgets (live).
+
+<a id="streamoutendplayslice"></a>
+
+### A cell behind you leaves the world over a few frames, as in Unreal Engine 5.6 (`StreamOutEndPlaySlice`, engine behaviour)
+
+**The problem.** When a cell behind you is streamed out, the engine (`UWorld::RemoveFromWorld`) takes its objects'
+parts out of the world over a few frames, within its own limit of 1 ms per frame. The call that takes out the last part
+then tells every object of the cell that it is leaving (`AActor::RouteEndPlay`), all of them at once, with no limit. In
+this game many of those objects unhook themselves there from lists the whole world shares (the game mode's and the game
+instance's event lists); each unhooking walks the whole list, so the more is loaded, the longer it takes: one frame of
+4-14 ms per cell on a 15-minute ride (16 slow frames, 3 of the ride's 9 frames of 33 ms or more; ours). Epic added a way
+to spread exactly this step in Unreal Engine 5.6.0 (commit dfeb9ecce7, `s.LevelStreamingRouteActorEndPlayForRemove-
+FromWorldGranularity`, off by default there); this game's engine (5.3) does not have it.
+
+**What we did.** Epic's design, written as one hook on the engine's call that takes out the cell's parts: once the last
+part is out, the "leaving" calls are made N objects at a time (`StreamOutEndPlaySlice=N`), and the engine's own 1 ms
+check runs between those batches, as in 5.6. When every object has been told, the engine's own finishing code runs as
+before (it finds them all done), in the same order.
+
+**What changes (equivalent, not identical).** The same objects get the same call in the same order, and nothing else is
+moved. The cell is already hidden and its objects stopped updating at the start of the removal (the engine does this for
+streamed cells), so nothing you see changes; the cell leaves the world's list a few frames later, and the next cell
+behind you waits for it as it always waits for the one before. Loading screens: the game lifts the engine's limit there,
+so everything still happens in one frame. A blocking removal (the engine waiting for streaming to finish) goes the
+engine's way. `StreamOutEndPlaySlice=0` is the engine's way (live; installed at start-up; not on the OBSE64 route).
+
 ## Travelling: characters and cells
 
 <a id="npcfadeinnorebuild"></a>
@@ -1375,6 +1496,39 @@ without the game thread waiting; the create runs a few frames later, in the same
 `PacingMaxLagFrames` (then the game loads the rest itself, as before) and gives up on a load after 3 s. `CreatePreload=0`
 turns it off (live; installed at start-up).
 
+**`CreatePreloadEarly` (our gap since 1.3.0-beta).** A far character that `NpcCreationPacing` held back because the
+frame's budget was spent asked for its files only once it was its turn again, a frame or more later; when an area's
+set-up then needed it at once, it could still be loading, and the game would wait for the disk in that frame. With the
+key the same files are asked for at the moment it is held back, which gives them a head start of a frame or more;
+nothing else changes (the same files, the same loader, a frame earlier). The Imperial City Waterfront's 24-28 ms waits
+for the disk were removed by `PacingFlowProgress` (below); this key's own gain there was too small to measure (it made 0
+and 1 extra requests in our two test passes). `CreatePreloadEarly=0` is the old behaviour (live).
+
+### A returning creature's animations load in the background (`CreatureAnimPreload`, game behaviour)
+
+**The problem.** The game's old engine keeps two caches for a creature: its skeleton model and its animation files
+(`.kf`, one per move). When a creature is queued for loading, the queue step asks the background loader for the
+animation files of the creature's folder only when the skeleton is not cached yet, guessing that a cached skeleton means
+cached animations. But an animation file is dropped as soon as no creature uses it, while the skeleton stays longer. So
+a kind of creature that comes back after all of its kind had unloaded (the horse you left, the mudcrabs and deer by a
+road you rode before) finds its skeleton, asks for nothing, and when it is finished the game loads each of its
+animation files in the foreground: it pauses its background loaders, waits for them to finish what they are doing,
+reads the file, and lets them go, about 20 times for a horse, while the game waits. In a recorded ride this made the
+session's worst frame (64 ms, the loaders were busy with a new row of cells); on our test road each return of the horse
+cost the old engine 23-87 ms, mostly waiting for the loaders. The 2006 game has the same code.
+
+**What we did.** Summoned creatures already go the other way: their queue step tells the same function to queue the
+folder's animations anyway. With `CreatureAnimPreload=1` the creature queue step passes the same "anyway" (one byte of the
+game's code), so missing animation files are read by the background loader, by the game's own loading task, before the
+creature is finished; files that are cached become requests that are done at once.
+
+**Why the game can't change.** The same files are read by the same code and put into the same cache by the game's own
+step (when two creatures of a kind ask at once, both may read a file and the second copy is dropped, as on that kind's
+first load). The creature is finished once its files are in, behind whatever the loader is doing; in our tests a
+returning creature was finished 50-130 ms after it was queued, as soon as or sooner than without the key (the game also
+waited for the loader then, and then read the files in the foreground). Nothing is shown half-built: the creature
+appears when it is finished, as before. `CreatureAnimPreload=0` is the game's way (live).
+
 ### Far characters' equipment and hair wait their turn (`PacingOwnerWalk`, part of `NpcCreationPacing`)
 
 First written by mkusm in pull request #25; reviewed, measured and kept here. **The problem.** `NpcCreationPacing` asks
@@ -1384,6 +1538,131 @@ holds something that is not a pointer; reading it failed, and the piece counted 
 character far away and out of view. **What we did.** That read is guarded, so the walk goes on to the next owner, the
 character, and the piece waits like the character's other pieces. Timing only, in the game's order.
 `PacingOwnerWalk=0` turns it off (live).
+
+### Hair steps belong to their character (`PacingHairActor`, part of `NpcCreationPacing`; our bug since 1.0.0-beta)
+
+**The problem.** Hair is put on by its own step, and that step belongs to the hair's model file, not to the character, so
+`NpcCreationPacing` could never tell whose hair it was (the walk above does not help: a model file has no character
+above it). An unknown step counts as near. Behind a row of far-away characters waiting their turn, such a step waited in
+line, and when the row had gone through, every waiting hair step ran at once, whatever the frame's budget: at the
+Imperial City Waterfront 14 of them ran in the frame after the last of a row of far characters, on top of one
+character's look and three equipment steps, a 43 ms frame (ours, the public flight on screen, 4K with frame generation,
+60 fps cap). **What we did.** The step's own data names the hair it puts
+on (the hair part of the character's mesh), and that part belongs to the character, so the step is now matched to its
+character and waits or runs like the character's other steps: far and out of view, it waits within the budget; near or
+in view, it runs at once. Before using it, the fix checks in the game's code that the step really reads and changes that
+part; otherwise nothing changes. With the key, a step that finishes inside another of the same character's steps and has
+to wait is also queued as that character's (before, as nobody's), so a later step of the same character cannot run ahead
+of it. A character fades in over about a second and counts as visible half a second after its fade starts; a queue
+of other far characters' steps (25 deep at the Waterfront on our 4K flights) could hold its hair past that point, so it
+appeared without hair for a few frames. Now, once a waiting character's fade has started, the queue runs at the pace that
+finishes that character's steps (and, keeping the order, the ones before them) before it shows: from the time left, the
+last frame's own time and the queued steps' sizes, but never more than 2 steps and about 16 ms of them (by their usual
+size) in one frame, so the catching up does not make a slow frame of its own (the first version allowed 4, which could
+add 32-40 ms to a frame). With a very deep queue of large steps that cap can let a character begin to show a little
+before its last step, so this is "normally before it shows", not a guarantee. Timing only, in the game's order.
+`PacingHairActor=0` is the old behaviour (live).
+
+### An area's set-up keeps waiting while its characters still come (`PacingFlowProgress`, part of `NpcCreationPacing`; our gap since 1.0.0-beta)
+
+**The problem.** When a newly loaded area's own objects are set up, everything the world logic sent before has to be done
+first, as in the game; with `NpcCreationPacing` some far-away characters may still be waiting their turn then. The set-up
+waits (the world logic pauses for those frames, as it does during one long frame): up to eight frames while one of the
+waiting characters is created in every frame, otherwise three, after which all that is still owed is created at once.
+Two cases were counted as "nothing happening" although the line was moving: characters still owed from earlier frames
+(created one per frame, but older than the area's own frame), and a character waiting at the head of the line for its
+files to finish loading in the background (`CreatePreload`). At the Imperial City Waterfront the first gave two creations
+in one frame (15-24 ms of work), the second created the character with its files still loading, so the game stopped for
+the disk in that frame (24-28 ms, in two of six passes; ours, 4K with frame generation, 60 fps cap). **What we did.** Both
+now count as progress: the set-up keeps waiting, still at most eight frames, and the characters arrive one per frame or
+once their files are there. A character waiting for its files counts whether it is far away or a near one waiting out of
+the camera's view (`CreatePreloadNear`, at most its own 12 frames). The order of everything between the world logic and
+the Unreal side stays the game's. While the set-up waits, the old engine's world logic (AI, scripts, combat) pauses: with
+the key that pause can now last up to eight frames (130-200 ms at 40-60 fps) where the game, at the same spot, had one
+long frame of about 40-60 ms; the longest we saw in our test passes was five frames. Timing only.
+`PacingFlowProgress=0` is the old behaviour (live).
+
+### A far character's step waits for a frame with room (`PacingBaseGate`, part of `NpcCreationPacing`)
+
+**The problem.** While new characters arrive (a town gate, the Imperial City Waterfront), the game's own work per frame
+rises to 16-26 ms for a few seconds: the newcomers' first updates. `NpcCreationPacing` gives a far, unseen character's
+steps (body and head, clothes, hair: 7-14 ms for the body and head) a time budget per frame, but that budget is decided
+at the start of the frame, before the frame's own work is known. So one such step often landed on a frame that was
+already slow, and the frame took 25-36 ms: a sudden drop on the frame-rate counter (two of them on the Imperial City
+flight in our tests, 4K with frame generation, 60 fps cap). **What we did.** Each waiting step is decided on its own. A
+step of a character that is at least `PacingGateNearM` (100 m) away and either out of sight or still at the faint first
+stage of its fade-in (the game holds far characters there) runs only after the frame's world update (all characters
+and objects ticked), where the frame's time so far is known, and only if the frame then stays within a target, 25 ms:
+time so far + what the rest of the frame took in the last frames + the step's size (a high estimate from the last eight
+steps of its kind) must fit; or on a calm frame (one whose own time stays below `PacingGateCalmMs`, 17 ms), one a frame,
+whatever its size, so such a frame can go over the target. At most one large step runs a frame this way, the oldest
+first. No step waits longer than `PacingGateBoundFrames` (45 frames: 0.75 s at 60 fps, 1.5 s at 30 fps): before that
+limit the waiting steps run anyway at the
+slowest even pace that keeps each one within it, so the limit never releases a pile at once. A character that comes
+near, or whose fade-in goes on past that first stage, has its steps run as without the gate, ahead of the waiting ones
+(each character's own steps keep their order; steps of different characters do not depend on each other); a step that
+cannot be tied to a character lets everything queued before it run as before. Nothing waits during loading screens,
+menus or fast travel, and character creation itself is not touched. A far character may therefore be finished up to
+45 frames later than without the gate; one that is drawn at that faint first stage shows it that much longer.
+On the Imperial City flight in our tests (4K, frame generation, 60 fps cap, three flights each way in one game, alternating)
+the Waterfront's frames of 28 ms or more went from 19 to 10 per flight on average (10-24 without the gate, 7-14 with it);
+its short drops remain: part of them is the frames' own work, part are waiting steps released when their character's
+fade-in goes on (10-15 per flight). Timing only (our own steps, in each character's order). `PacingBaseGate=0` is the old behaviour; a number
+from 18 to 50 sets another target in ms (live).
+
+### A held far character stays faded out until it is built (`PacingGateShownHoldMs`, part of `NpcCreationPacing`)
+
+**The problem.** With `PacingBaseGate` a far character's body or clothes step can wait for a frame with room while its
+fade-in (1.25 s, by dither) already runs. So the unfinished body (the stand-in the game shows until the body step has
+run) can start to show faintly (our side effect of `PacingBaseGate`, which this key removes; with the key off it can
+still happen), and when the fade-in goes on past its faint first stage the waiting steps are forced out
+at once, often on slow frames. **What we did.** Every character's dither reaches its meshes through one game function;
+the fix raises only the number handed to it, for one character at a time. While a far character that has not started
+to show (its fade-in in its first quarter unit) has steps held by the gate, what reaches its meshes stays at "fully
+faded out", the state of the first frame of every fade-in. The hold ends when its steps have run, after
+`PacingGateShownHoldMs` (1000 ms) at most, or when the game's own fade-in is 0.375 s from its end
+(`PacingGateShownHoldEnd`, 10 = the last quarter second, plus a small window), whichever is first. Then the shown dither
+falls with the game's own value, a little faster (up to about 3 times when the hold lasted its full window; about
+1.05 times after the 40-85 ms holds typical in our play), and reaches zero exactly when the game's fade-in ends, so
+the character is left exactly as the game leaves it, at the game's time. The game's own fade value, its end, and the
+switch-on of the character's AI that the end makes are not touched; the dither is only ever raised, never lowered, so a
+character is never more visible than in the game. The gate makes the held steps run before the fade-in ends: from the
+deadlines of all waiting characters it works out when they must start, one step a frame (more a frame only when one a
+frame can no longer make it, at low frame rates; at most four), so the steps are spread out instead of forced out
+together at the end. If a character's weapon or shield step ran before its body step while it is held (or just before
+its hold began), its remaining steps get a deadline 0.1 s later: until then they may still wait for a frame with room,
+then they run in the spread (one a frame, not all at once), so the weapon (which the game never fades) usually shows
+without the body for about 0.1-0.2 s, at most until the hold ends (under a second). What
+changes on screen is when a held far character becomes visible: later in its fade-in (up to about 0.9 s), then faster.
+On the Imperial City flight fewer steps were forced into slow frames (3-5 per flight against 6-10, ours, 4K with frame
+generation, 60 fps cap; measured on the build before this release's review fixes, which changed the rule that picks when
+each step runs); the frames of 28 ms or more did not differ clearly in our few flights.
+On by default (`PacingGateShownHoldMs=1000`; a restart to change it from 0, then live, 0 = the game's fade). With OBSE64 it is not
+available (it is set up before the game's code starts); the log says so.
+
+### Far characters arriving out of sight do not animate for their first second (`FadeInUnseen`, part of `NpcCreationPacing`; engine behaviour, idea from Epic's Unreal Engine 5.5)
+
+**The problem.** The engine animates a character only while it has been drawn within the last second. Whether something
+hides an object is only known a frame or two after the object first appears, so in its first frames a new character is
+drawn and counted as seen even when a building is in front of it, and that one stamp keeps it animating at full rate for
+a whole second. In this game every new character also fades in over 1.25 s, so nobody can see it in those frames
+anyway. At the Imperial City Waterfront a crowd of six to nine citizens is created 120-150 m away behind the buildings as
+you approach, and for that second the game evaluated up to 15 animation poses a frame instead of 4, while the game thread
+waited for them (ours: 6-7 ms a frame in a cold start, 4K with frame generation, 60 fps cap). **What we did.** Epic changed
+the engine in Unreal Engine 5.5 (commit 8dd2cb4237): an object counts as drawn only once its hidden-or-not state is
+known. We do the same where it matters, without touching the renderer: right after a far character's fade-in step each
+frame, any of its animated meshes that has not been drawn for 0.2 s (counted from the last two frames, so a single slow
+frame does not count as time unseen) is marked as not seen any more (as the engine itself would after one second). A character that is drawn, in view or through its shadow, is never touched and animates exactly
+as before, at every stage of its fade-in; a hidden one stops animating 0.2 s after its first frames instead of a second
+after. Its animation then starts when it is first seen, the same as for every hidden character in the game after its
+first second, so this is equivalent, not identical. Weapons and shields, the textures' own streaming time and the
+character's own "seen" time are left alone. In our cold-start Waterfront test (four runs, alternating) the arrival's
+animation work ended 0.3 s after the last character was created instead of 1.0 s, the game thread's wait for it fell from
+6-7 to 1.5 ms a frame, and the frames' time over 16.7 ms in the arrival roughly halved (342-357 against 135-181 ms). On
+the full Imperial City flight in a warm game (four flights, alternating) the Waterfront's frames of 25 ms or more went from
+20 to 15 per flight and its time over 16.7 ms from 729 to 603 ms; the two short drops there remain, made by the arriving
+characters' other work (their creation steps, movement and the frame's wait for the render thread), which this does not touch.
+`FadeInUnseen=0` is the old behaviour (live after a start with 1).
 
 ### The old engine's frame in fights: no sleep for a finished path finder, no profiling timer (`OtFrameTrim`)
 
@@ -1469,6 +1748,49 @@ right after it. The same cells are unloaded in the same order on the same thread
 near a cell corner) and the spare slots are still full, the game unloads the extra cells inside that crossing frame, as
 it always does; the log counts how often. We measured no frame-level gain (lab analysis of play rides: the unload is about 1.5-2 % of a ride's time
 over 16.7 ms); it is on by the maintainer's choice. `CellBufferEvictDelayMs=0` starts right after the crossing (live).
+
+### A busy cell unloaded in steps (`CellEvictSplit`, part of `CellBufferPacedEvict`)
+
+**The problem.** `CellBufferPacedEvict` unloads one cell per old-engine frame, with the game's own unload. A cell with
+many people in it makes that one frame long: for one cell of the Imperial City Waterfront (187 objects, ten characters)
+about 20 ms, of which the characters' clean-up (mostly their animation) is 17 ms; the game thread waits for that frame
+(24-33 ms frames in our flights). **What we did.** Before the cell's own unload, the fix takes `CellEvictSplit` (2) of
+its characters' bodies (their 3D) per frame with exactly the call the game's unload makes for each of them, under the same
+lock, on the same thread, at the same point of the frame, in the game's order among the characters (ahead of the
+cell's other references); the cell stays in its spare slot
+meanwhile, and once fewer than two characters are left the game's own unload takes the rest, finding the cleared
+characters without their 3D, as it finds any reference that has none. In our flights that cell went from one step of
+20.7 ms to 5-6 steps of 3-5 ms, and the game thread's longest frame at that unload from about 24 to 17-18 ms (two
+hidden runs, game thread only); what you see on screen at that spot did not change measurably in the flight we
+watched. **Why the game can't change.** The cell is already out of the loaded grid, about 150 m behind you (nothing in
+it is drawn), its references are cleared by the same calls, only spread over 2-5 more old-engine frames (about 35-85 ms), and the unload itself is the game's. Two
+calls in that clean-up behave differently for a cell that is not being unloaded (they remove arrows stuck in the
+character and notify spell effects aimed at it), so a step runs only where both do nothing: not while any arrow is in the
+world, and never for a character that a spell effect is aimed at; those cells get the game's own unload. A cell you turn
+back to within that tenth of a second reloads its characters as it reloads any reference without 3D: later than
+without this key, never later than in the game itself, which had already unloaded the whole cell. The cell's decals stay until its unload, a few frames after its characters went. A small gain: in our
+tests it removed no drop you would see by itself. On by default (`CellEvictSplit=2`; live, 0 = the game's unload in one
+step); it needs `CellBufferPacedEvict`, so it is not available with OBSE64.
+
+### The next row of cells loaded ahead (`RowPreload`, game behaviour)
+
+The old engine keeps a 5 x 5 grid of cells around you loaded. When you ride half a cell into the next one, the grid moves
+by a row: five new cells (nine at a corner) are read from the game files, set up and switched on, all in one frame of the
+old engine's thread, and the game waits for that frame (a few milliseconds at every crossing, more in towns and forests).
+The original 2006 game did not wait for the reading part: as soon as you passed the edge of the centre cell it asked for
+the row that would come next and loaded it on a background thread, so the crossing only had to switch it on. The
+remaster still asks for that row at the same moment, but nothing loads it any more.
+
+With `RowPreload=1` the cells the game asks for are loaded with the game's own cell loader, one cell per quiet frame of
+the old engine's thread (not in the frames right after a crossing, not while a menu or loading screen is up, not in
+interiors), and kept in the old engine's cell buffer, where the cells you have just left are kept. At the crossing the
+game finds them loaded and only switches them on. The cells and their contents are the same; nothing appears earlier,
+because switching a cell on still happens at the crossing. The cell's loader also hands the cell the references that
+belong to it (the persistent ones and any that lie inside it), a few seconds earlier than before: the 2006 game did the
+same ahead of the crossing. A row you never enter stays in the buffer and is unloaded
+like any cell you left behind. The 2006 game also loaded the cells' 3D ahead; that part is not restored, because in the
+remaster it would switch on a cell's lights for the game's logic before the cell itself. Needs `CellBufferPacedEvict`
+and `NpcCreationPacing`. Start-up, then live.
 
 ## Doors, loading screens and start-up
 
@@ -1710,6 +2032,44 @@ for the driver's compile threads used a Windows thread snapshot, which maps memo
 the game's built-in web browser (CEF) hooks that mapping while it starts: a rare start-up crash. The threads are now
 listed with one `NtQuerySystemInformation` call, which maps nothing. The OBSE64 route's look-up of the game's main
 thread used the same kind of snapshot (since 1.0.0-beta) and was changed the same way.
+
+### The first hit on each surface without a wait (`ImpactPreload`, game bug)
+
+**The problem.** When a weapon hits a character, the game shows two effects a moment later: blood, and a "pawn impact"
+effect chosen by the surface that was hit (metal, cloth, stone and so on). It finds each effect through a reference that is only
+loaded when needed, and it loads it right there, with the game thread waiting. So the first hit on each surface in a
+session (and again after the game unloaded the effect) froze the game while the effect and everything it uses came from
+disk: 65 ms of an 84 ms frame near Mortal Camp in a ride with a fight on the road (ours; the worst frame of that ride).
+
+**What we did.** The game keeps the list of these effects in its own settings: the blood effect, and a table with one row
+per surface naming its impact effect. As soon as those settings exist (at the main menu), the fix asks the engine's
+background loader for the table, lets the game set up its list of rows exactly as the first hit would, then asks for
+every row's impact effect and the blood effect, and keeps each one loaded once it is in (the same way the game keeps its
+table). Every row of the game's own table is covered, so no effect name is written into the fix.
+
+**Why the game can't change.** The hit finds the same effect, already loaded, and shows it at the same moment; nothing
+else is touched. The effects stay in memory for the session instead of being unloaded and loaded again later. If a load
+does not finish within 60 s, the game loads that effect itself, as before. `ImpactPreload=0` stops asking for more
+(live; installed at start-up; needs `NpcCreationPacing`).
+
+<a id="resetloadersnoflush"></a>
+
+### Renaming an object no longer waits for every background load (`ResetLoadersNoFlush`, engine behaviour)
+
+**The problem.** When the game renames an object (drawing a bow renames the arrow you nock), the engine's
+`UObject::Rename` calls `ResetLoaders` for the object's package, and in Unreal Engine 5.3 that first waits until every
+file the game is loading in the background has finished (`FlushAsyncLoading`), whatever it is: up to about 20 ms when a
+load was in flight (a bow draw in one of our recorded plays). The wait only protects the package's old-style loader
+(`FLinkerLoad`), which is then detached; this game loads its packages without one.
+
+**What we did.** Epic changed this in Unreal Engine 5.4.0 (commit 0d790f0ba5): no loader attached, no wait and nothing to
+detach. Our hook asks the game's own functions the same question the engine asks first (the object's package, and that
+package's loader); with no loader it returns, with a loader (or no package) the engine's code runs unchanged.
+
+**Why the game can't change.** For a package without a loader the engine's reset finds nothing to do; only the wait is
+gone. The background loads finish when the loader finishes them, as they would have without the rename.
+`ResetLoadersNoFlush=0` is the engine's way (live; installed at start-up; not on the OBSE64 route). The log counts the
+calls, how many found loads in flight, and any package that had a loader.
 
 ## Menus
 

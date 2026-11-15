@@ -11,7 +11,7 @@
 #include <string_view>
 #include <vector>
 
-#define OPF_VERSION "1.4.0"
+#define OPF_VERSION "1.5.0"
 // The release label after the version (the tag is v<OPF_VERSION><OPF_RELEASE_SUFFIX>): in the log's first line and the DLL's
 // version resource (build.ps1 reads both lines; CI checks the tag against OPF_VERSION).
 #define OPF_RELEASE_SUFFIX "-beta"
@@ -184,6 +184,10 @@ struct Config {
     int streamRegisterGranularity = 1; // StreamRegisterGranularity: streaming/stream_granularity.cpp, 1..9 sets
                                        // s.LevelStreamingComponentsRegistrationGranularity (game 10) outside loading
                                        // screens (equivalent, user 2026-11-07); AddToWorld hook at start-up (key on), then live
+    int streamInBudget = 1;            // StreamInBudget (gatefix 2026-11-12): streaming/stream_granularity.cpp, outside loading
+                                       // screens s.AdaptiveAddToWorld.AddToWorldTimeSliceMax / s.AsyncLoadingTimeLimit (game 4 / 5 ms)
+                                       // set to 1 / 3 (key 1) or 2 / 3 (key 2); shares StreamRegisterGranularity's AddToWorld
+                                       // hook (installed at start-up when either key is on); live 0..2
     int lumenCardsNarrow = 1;          // LumenCardsNarrow: render/lumen_cards_narrow.cpp, the Lumen mapping upload sends only the
                                        // instances whose mesh cards changed (identical); start-up install when != 0, then live 0/1
                                        // (lab: 2 = with proof, needs 2 at start-up)
@@ -295,6 +299,9 @@ struct Config {
                                          // after a crossing (live): 0 in the crossing frame (as the game), 1 paced
     int cellBufferEvictDelayMs = 1500;   // CellBufferEvictDelayMs (otunload; public 1.3.0): the paced drain starts this many ms after
                                          // a crossing (live, 0..3000; 0 = right after it); needs CellBufferPacedEvict
+    int cellEvictSplit = 2;              // CellEvictSplit (flightrest / evfix; public 1.5.0, 0 until the release flips it): a paced
+                                         // unload's actors lose their 3D N per OT frame (0-8; 2 when on) before the cell's
+                                         // teardown (live; needs CellBufferPacedEvict)
     bool psoPrecompileFast = true;       // PsoPrecompileFast: the start-up PSO precompile at UE's Fast pace outside play (identical: timing
                                          // only; start-up install, then live)
     int psoPrecompileFastBudgetMs = 4;   // PsoPrecompileFastBudgetMs: render-thread ms per frame at the faster pace (16 = UE's Fast,
@@ -312,6 +319,12 @@ struct Config {
                                         // (needs ParallelStaticBodies at start-up; live; identical)
     bool gpuSceneParallelUpload = true;  // GpuSceneParallelUpload: r.GPUScene.ParallelUpdate 1 (the GPU scene's instance upload of a
                                          // streamed area on all workers; identical; live)
+    int indirectArgBufferPool = 1;     // IndirectArgBufferPool (poolargs 2026-11-14; off until played): d3d12.AllowPoolAllocateIndirectArgBuffers
+                                       // 1 (Epic's UE 5.5 default): indirect-arg buffers from the D3D12 buffer pool, not committed one by
+                                       // one; placement only; start-up only, version.dll route only
+    int parallelFileReads = 8;         // ParallelFileReads (vtfix 2026-11-14; off until played): up to N reads of a game container
+                                       // file in flight instead of the engine's one at a time (streaming/parallel_file_reads.cpp);
+                                       // 0 / 1 = the engine's reader; 2..16; live once installed at start-up; identical data
     int vtStreamingUploads = 0;        // VtStreamingUploads (off by default): r.VT.MaxUploadsPerFrame.Streaming set to
                                        // this (streamed virtual texture pages uploaded per frame; the game's 4; 0 = the game's
                                        // value; live)
@@ -373,7 +386,49 @@ struct Config {
     bool pacingOwnerWalk = true;       // PacingOwnerWalk (mkusm, first version of public PR #25): a non-actor in a delegate's owner
                                        // chain (equipment, hair) does not end the walk to its actor, so a far unseen character's
                                        // equipment / hair steps are paced like its other steps (live)
-    bool pacingLeanFlowDrain = true;   // PacingLeanFlowDrain: a level flow at its wait bound drains the owed main queue only;
+    bool pacingHairActor = true;      // PacingHairActor (npcunits 2026-11-12): a hair step is paced by its character (found through
+                                       // the hair mesh component it sets), not counted as near because its owner is the hair asset
+    bool pacingFlowProgress = true;   // PacingFlowProgress (drainfix 2026-11-12): a waiting level flow's 8-frame bound also counts
+                                       // creates run with older OT frames owed and a head create waiting for its loads (live)
+    int fadeInUnseen = 1;              // FadeInUnseen (stampfix 2026-11-13; Epic's idea, UE 5.5.0 8dd2cb4237): a far character in its
+                                       // spawn fade-in whose meshes the renderer has not drawn for 200 ms no longer counts as
+                                       // rendered, so it stops animating then instead of 1 s after its first frames' stamps
+                                       // (start-up install, then live; needs NpcCreationPacing)
+    int fadeInUnseenWindowMs = 200;    // not in the shipped ini (lab): FadeInUnseenWindowMs (50-900)
+    int pacingBaseGate = 25;            // PacingBaseGate (basegate 2026-11-12): a far, unseen NPC's appearance / equipment / hair
+                                       // step runs after the actor tick only if the frame stays within a target (0 = off, 1 = 25 ms,
+                                       // 18-50 = that target in ms; live)
+    int pacingGateBoundFrames = 45;    // PacingGateBoundFrames (gate2 2026-11-13): a unit PacingBaseGate holds runs by this age
+                                       // (frames since it was queued) at the latest (10-180; live)
+    int pacingGateFadeHoldMs = 0;      // lab PacingGateFadeHoldMs: the fade hold (0 = off; lab builds only; live)
+    int pacingGateShownHoldMs = 1000;     // PacingGateShownHoldMs (hold2; public 1.5.0, 0 until the release flips it; 1000 when on):
+                                       // visual-only hold of a held far character's spawn fade-in (0 = off, 1-2000 ms bound;
+                                       // hook installed at start-up when > 0, not on the OBSE64 route; then live)
+    int pacingGateShownHoldEnd = 10;   // PacingGateShownHoldEnd: tenths of the game's fade value (5 at the start, 0 at its end,
+                                       // 4 per second) at which a held character's units are due now (soft from +0.5); the
+                                       // visual hold ends at +0.5 at the latest (5-25; live)
+    int pacingGateCalmMs = 17;         // PacingGateCalmMs: a held unit may also run on a frame whose own time stays below this
+                                       // (0 = off, 10-30; live)
+    int pacingGateNearM = 100;         // PacingGateNearM: PacingBaseGate never holds an actor nearer than this (m, 0-500; live)
+    bool createPreloadEarly = true;   // CreatePreloadEarly (drainfix 2026-11-12): a far create held back by the pacing budget
+                                       // requests its loads at once (live; needs CreatePreload)
+    int impactPreload = 1;             // ImpactPreload (impactload 2026-11-12; 2 = log first uses only): the hit-effect classes of the game's impact table
+                                       // (every surface) and its blood effect class are loaded in the background before the
+                                       // first fight and kept (start-up install, then live; needs NpcCreationPacing)
+    int rowPreload = 1;                // RowPreload (rowpreload 2026-11-12): the next row of exterior cells the game asks for is loaded
+                                       // ahead, one per calm old-engine frame, and parked in the cell buffer (the 2006 game's
+                                       // preload; start-up install, then live; needs CellBufferPacedEvict and NpcCreationPacing)
+    int streamOutEndPlaySlice = 4;     // StreamOutEndPlaySlice (epicport 2026-11-12; Epic UE 5.6.0 dfeb9ecce7): a streamed-out
+                                       // level's actors get EndPlay in batches of this many actors inside RemoveFromWorld's own
+                                       // time limit instead of all in the finishing call (0 = stock; start-up install, then live)
+    bool resetLoadersNoFlush = true;  // ResetLoadersNoFlush (epicport 2026-11-12; Epic UE 5.4.0 0d790f0ba5): ResetLoaders of a
+                                       // package without a loader linker returns without FlushAsyncLoading (start-up, then live)
+    bool creatureAnimPreload = true;  // CreatureAnimPreload (kfbuild 2026-11-13): the creature queue step always queues the
+                                       // skeleton folder's animation files, as summons do (one byte; live)
+    int npcDeferAnimInit = 0;          // [Fixes] NpcDeferAnimInit (lab, deferanim 2026-11-13): far characters' units before the post-actor tick
+                                       // init their animation with the reference pose, first pose by the engine's update or at
+                                       // the post-actor tick (1; 2 = also the deferred layer links); start-up install, then live
+    bool pacingLeanFlowDrain = true;  // PacingLeanFlowDrain: a level flow at its wait bound drains the owed main queue only;
                                        // the waiting delegates stay queued (live; PR #25)
     int pacingFlowWaitFrames = 8;      // not in the shipped ini: ... up to this many frames while the queue progresses (3 = 0.17)
     int pacingFadeAware = 1;           // not in the shipped ini: PacingFadeAware (npcjitter): 1 = a far NPC still fully invisible in
@@ -737,6 +792,36 @@ bool PsoCompileThreadPoolApplied();        // the pool size we wrote is in force
 void PsoCompileThreadPoolTestReset();      // self-test only
 bool PsoCompileThreadPoolInfo(int32_t** size, int32_t** percent, int32_t** priority = nullptr);
 
+// indirect_args_pool.cpp (IndirectArgBufferPool: d3d12.AllowPoolAllocateIndirectArgBuffers 1 before the engine registers it)
+bool FindIndirectArgBufferPool();          // no patching; false = unavailable (logged once)
+void SetIndirectArgBufferPool(int key, bool beforeGameCode);  // start-up, once (Init): 1 written while the int holds the stock 0
+void IndirectArgBufferPoolTick(int key);   // once a second: later ini changes only logged; a player's Engine.ini value reported
+bool IndirectArgBufferPoolApplied();
+int32_t* IndirectArgBufferPoolVar();       // the variable's int (nullptr if not found)
+uint64_t* IndirectArgBufferPoolVtableSlot();  // its auto-object's vtable pointer (0 until registered; nullptr if not found)
+void IndirectArgBufferPoolTestReset();     // self-test only
+
+// parallel_file_reads.cpp (ParallelFileReads: several reads of a game container file in flight; the engine's reader's vtable slot)
+struct ParallelFileReadsInfo {
+    uint8_t* startRequests = nullptr;  // FGenericFileIoStoreImpl::StartRequests
+    void** slot = nullptr;             // its vtable slot
+    uint8_t* pop = nullptr;            // FFileIoStoreRequestQueue::Pop (the call the original makes)
+    uint8_t* serviceNotify = nullptr;  // the generic backend's ServiceNotify (two slots after StartRequests)
+};
+bool FindParallelFileReads(const GameModule& game, ParallelFileReadsInfo* info);  // no patching
+bool InstallParallelFileReads(int reads);  // start-up, either route: both slots replaced when reads >= 2
+void SetParallelFileReads(int reads);      // live, once a second (no-op unless installed)
+void LogParallelFileReadsStats();          // one line when blocks were read since the last
+bool ParallelFileReadsTestStart(void* impl, void* queue, int reads, void* pop, void* original);  // self-test only
+void ParallelFileReadsTestNotify();        // self-test only: our wake event set (what a ServiceNotify does)
+bool ParallelFileReadsTestNotifyHook(void* impl, void* original);  // self-test only: the wrapped ServiceNotify itself
+void ParallelFileReadsTestHooks(int failCompletions, int seekPenalty, bool anyFile);  // self-test only (-2 = ask Windows)
+int ParallelFileReadsTestBusy();           // self-test only: reads in flight
+int ParallelFileReadsTestSeekPenalty(void* file);  // self-test only: the real question to Windows (1 hard disk, 0 not, -1 unknown)
+void ParallelFileReadsTestReset();         // self-test only
+void ParallelFileReadsTestCounts(uint64_t* reads, uint64_t* inFlightMost, uint64_t* retried, uint64_t* failed, uint64_t* engineReads, int* state,
+                                 uint64_t* seekQueries = nullptr);
+
 // task_wait_guard.cpp (TaskWaitDeadlockGuard: the task graph's worker wait, woken by its reserve worker too)
 struct TaskWaitGuardInfoOut {
     uint8_t* wait;                  // FTaskGraphCompatibilityImplementation::WaitUntilTasksComplete
@@ -1099,6 +1184,29 @@ void SetCellBufferPacedEvict(int mode);                  // live: 0 crossing-fra
 void SetCellBufferEvictDelay(int ms);                    // CellBufferEvictDelayMs (live): the paced drain starts ms after a crossing
 uint64_t CellBufferEvictDelayFrames();                   // OT frames a drain waited for that delay
 void LogCellBufferPacedEvictStats();
+// npcs/cell_evict_split.cpp (CellEvictSplit, flightrest / evfix 2026-11-13; public 1.5.0): a paced unload's actors' 3D first
+struct GameModule;
+bool CellEvictSplitFind(const GameModule& game, uint32_t out[4]);  // self-test: 3D removal, lock, unlock, player (RVAs)
+bool CellEvictSplitFindGates(const GameModule& game, uint32_t out[3]);  // self-test (rev96f B1): arrow count, ProcessLists, MagicHitEffect RTTI
+bool InstallCellEvictSplit();                          // start-up (pattern only, no code written); false: the key stays off
+void SetCellEvictSplit(int perStep);                   // live: actors cleared per OT frame (0-8), 0 = off; 0 when not found
+bool CellEvictSplitStep(uint8_t* cell);                // OT, cell_buffer.cpp's paced Trim: true = a step ran, the cell stays
+bool CellEvictSplitTookFrame();                        // OT, cell_buffer.cpp: a step ran in this OT frame (clears it)
+void CellEvictSplitForget();                           // OT, cell_buffer.cpp (fix102 N1): a non-paced Trim ran (budget reset)
+// self-test (fix102, rev102b M1): fake lock / unlock / player / arrow count / ProcessLists / MagicHitEffect RTTI so that
+// CellEvictSplitStep's decision runs on fake objects; nullptr restores the found (or not found) state
+struct CellEvictSplitFakes {
+    void (*lock)(void* lockObj, void* cell);
+    void (*unlock)(void* lockObj, void* cell);
+    void* lockObj;
+    void** player;
+    const volatile int32_t* arrows;
+    uint8_t* const* processLists;
+    const uint8_t* hitRtti;
+};
+void CellEvictSplitTestFakes(const CellEvictSplitFakes* f);
+void CellEvictSplitTestCounts(uint64_t out[8]);  // self-test: steps, cleared, arrow skips, hit excluded, limit, empty, fallbacks, faults (zeroed)
+void LogCellEvictSplitStats();
 // settings/hdr_menu.cpp (HdrMenuRows, off by default): an HDR section on the game's PC Graphics page
 // (a new settings table and category row, in memory; game thread): HDR, peak, paper white, black floor, mid-tone
 struct HdrMenuInfoOut {
@@ -1283,6 +1391,9 @@ void FarPawnMoveTestTick(void* comp, float dt, bool horse);      // self-test on
 bool InstallCreatePreload(bool beforeGameCode);  // start-up only (needs NpcCreationPacing)
 void SetCreatePreload(int mode);                 // live: 0 off, 1 on
 void SetCreatePreloadNear(int frames);           // live: 0..30
+void SetCreatePreloadEarly(bool on);             // CreatePreloadEarly (live; drainfix 2026-11-12)
+void CreatePreloadOnDefer(const void* cmd);      // npc_pacing.cpp, GT: a far create deferred for the budget (requests its loads)
+int CreatePreloadTestFake(int waits);            // self-test (fakes): next n deferrable creates wait; returns OnDefer calls seen
 bool CreatePreloadBefore(const void* cmd, bool mayWait, uint64_t lag, uint64_t maxLag, bool nearCreate);  // npc_pacing.cpp, GT
 bool CreatePreloadNearMayWait(double x, double y, double z);  // npc_pacing.cpp, GT: a near create's spot is out of view
 void LogCreatePreloadStats();                                 // one line when it waited or requested
@@ -1291,6 +1402,77 @@ const void* CreatePreloadTestCached(const void* holder, uint32_t form);         
 int CreatePreloadTestPath(const void* holder, uint32_t form, wchar_t* buf, int cap);    // self-test: map 2 reader (a copy)
 int CreatePreloadTestGetter(const uint8_t* fn);                                         // self-test: a class path getter's offset
 int CreatePreloadTestHeads(const void* cmd, uint64_t frame, bool deferAgain);           // self-test: frames waited (null = clear)
+struct SoftLoadApi {  // FSoftObjectPath::ResolveObject, ::ToString, FMemory::Free, LoadPackageAsync(FString) (create_preload.cpp's)
+    uint8_t *resolve, *toString, *free, *loadAsync;
+};
+bool FindSoftLoadApi(const GameModule& game, SoftLoadApi* out);  // the same patterns as CreatePreload's; false = not found once
+// loading/impact_preload.cpp (ImpactPreload, impactload 2026-11-12): the impact table's hit-effect classes (all surfaces) and the
+// blood effect class are requested in the background as soon as the game's settings exist (at the main menu) and kept loaded,
+// so the first hit of each surface no longer loads its effect synchronously (identical: the same classes, only loaded earlier)
+bool InstallImpactPreload(bool beforeGameCode);  // start-up only (needs NpcCreationPacing's frame hook)
+void SetImpactPreload(int mode);                 // live: 0 off, 1 preload, 2 log first uses only (lab watch)
+void ImpactPreloadFrame();                       // npc_pacing.cpp, GT: every frame end
+void LogImpactPreloadStats();                    // one line when something changed
+struct ImpactPreloadSites {
+    uint8_t *rowLookup, *classGetter, *pawnSparkLoad, *rowRead, *bloodRead;
+    uint8_t **classGlobal;     // the settings class (StaticClass cache)
+    uint8_t *rowList;          // TArray<row*> (data, num)
+    int32_t *objNum;           // GUObjectArray NumElements
+    uint8_t ***objChunks;      // GUObjectArray chunk table
+    uint32_t cdo, table, rowClass, blood;  // 0x110, 0x240, 0x80, 0x78
+};
+bool ImpactPreloadDiscover(const GameModule& game, ImpactPreloadSites* out, const char** missing);  // self-test (no writes)
+struct ImpactPreloadFakes {  // self-test: the game's functions and objects replaced
+    const void* (*resolve)(const void* softPath);
+    void (*request)(const void* softPath);
+    void (*initRows)(void* arg);
+    uint8_t** classGlobal;
+    uint8_t* rowList;
+    int32_t* objNum;
+    uint8_t*** objChunks;
+};
+void ImpactPreloadTestSetup(const ImpactPreloadFakes* f);  // self-test only (nullptr = clear)
+struct ImpactPreloadTestState { int state, requested, rooted, resident, rows, failed; };
+ImpactPreloadTestState ImpactPreloadTestRead();           // self-test only
+// streaming/row_preload.cpp (RowPreload, rowpreload 2026-11-12): the next row of exterior cells the game asks for is loaded
+// ahead with the game's own cell load and parked in the cell buffer, one cell per calm old-engine frame (the 2006 game's
+// background preload, which the remaster asks for but never runs); the crossing then only attaches them
+bool InstallRowPreload(bool beforeGameCode);      // start-up only (needs CellBufferPacedEvict installed, NpcCreationPacing's frame hook)
+void SetRowPreload(int mode);                     // live: 0 off (notes cleared), 1 on
+void RowPreloadGtFrame();                         // npc_pacing.cpp, GT: every frame end (menu / loading freeze)
+void RowPreloadGridCall(uint8_t* tes, bool shifted);                     // cell_buffer.cpp, OT: after every grid-change call
+void RowPreloadOtStep(uint8_t* tes, bool busy, uint32_t tailFree);       // cell_buffer.cpp, OT: the per-frame call, no shift
+uint32_t CellBufferTailFree(const uint8_t* tes);  // cell_buffer.cpp: free spare slots (0 when not installed / not made yet)
+bool CellBufferPacedEvictInstalled();             // cell_buffer.cpp
+void LogRowPreloadStats();                        // one line when something changed
+struct RowPreloadSites {
+    uint8_t *stub, *calls[3], *lookup, *isInterior, *inExtBuffer, *load, *insert, *loadingTest, *background, *tesSlot, *flagsSlot,
+        *grids;
+};
+bool RowPreloadDiscover(const GameModule& game, RowPreloadSites* out, const char** missing);  // self-test (no writes; needs
+                                                                                              // FindCellBufferPacedEvict first)
+struct RowPreloadFakes {  // self-test: the game's functions and objects replaced
+    void* stub;         // void(manager, world, x, y)
+    void* lookup;       // uint8_t*(world, x, y)
+    void* isInterior;   // uint8_t(cell)
+    void* inExtBuffer;  // uint8_t(tes, cell)
+    void* load;         // uint8_t*(world, x, y)
+    void* insert;       // void(tes, cell)
+    void* loadingTest;  // uint8_t(flags)
+    const uint8_t* background;
+    uint64_t* tesSlot;
+    uint64_t* flagsSlot;
+    const uint32_t* grids;
+};
+void RowPreloadTestSetup(const RowPreloadFakes* f);  // self-test only (nullptr = clear)
+void RowPreloadTestGt(int state);                    // self-test only: 1 calm, 2 frozen, 0 unknown
+void RowPreloadTestRequest(uint64_t manager, uint64_t world, int32_t x, int32_t y);  // self-test only: the redirected call
+struct RowPreloadTestCounts {
+    uint64_t requests, dupes, loaded, already, stale, noCell, attached, hits, unused, skipBusy, skipSettle, skipFrozen, skipTail,
+        skipUnsafe, cleared;
+    uint32_t pending;
+};
+RowPreloadTestCounts RowPreloadTestRead();  // self-test only
 // npcs/ot_frame_trim.cpp (OtFrameTrim, public since 1.3.0): the OT frame's path-builder sleep wakes early (bit 1, equivalent)
 // and the node profiler timer returns 0 (bit 2, identical by audit)
 bool InstallOtFrameTrim(bool beforeGameCode, int mode);  // start-up only (version.dll route)
@@ -1506,6 +1688,11 @@ bool FindBusyWaitFlagCheck();                      // the four put-back sites (n
 void SetBusyWaitFlagCheck(bool enabled);           // one byte per site, switchable live
 size_t BusyWaitFlagCheckSites(uint8_t** out, size_t max);  // the patched bytes (self-test)
 void LogBusyWaitStats();                           // lab: navmesh tile builds inside busy waits (no-op in public builds)
+// creature_anim_preload.cpp (CreatureAnimPreload: a returning creature's missing animation files load in the background)
+bool FindCreatureAnimPreload();                    // locate the creature queue step's flag byte (no patching); false = unavailable (logged)
+void SetCreatureAnimPreload(bool enabled);         // one byte, switchable live
+uint8_t* CreatureAnimPreloadSite();                // the flag byte (self-test)
+uint8_t* CreatureAnimPreloadLocate(const GameModule& game, const char** why);  // locate only, any image (self-test fakes)
 
 // npc_pacing.cpp (NpcCreationPacing: far-away NPC creation spread over frames)
 struct NpcPacingInfoOut {
@@ -1524,6 +1711,7 @@ struct NpcPacingInfoOut {
     int numMaxTickSlots;
     uint8_t* flowReturn[2];  // (c) the level flow runner's RunSession calls
     void* chooseWriter;
+    uint32_t hairActorWeak;  // PacingHairActor: the hair delegate's mesh-component weak pointer in its instance (0 = not found)
 };
 struct NpcPacingTestFakes {
     uint64_t (*clock)();
@@ -1534,6 +1722,7 @@ struct NpcPacingTestFakes {
     void* dtor[3];
     size_t sizeOverride[3];
     uint32_t rootOffset, locationOffset;
+    uint32_t hairActorWeak;  // PacingHairActor: the fake hair instance's component weak pointer (0 = keep the found one)
 };
 struct NpcPacingTestState {
     uint64_t S, E, frame;
@@ -1545,13 +1734,58 @@ struct NpcPacingTestState {
 bool FindNpcPacing();                 // locate everything (no patching); false = fix unavailable (logged)
 bool InstallNpcPacing();              // vtable slot writes, safe at any time
 void SetNpcPacingFadeAware(int mode);  // PacingFadeAware (live; public 0/1, lab also 2/3); no effect if the fade tick was not found
+bool InstallFadeInUnseen(bool beforeGameCode);  // FadeInUnseen: start-up only (one rel32 in the fade tick's caller); needs pacing installed
+void SetFadeInUnseen(int mode, int windowMs);  // live (public 0/1; lab 2 = any distance, window)
+bool FadeInUnseenInfo(uint32_t* jmpRva, uint32_t* bodyRva, uint32_t* list, uint32_t* compLast, uint32_t* staticClassRva);  // self-test
+void FadeInUnseenTestSlack(double seconds);  // self-test: the last two frames' time (< 0: the frame clock)
+int FadeInUnseenTestTick(uint8_t* comp, int mode, double (*now)(), const uint8_t* (*staticMesh)());  // self-test: the after-tick step
 bool NpcPacingFadeInfo(uint32_t offsets[5], void** staticClass);  // self-test: state, value, owner, actor's component, floor
 void NpcPacingTestFade(const uint8_t* (*staticClass)());           // self-test: a fake owner class
 void NpcPacingTestRendered(bool (*rendered)(const void* actor));   // self-test: fake "recently rendered" (nullptr = fakes never are)
+void NpcPacingTestFadeValue(float (*fade)(const void* actor));   // self-test: fake spawn fade-in dither (nullptr = the real one)
+void NpcPacingTestGameValue(float (*value)(const void* actor));  // self-test: fake own fade value of the due rule (nullptr = real)
 void SetNpcPacing(bool enabled, int budgetMs, int minDistance, int maxLagFrames, bool useSlack, bool flowWait = true,
                   int flowWaitFrames = 8);  // switchable live
 void SetNpcPacingOwnerWalk(bool on);  // PacingOwnerWalk (live; mkusm, PR #25)
+void SetNpcPacingHairActor(bool on);  // PacingHairActor (live; npcunits 2026-11-12)
 void SetNpcPacingLeanFlowDrain(bool on);  // PacingLeanFlowDrain (live)
+void SetNpcPacingFlowProgress(bool on);   // PacingFlowProgress (live; drainfix 2026-11-12)
+float NpcPacingTestFadeHold(const void* actor, float* value, float floor, float rate, float dt);  // self-test (gate2 fade hold)
+void SetNpcPacingGateBounds(int boundFrames, int calmMs, int nearM, int fadeHoldMs);  // PacingGateBoundFrames / CalmMs / NearM, lab FadeHoldMs (live; gate2)
+void SetNpcPacingBaseGate(int value);     // PacingBaseGate (live; basegate 2026-11-12): 0 off, 1 = 25 ms, 18-50 = the target in ms
+// PacingGateShownHoldMs (hold2 2026-11-13, npcs/shown_hold.cpp; public 1.5.0): the fade applier's entry hook
+bool NpcGateHoldsActor(uintptr_t actor);  // game thread: the actor has held appearance / equipment units (gate's list, still queued)
+bool NpcGateActorQueued(uintptr_t actor);  // game thread: a unit of the actor is still queued
+bool NpcGateActorGated(uintptr_t actor);   // game thread: a unit of the actor that the gate holds is still queued (build97)
+float ShownHoldEndValue();                 // PacingGateShownHoldEnd as a fade value
+void ShownHoldCountDue(bool now);          // the gate ran a due unit (now / soft)
+void ShownHoldCountDueReplay(int n);       // holdfix F2: due units run in one gate replay (the most is logged)
+void ShownHoldNoteEquipFirst(uintptr_t owner);  // holdfix F4: equipment ran while the appearance is still queued
+// holdfix F2: the deadline spread of the gate's due units (pure, npc_pacing.cpp): t[i] = the seconds until unit i is due
+// now (its character's fade value reaches PacingGateShownHoldEnd), periodS the frame period, softS the soft window (s):
+// due[i] = 1 when it must start running one a frame now so that one unit a frame clears all of them in time
+// returns the soft-due units a frame needed (1 unless one a frame cannot meet the deadlines; at most 4; port102)
+int ShownHoldDueSpread(const float* t, size_t n, float periodS, float softS, uint8_t* due);
+bool NpcPacingFadeLayout(uint32_t out[5]);  // holdfix F8: pacing's fade layout (state, value, owner, floor, actor's comp)
+bool InstallShownHold(bool beforeGameCode);  // start-up only
+void SetShownHold(int ms, int endTenths);  // live: 0 off, else the hold's bound in ms; PacingGateShownHoldEnd
+bool ShownHoldOn();
+float ShownHoldLevel(const uint8_t* comp);  // game thread: the dither held on this fade component's meshes (0: none)
+float ShownHoldSpeed(const uint8_t* comp);  // game thread: how much faster than the game's fade its shown level falls (1: as the game's)
+// game thread (holdfix F4; fix102): live open holds whose equipment ran before the appearance, with the seconds left to
+// their deadline (0.1 s after that unit; 0 = past it)
+int ShownHoldUrgentOwners(uintptr_t* out, float* leftS, int max);
+void LogShownHoldStats();
+bool ShownHoldFind(uint32_t out[8]);      // self-test: applier RVA, state, value, rate, max, floor, owner, actor's component
+void ShownHoldTestSetup(bool (*held)(uintptr_t), uint64_t (*now)(), int gt, int ms, int endTenths);  // self-test
+float ShownHoldTestCall(uint8_t* comp, uint8_t* owner, float scale);  // self-test: what the applier would be handed
+void ShownHoldTestCounts(uint64_t out[6]);  // self-test: opened, late, released by units / bound / clock, shown below
+void ShownHoldTestQueued(bool (*queued)(uintptr_t));  // self-test: the actor still has queued units (AI-early count)
+uint64_t ShownHoldTestAiEarly();          // self-test: fades that ended with the actor's units still queued
+void ShownHoldTestDueCounts(uint64_t out[2]);  // self-test: due units run soft / now (zeroed)
+int ShownHoldTestHold(uintptr_t comp, uintptr_t owner, bool touch);  // self-test (fix102): open / keep live a hold; slots held
+float NpcPacingTestGatePeriodS();          // self-test (fix102 S2): the due spread's frame period now
+void NpcPacingTestFrameEdge();            // self-test only: the frame-rate cap's sleep point (frame end / start) with no sleep
 void LogNpcPacingStats();
 bool NpcPacingInfo(NpcPacingInfoOut* out);
 void NpcPacingTestSetup(const NpcPacingTestFakes& fakes);  // self-test only
@@ -1564,6 +1798,25 @@ bool NpcPacingLastPlayerPos(double* x, double* y, double* z);  // any thread: th
 // walk past an owner chain's non-actors (an equipment unit's body pairing component), which pacing's own walk does not
 bool NpcPacingDistantUnit(uint64_t* ownerWeak, uint64_t* frame);
 bool NpcPacingStillDistant(uint64_t ownerWeak);
+// NpcDeferAnimInit (deferanim): the running unit runs distant and BEFORE this frame's post-actor tick (frame-start replay
+// or pairing run), on the game thread; *actorKey = its actor (0 = unknown)
+bool NpcPacingEarlyDistantUnit(uintptr_t* actorKey);
+// ---- NpcDeferAnimInit (defer_anim_init.cpp; experimental, lab builds only, as NpcPacingEarlyDistantUnit) ----
+bool InstallNpcDeferAnimInit(bool beforeGameCode, int mode);  // start-up only (version.dll route); then live
+void SetNpcDeferAnimInit(int mode);                           // live: 0 pass-through, 1 reference pose at init, 2 + deferred layer links
+void NpcDeferAnimInitPostActorTick();                         // NpcCreationPacing's post-actor-tick handler (game thread)
+void NpcDeferAnimInitFrameStart();                            // NpcCreationPacing's frame start (safety net, counted)
+void LogNpcDeferAnimInitStats();                              // one line when a counter changed
+bool NpcDeferAnimInitDiscover(const GameModule& game, const char** missing, uint32_t out[11]);  // self-test
+void DeferAnimTestBegin(const uint32_t offsets[11], bool (*eligible)(uintptr_t*), void (*evaluate)(uint8_t*), bool (*handle)(uint8_t*),
+                        void (*origInitAnim)(uint8_t*, uint64_t), void (*origOverlay)(uint8_t*, void*, void*, uint64_t));
+void DeferAnimTestEnd();
+void DeferAnimTestMode(int mode);
+void DeferAnimTestInitAnim(uint8_t* comp, uint64_t force);
+void DeferAnimTestOverlay(uint8_t* inst, uint64_t defer);
+size_t DeferAnimTestPending();
+void DeferAnimTestCounts(uint64_t out[6]);
+void SetRigImportTemplateGameThreadOnly(bool on);  // rig_import_template.cpp: imports off the game thread go to the game (NpcDeferAnimInit 2)
 // ---- npcs/cloth_defer.cpp (ClothBuildDefer) ----
 // RecreateClothSimulationProxy asked for inside a far, unseen actor's NpcCreationPacing unit while the component has no
 // simulation yet waits (later requests merge into it) and is made in a later frame, within the pacing budget
@@ -1905,11 +2158,30 @@ void StreamGranBeforeAdd(bool considerTimeLimit); // game thread, every AddToWor
 void SetStreamRegisterGranularity(int value);     // monitor thread, every second: StreamRegisterGranularity (live)
 void StreamGranLogStats();                        // stats interval (no-op unless active)
 void StreamGranTestSetup(void* gran, void* limit);  // self-test: fake console variables
+void SetStreamInBudget(int value);                // StreamInBudget (live; 0 off, 1 = slice 1 / async 3 ms, 2 = 2 / 3 ms)
+void StreamBudgetTestSetup(void* slice, void* async);  // self-test: fake console variables
 // physics/body_spread.cpp (BodyRemovalSpread): a streamed-out level's instance bodies terminated over frames
 bool InstallBodyRemovalSpread(bool beforeGameCode, int key, int perFrame, int maxFrames, int min, int nearM, bool frameHooks,
                               const wchar_t* iniPath);  // start-up only (key != 0; lab: always); needs NpcCreationPacing's hooks
 void SetBodyRemovalSpread(int key, int perFrame, int maxFrames, int min, int nearM);  // monitor thread, each second (live)
 void LogBodyRemovalSpreadStats();                       // stats interval (nothing when nothing happened)
+const uint8_t* BodyRemovalSpreadUnregStub();            // the stub RemoveFromWorld's unregister call was patched to (or nullptr)
+// streaming/endplay_slice.cpp (StreamOutEndPlaySlice; Epic UE 5.6.0 dfeb9ecce7): a streamed-out level's EndPlay in batches
+bool InstallStreamOutEndPlaySlice(bool beforeGameCode, int key);  // start-up only (key != 0; lab: always), after BodyRemovalSpread
+void SetStreamOutEndPlaySlice(int key);                 // monitor thread (live once installed)
+void LogStreamOutEndPlaySliceStats();                   // stats interval (nothing when no level was removed)
+bool StreamOutEndPlaySliceHook(void* level, int32_t n); // the hook (self-test calls it with fakes)
+bool StreamOutEndPlaySliceTestDiscover(const GameModule& game, uint32_t rva[4], uint32_t* dataOff, uint32_t* numOff);
+void StreamOutEndPlaySliceTestSetup(void* next, void* route, uint32_t dataOff, uint32_t numOff, int gran);
+void StreamOutEndPlaySliceTestAge(double ms);           // self-test: the pending level's last call that much earlier
+// loading/reset_loaders.cpp (ResetLoadersNoFlush; Epic UE 5.4.0 0d790f0ba5): no flush for a package without a linker
+bool InstallResetLoadersNoFlush(bool beforeGameCode, bool key);  // start-up only (key on; lab: always)
+void SetResetLoadersNoFlush(bool on);                   // monitor thread (live once installed)
+void LogResetLoadersNoFlushStats();                     // stats interval (nothing when not called)
+void ResetLoadersNoFlushHook(void* obj);                // the hook (self-test calls it with fakes)
+bool ResetLoadersNoFlushTestDiscover(const GameModule& game, uint32_t rva[5], uint32_t* linkerOff);
+void ResetLoadersNoFlushTestSetup(void* game, void* getPackage, void* findLinker, void* isAsyncPtr, bool on);
+void ResetLoadersNoFlushTestCounts(uint64_t* calls, uint64_t* skipped, uint64_t* linker);
 // guards/pair_race.cpp (PairReleaseOnce, game bug fix; lab also PairRaceProbe): each pairing buffer released once
 bool InstallPairRace(bool beforeGameCode, int fixKey, const wchar_t* iniPath);  // start-up only (lab: PairRaceProbe's own key)
 void LogPairReleaseOnceStats();   // stats interval: the skipped early releases, when the count changed

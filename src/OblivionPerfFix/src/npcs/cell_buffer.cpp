@@ -200,6 +200,7 @@ uint32_t Trim(uint8_t* tes, uint32_t maxCells, bool paced)
     if (!buf) return 0;
     const uint32_t base = *s.base;
     uint32_t n = 0;
+    if (!paced) CellEvictSplitForget();  // CellEvictSplit (fix102 N1): the tail goes at once, no split budget carries over
     for (uint32_t i = Bound(); i-- > base && n < maxCells;) {
         uint8_t* const cell = buf[i];
         if (!cell) continue;
@@ -210,6 +211,7 @@ uint32_t Trim(uint8_t* tes, uint32_t maxCells, bool paced)
         }
         const uint64_t dh = *s.dataHandler;
         if (!dh) break;
+        if (paced && CellEvictSplitStep(cell)) break;  // CellEvictSplit: the actors' 3D first, the cell in a later frame
         buf[i] = nullptr;
         const uint64_t t0 = Us();
         s.teardown(dh, reinterpret_cast<uint64_t>(cell));
@@ -258,6 +260,7 @@ uint64_t GridHookAt(const uint8_t* ret, uint64_t tesArg, uint64_t pos, uint64_t 
     const int32_t x1 = *reinterpret_cast<int32_t*>(tes + kTesGridX), y1 = *reinterpret_cast<int32_t*>(tes + kTesGridY);
     const bool shifted = static_cast<uint8_t>(r) != 0;
     const bool jump = x0 == 0x7FFFFFFF || y0 == 0x7FFFFFFF || x1 - x0 > 1 || x0 - x1 > 1 || y1 - y0 > 1 || y0 - y1 > 1;
+    RowPreloadGridCall(tes, shifted);  // RowPreload (streaming/row_preload.cpp): no-op unless installed
     if (shifted && nTail && !jump) {  // C-S1: which of those cells the insert tore down in this call (gone from the whole buffer)
         g_crossTail.fetch_add(1, std::memory_order_relaxed);
         uint8_t** const buf = *reinterpret_cast<uint8_t***>(tes + kTesBuffer);
@@ -294,6 +297,8 @@ uint64_t GridHookAt(const uint8_t* ret, uint64_t tesArg, uint64_t pos, uint64_t 
     }
     if (ret == s.site2Ret) {
         bool skip = g_site1Shift;
+        const bool shiftedHere = skip;
+        bool trimmed = false;
         g_site1Shift = false;
         const uint64_t delayUs = g_delayUs.load(std::memory_order_relaxed);
         if (!skip && delayUs && !g_noDelay && g_crossUs && Us() - g_crossUs < delayUs && Overflow(tes)) {
@@ -303,6 +308,7 @@ uint64_t GridHookAt(const uint8_t* ret, uint64_t tesArg, uint64_t pos, uint64_t 
         if (!skip && SafeForPaced(tes)) {
             const uint64_t t0 = Us();
             if (Trim(tes, 1, true)) {
+                trimmed = true;
                 if (!g_drainStartUs) g_drainStartUs = t0;
                 if (!Overflow(tes) && g_drain.cells) {
                     // rev130f nit: no line per drain (~6 a minute riding); the stats line has their count and delay
@@ -317,6 +323,9 @@ uint64_t GridHookAt(const uint8_t* ret, uint64_t tesArg, uint64_t pos, uint64_t 
                 }
             }
         }
+        // RowPreload: one cell of the next row in this frame, unless this frame shifted the grid or unloaded a cell
+        if (CellEvictSplitTookFrame()) trimmed = true;  // CellEvictSplit: a split step counts as this frame's unload
+        RowPreloadOtStep(tes, shiftedHere || trimmed, CellBufferTailFree(tes));
     }
     return r;
 }
@@ -325,6 +334,25 @@ uint64_t GridHook(uint64_t tes, uint64_t pos, uint64_t flag, uint64_t r9)
 {
     return GridHookAt(static_cast<const uint8_t*>(_ReturnAddress()), tes, pos, flag, r9);
 }
+
+}  // namespace
+
+// RowPreload: free spare slots (cells it may park without the game's insert unloading one in the same frame).
+uint32_t CellBufferTailFree(const uint8_t* tes)
+{
+    if (!s.installed || !tes || !*s.done) return 0;
+    // the game's insert rotates every slot toward the end and unloads whatever falls off the last one, gaps included
+    // (a jump's grid rebuild leaves gaps): free slots count only while the last slot is empty (rev94c finding 2)
+    uint8_t* const* const buf = *reinterpret_cast<uint8_t* const* const*>(tes + kTesBuffer);
+    const uint32_t bound = Bound();
+    if (!buf || !bound || buf[bound - 1] != nullptr) return 0;
+    const uint32_t spare = *s.cap - *s.base, used = Overflow(const_cast<uint8_t*>(tes));
+    return used < spare ? spare - used : 0;
+}
+
+bool CellBufferPacedEvictInstalled() { return s.installed; }
+
+namespace {
 
 // The setting is written with the value the player's ini gave (base), not with the headroom.
 uint64_t WriteSettingHook(uint64_t coll, uint64_t setting, uint64_t r8, uint64_t r9)

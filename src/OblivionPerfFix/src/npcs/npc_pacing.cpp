@@ -32,6 +32,12 @@
 //     four objects). An equipment or hair delegate's owner is a smaller object whose word at the actor's root-component
 //     offset can be an invalid pointer: the fault reading it ends the walk, so the unit counts as near and runs
 //     whatever the budget, right after its actor's appearance unit.
+//     A hair delegate's owner is the hair-piece asset (outer: its package), so no walk from it reaches the character:
+//     every hair unit counted as near ("unknown"), and with a backlog it queued as a near unit behind the far ones and
+//     then ran whatever the budget once it reached the head (14 hair units in one frame after a train of far appearance
+//     units, 24.8 ms, Imperial City Waterfront; npcunits 2026-11-12). PacingHairActor resolves a hair unit through the
+//     weak pointer its lambda calls SetSkeletalMesh on (the hair mesh component, whose outer is the character), checked
+//     at start-up in the lambda's code; the walk is the guarded one (a component is no actor).
 //
 // (c) (PacingFlowWait) Altar runs a "flow" session for each newly loaded level's pre-placed actors at the start
 //     of OnWorldPostActorTick. In the game the main queue is always complete by then (the GT waited for the OT's end
@@ -53,6 +59,11 @@
 //     (two creature creates in one frame, 29-30 ms at 4K, Echo Mine -> Brotch Camp, in half the runs). With
 //     PacingLeanFlowDrain the drain at the bound runs the main queue only: the waiting delegates stay queued, as when
 //     the flow runs on a complete queue (14-18 delegates drained with the queue there, 30-40 ms, Imperial City flight).
+//     PacingFlowProgress (drainfix 2026-11-12) widens "progress" for the 8-frame bound: a create or head/BP unit that ran
+//     while older OT frames are owed too (before: only with nothing older owed), and a frame in which the queue's head
+//     create waited for its asset loads (CreatePreload). Without it, a flow at the Waterfront drained after 3 frames: the
+//     head create's load still in flight (24-28 ms synchronous load in the drain, 2 of 6 runs), or two creates of a train
+//     with older frames owed in one frame (15-24 ms).
 //
 // Budget: PacingBudgetMs of unit time per frame (the first unit of a frame always runs). Lag bound: a unit or an OT
 // frame older than PacingMaxLagFrames runs whatever the budget. Switched off (ini, re-read every second), travel,
@@ -175,6 +186,9 @@ constexpr char kHairLambda[] =
     "40 56 48 83 EC 50 48 8B F1 E8 ?? ?? ?? ?? 84 C0 0F 84 ?? ?? ?? ?? 4C 89 74 24 38 4C 8D 76 60 49 8B CE E8 ?? ?? ?? ?? "
     "84 C0 0F 84 ?? ?? ?? ?? 48 89 5C 24 78 48 8B CE 48 89 6C 24 48 48 89 7C 24 40 4C 89 7C 24 30 E8 ?? ?? ?? ?? "
     "48 8B F8 48 8B 08 48 8B 99 68 0A 00 00 48 8D 4E 10 E8 ?? ?? ?? ?? 41 B0 01 48 8B D0 48 8B CF FF D3";
+// ... its first call is IsValid on the capture's first weak pointer, the Get at +0x46 reads the same pointer (rcx = rsi =
+// the capture): the object whose SetSkeletalMesh it calls, the hair mesh component (PacingHairActor)
+constexpr size_t kHairLambdaIsValid = 0x09, kHairLambdaGet = 0x46;
 // Delegate vtable slots: +0 scalar deleting destructor, +0x50 CreateCopy, +0x58 Execute, +0x60 ExecuteIfSafe.
 constexpr size_t kSlotDtor = 0, kSlotCreateCopy = 10, kSlotExecute = 11, kSlotExecuteIfSafe = 12;
 // A destructor with nothing to destroy: push rbx; ...; test dl,1; je; mov edx,size; call free; ...
@@ -287,9 +301,11 @@ struct Entry {
     alignas(16) uint8_t inst[kMaxInstance];
     int type;
     uint64_t since;   // frame it was deferred in
+    uint64_t sinceUs; // ... and its time (PacingBaseGate's bound, gate2)
     uintptr_t key;    // its actor (0 = unknown)
     bool distant;
     bool fadeHeld;    // PacingFadeAware: waits because its actor is still invisible in its spawn fade-in
+    uint64_t gateFrom;  // PacingBaseGate: the frame the gate first held it where the budget alone would have run it (0 = never)
 };
 constexpr size_t kFifoCap = 1024;
 
@@ -301,7 +317,16 @@ struct Stats {
     std::atomic<uint64_t> flowWaits{}, heldEnds{}, flowDrains{};  // (c): flow calls that waited, frames whose end waited, bound reached
     std::atomic<uint64_t> flowLongWaits{};  // (c) waits past kMaxFlowWait while the queue progressed
     std::atomic<uint64_t> leanDrains{}, leanKept{};  // PacingLeanFlowDrain: bound drains of the main queue only, delegates kept
+    std::atomic<uint64_t> flowLoadHeld{}, flowLagHeld{};  // PacingFlowProgress: held frames past 3 for a create's loads / with older OT frames owed
     std::atomic<uint64_t> guard[5]{};  // frames not deferring: session, travel, menu/loading, ring, player
+    // PacingBaseGate (per stats interval): units held, how long, how they were released; frames with a fit release and
+    // how far their real busy time ended from the prediction
+    std::atomic<uint64_t> gateHeld{}, gateRan{}, gateWaitSum{}, gateWaitMax{}, gateWaitHist[6]{}, gateLate{}, gateForced{},
+        gateFallback{}, gateDrain{}, fadeRate{}, gateFitFrames{}, gateOver{}, gateUnderSum{}, gateOverSum{}, gateErrMax{};
+    // gate2: held units released on a calm frame, released because their actor may no longer wait (near, seen, about to
+    // show), released by a key-0 unit queued behind them; the oldest age (frames since queued) a held unit ran at
+    std::atomic<uint64_t> gateCalm{}, gateTurned{}, gateKey0{}, gateAgeMax{}, gateFit{}, gateAgeMaxUs{};
+    std::atomic<uint64_t> gateFloorTicks{}, gateFloorActors{}, gateFloorMax{};  // gate2 fade hold: ticks held, actors, longest (frames)
 };
 
 void AtomicMax(std::atomic<uint64_t>& a, uint64_t v)
@@ -361,6 +386,42 @@ struct State {
     std::atomic<int> flowWaitFrames{kMaxFlowWaitProgress};
     std::atomic<bool> ownerWalk{true};  // PacingOwnerWalk (mkusm, PR #25): a non-actor in a delegate's owner chain does not end the walk
     std::atomic<bool> leanFlowDrain{true};  // PacingLeanFlowDrain: a level flow at its wait bound drains the main queue only
+    std::atomic<bool> hairActor{false};     // PacingHairActor: a hair unit resolves its character through its mesh component
+    uint32_t hairActorWeak = 0;             // ... the component's weak pointer in a hair delegate instance (0 = not found)
+    std::atomic<bool> flowProgress{false};  // PacingFlowProgress: a waiting flow's progress also counts with older OT frames owed
+                                            // and while the head create waits for its loads (CreatePreload)
+    uint64_t preloadWaitFrame = 0;          // game thread: the last frame whose head create CreatePreload deferred
+    // PacingBaseGate (basegate 2026-11-12): a far, unseen (or fade-hidden) NPC's delegate unit runs after the actor tick
+    // only if the frame's time so far + the predicted rest + the unit's size stays within the target
+    std::atomic<int> gateUs{0};             // the target (us); 0 = off
+    uint64_t gateS3Us = 0, gateS3UnitUs = 0, gateS3Frame = ~0ull;  // the post-actor tick of frame gateS3Frame: time, unit time so far
+    uint32_t gateRest[5] = {};              // the last frames' time from the post-actor tick to the cap's sleep, without units
+    int gateRestN = 0, gateRestAt = 0;
+    uint32_t gateLast[kNumTypes][8] = {};   // the last eight unit times per type (the size estimate: their upper quartile)
+    int gateLastN[kNumTypes] = {}, gateLastAt[kNumTypes] = {};
+    uint64_t gatePredUs = 0, gatePredFrame = ~0ull;  // the last fit release's predicted busy time, and its frame
+    int gateFrameHolds = 0, gateFrameRuns = 0, gateFrameLate = 0, gateFrameDrain = 0, gateFrameFallback = 0;  // this frame (lab line)
+    uint64_t gateDrainFrame = ~0ull;        // the frame a unit last ran toward a soon-visible actor (one per frame)
+    uint64_t gateLateFrame = ~0ull;         // the frame units last ran for the lag bound (gatefix D1) ...
+    uint64_t gateLateDone = 0;              // ... and how many in that frame
+    bool gateOffLogged = false;
+    // gate2 (2026-11-13): the gate decides per queued unit; its hard bound, calm-frame threshold and near distance (live)
+    std::atomic<int> gateBound{45};         // PacingGateBoundFrames: a held unit runs by this age (frames since it was queued)
+    std::atomic<int> gateHoldUs{0};         // PacingGateFadeHoldMs: the fade hold (lab, 0 = off; rev96e B1)
+    std::atomic<int> gateCalmUs{17000};     // PacingGateCalmMs: a held unit may run on a frame whose own time stays below it (0 = off)
+    std::atomic<int> gateNearCm{10000};     // PacingGateNearM: an actor nearer than this is not held by the gate (game units)
+    uint64_t gateHeavyFrame = ~0ull;        // the frame a held unit last ran for room (fit or calm): one heavy unit a frame
+    int gateFrameCalm = 0, gateFrameU = 0, gateFrameKey0 = 0;  // this frame (lab line): calm runs, runs of units not held, key-0 drains
+    uint64_t gateFrameOldest = 0;           // this frame (lab line): the oldest held unit's age
+    // gate2 fade hold: the actors with a held appearance / equipment unit (from the last GateClassify), the frame each was
+    // first held, the frame the list was made; their spawn fade-in waits at its floor (dither 4) until those units ran
+    static constexpr int kGateHoldMax = 64;
+    uintptr_t gateHoldKey[kGateHoldMax] = {};
+    uint64_t gateHoldSince[kGateHoldMax] = {};
+    int gateHoldN = 0;
+    uint64_t gateHoldFrame = ~0ull;
+    int gateFrameFloor = 0;                 // this frame (lab line): fade ticks held at the floor
+    uint64_t gateFrameFloorOldest = 0;      // ... and the longest such hold (frames)
 
     // game-thread state
     DWORD gtId = 0;
@@ -374,6 +435,7 @@ struct State {
     int depth = 0;           // inside a unit
     bool unitDistant = false;  // the running unit's actor may wait (what a delegate completing inside it inherits)
     const uint8_t* unitWeak = nullptr;  // the running delegate unit's owner (weak object pointer; ClothBuildDefer)
+    uintptr_t unitKey = 0;              // the running unit's actor key (PacingHairActor: what a nested completion is queued with)
     void* session = nullptr;
     int units = 0;
     uint64_t spentUs = 0;    // unit time + catch-up time this frame
@@ -409,8 +471,16 @@ struct State {
     std::atomic<uint64_t> fadeHeldUnits{0}, fadeReleased{0};  // per stats interval: units held as fade-hidden, heads released
                                                               // by the re-check (game thread; read and reset by the monitor)
     bool (*testRendered)(const void*) = nullptr;   // self-test: fake "recently rendered"
+    float (*testFade)(const void*) = nullptr;      // self-test: fake spawn fade-in dither (FadeLevel)
+    float (*testGameValue)(const void*) = nullptr; // self-test: fake own fade value (GateGameValue; the shown hold's due rule)
+    uint64_t fadeRateFrame = ~0ull, fadeRateDone = 0;  // PacingHairActor fade rate (fadefix): units run for it this frame
+    uint64_t fadeRateUs = 0;                       // ... and their estimated time (stampfix: the frame's time cap)
+    uint64_t lastPeriodUs = 0;                     // the last frame's period (cap exit to cap exit) without our units
     uint64_t budgetThisFrame = 4000;
     uint64_t frameStartUs = 0;
+    uint64_t frameStart1Us = 0, frameStart2Us = 0;  // FadeInUnseen (rev96d A2): the two frame starts before this one
+    uint64_t periodRing[8] = {};  // PacingGateShownHoldMs (fix102, rev102a S2): the last 8 frame periods (us), every frame
+    int periodNext = 0;
     int frameTypes[kNumTypes] = {};
     uint64_t frameFirstUs = 0;
     int frameFlags = 0;       // 1 drained, 2 lag bound, 4 near/seen units ran past the budget, 8 a flow waited
@@ -672,6 +742,16 @@ bool FindDelegates(const GameModule& game)
         Log("[pacing] equipment / hair delegates not recognised (%d / %d matches): fix not available", ne, nh);
         return false;
     }
+    {   // PacingHairActor: the hair lambda tests and reads the capture's first weak pointer with the same IsValid / Get as
+        // the appearance delegate, and calls SetSkeletalMesh on that object (pattern: "mov rcx,rsi; call Get; ... call
+        // [vtable+0A68h]"); otherwise hair units stay unresolved (counted as near), as before
+        const uint8_t* const hl = RipTarget(hair + kLambdaCall, 1, 5);
+        if (RipTarget(hl + kHairLambdaIsValid, 1, 5) == isValid &&
+            RipTarget(hl + kHairLambdaGet, 1, 5) == reinterpret_cast<uint8_t*>(g.weakGet))
+            g.hairActorWeak = static_cast<uint32_t>(kCaptureOffset);
+        else
+            Log("[pacing] hair delegate's mesh component not recognised: PacingHairActor not available");
+    }
     return FindDelegate(game, app, g.del[0], "appearance") && FindDelegate(game, equip, g.del[1], "equipment") &&
            FindDelegate(game, hair, g.del[2], "hair");
 }
@@ -763,6 +843,19 @@ bool FindFade(const GameModule& game)
     return true;
 }
 
+// occlvis (2026-10-23): what drew an actor. UE 5.3 FPrimitiveSceneInfo::UpdateComponentLastRenderTime sets the
+// component's LastRenderTime and the owner actor's (what WasRecentlyRendered reads) from three places: the views'
+// visibility after frustum and occlusion culling (SceneVisibility.cpp ~1812, also LastRenderTimeOnScreen), every
+// shadow-caster gathering (ShadowSetup.cpp ~1839 / ~2057, not on screen) and ray-traced dynamic geometry within
+// r.RayTracing.DynamicGeometryLastRenderTimeUpdateDistance of the view (DeferredShadingRenderer.cpp ~1400, on screen).
+// UPrimitiveComponent::WasRecentlyRendered(float) (exe+0x304DDE0): world [+0B0h] (or GetWorld), DeltaTimeSeconds
+// [world+6E4h], TimeSeconds [world+6C0h], LastRenderTime [comp+384h]; the constructor sets +384h and +388h to -1000.
+constexpr char kCompRendered[] =
+    "40 55 48 83 EC 30 48 8B 81 ?? ?? 00 00 48 8B E9 0F 29 74 24 20 0F 28 F1 48 85 C0 75 ?? E8 ?? ?? ?? ?? 48 85 C0 "
+    "0F 84 ?? ?? ?? ?? F3 0F 10 88 ?? ?? 00 00 F3 0F 58 0D ?? ?? ?? ?? F2 0F 10 90 ?? ?? 00 00 48 8B 05 ?? ?? ?? ?? "
+    "F3 0F 10 85 ?? ?? 00 00";
+constexpr size_t kCompTimeAt = 63, kCompLastAt = 78;
+
 
 // ---- positions (game thread) ----
 
@@ -849,6 +942,7 @@ bool RecentlyRendered(const uint8_t* actor)
 // invisible; >= 3 is about the first 0.75 s of the 1.25 s fade (findings 2026-10-26 npcjitter). Game thread, caller's guard.
 float FadeLevel(const uint8_t* actor)  // the actor's spawn fade-in dither, -1 = not fading in / not a faded character
 {
+    if (g.testFade) return actor ? g.testFade(actor) : -1.0f;
     if (!g.fadeFound || !actor) return -1.0f;
     const uint8_t* const cls = g.fadeClass();
     const uint8_t* const oc = *reinterpret_cast<const uint8_t* const*>(actor + 0x10);
@@ -861,7 +955,8 @@ float FadeLevel(const uint8_t* actor)  // the actor's spawn fade-in dither, -1 =
     if (!comp || *reinterpret_cast<const uint8_t* const*>(comp + g.fadeOwner) != actor) return -1.0f;
     if (*reinterpret_cast<const int32_t*>(comp + g.fadeState) != 1) return -1.0f;
     const float v = std::max(*reinterpret_cast<const float*>(comp + g.fadeValue), *reinterpret_cast<const float*>(comp + g.fadeFloor));
-    return v;
+    // PacingGateShownHoldMs (hold2): the level shown on the meshes (inert at 0: the game's value)
+    return ShownHoldOn() ? std::max(v, ShownHoldLevel(comp)) : v;
 }
 
 bool FadeHidden(const uint8_t* actor)
@@ -869,6 +964,16 @@ bool FadeHidden(const uint8_t* actor)
     return FadeLevel(actor) * 10.0f >= static_cast<float>(g.fadeMinTenths.load(std::memory_order_relaxed));
 }
 
+
+// The weak pointer a delegate unit's actor is found through: its owner (+0x18), or for a hair unit with PacingHairActor
+// the hair mesh component its lambda sets the mesh on (the owner is the hair asset). hair: set when the component is used
+// (its walk must be the guarded one: a component's word at the root-component offset is no root component).
+const uint8_t* OwnerWeakOf(int type, const uint8_t* inst, bool* viaComponent = nullptr)
+{
+    const bool comp = type == kHair && g.hairActorWeak && g.hairActor.load(std::memory_order_relaxed);
+    if (viaComponent) *viaComponent = comp;
+    return inst + (comp ? g.hairActorWeak : kOwnerWeakOffset);
+}
 
 bool FarFrom(double x, double y, double z)
 {
@@ -924,9 +1029,11 @@ bool ResolveOwner(const uint8_t* ownerWeak, uintptr_t* key, bool* distant, bool 
     return false;
 }
 
-bool ResolveDelegate(const uint8_t* inst, uintptr_t* key, bool* distant)
+bool ResolveDelegate(const uint8_t* inst, int type, uintptr_t* key, bool* distant)
 {
-    return ResolveOwner(inst + kOwnerWeakOffset, key, distant, true, false);
+    bool comp = false;
+    const uint8_t* const weak = OwnerWeakOf(type, inst, &comp);
+    return ResolveOwner(weak, key, distant, true, comp);
 }
 
 // ClothBuildDefer's questions (asked from inside a unit, or at the frame start): the same decision as pacing's with the
@@ -990,6 +1097,9 @@ void Account(int type, uint64_t us)
     g.unitCumUs += us;
     ++g.unitCumN;
     g.est[type] = g.est[type] * 0.75 + static_cast<double>(us) * 0.25;
+    g.gateLast[type][g.gateLastAt[type]] = static_cast<uint32_t>(std::min<uint64_t>(us, 0xFFFFFFFFull));  // PacingBaseGate
+    g.gateLastAt[type] = (g.gateLastAt[type] + 1) % 8;
+    if (g.gateLastN[type] < 8) ++g.gateLastN[type];
     s.run[type].fetch_add(1, std::memory_order_relaxed);
     if (us > s.longestUs.load(std::memory_order_relaxed)) {
         AtomicMax(s.longestUs, us);
@@ -1036,14 +1146,14 @@ bool FifoHasKey(uintptr_t key)
     return false;
 }
 
-bool ResolveDelegate(const uint8_t* inst, uintptr_t* key, bool* distant);
+bool ResolveDelegate(const uint8_t* inst, int type, uintptr_t* key, bool* distant);
 // PacingFadeAware: whether a waiting entry may still wait (its actor far and unseen, or still fade-hidden); an actor that
 // cannot be resolved any more runs (its ExecuteIfSafe re-checks the weak pointer).
 bool StillMayWait(const Entry& e)
 {
     uintptr_t key = 0;
     bool distant = false;
-    const bool resolved = ResolveDelegate(e.inst, &key, &distant);
+    const bool resolved = ResolveDelegate(e.inst, e.type, &key, &distant);
     if (!resolved) return false;
     if (!distant && e.fadeHeld) g.fadeReleased.fetch_add(1, std::memory_order_relaxed);
     return distant;
@@ -1051,14 +1161,588 @@ bool StillMayWait(const Entry& e)
 
 
 
-// Runs a unit (depth and the distance a nested completion inherits) and returns its time in us.
+// ---- PacingBaseGate (basegate 2026-11-12; per-unit decision and hard bound: gate2 2026-11-13) ----
+// The gate decides for each queued unit, not for the whole queue:
+// - A "held" unit (W) is an appearance / equipment / hair unit queued as a far one whose actor is, now: found, still far and
+//   unseen by pacing's own test (or still hidden in its spawn fade-in: PacingFadeAware), at least PacingGateNearM away, and,
+//   if it is fading in, still at the fade's floor or above (dither >= kGateHiddenMin; the game holds far actors at 4.0).
+//   Held units keep their FIFO order among themselves; the oldest runs only after the world's actor tick (the post-actor-
+//   tick replay, and delegate arrivals after it), when the frame has room: the game thread's time since the frame started
+//   (the end of the cap's sleep) + the predicted rest of the frame (median of the last five frames' time from the post-actor
+//   tick to the cap's sleep, without units) + the unit's size (upper quartile of the last eight of its type) stays within
+//   the target (PacingBaseGate), or (one a frame) when the frame's own time + its predicted rest stays below
+//   PacingGateCalmMs whatever the unit's size ("calm" frames; a unit too big to fit anywhere waits for one of those
+//   instead of the bound). At most one unit of 4 ms or more a frame runs for room. No lag-scaled catch-up for held units.
+//   Hard bound: once waiting longer would let a held unit pass PacingGateBoundFrames at one unit per frame, the frame runs
+//   the fewest held units (oldest first) that keep every held unit within the bound at an even rate (one per frame for
+//   fewer held units than the bound; gatefix D1's rate rule over the held units' positions): no held unit runs older than
+//   the bound, and never as a heap.
+// - Every other queued unit (U: a near or seen actor's, one about to show, an unresolved one, or one queued as near) runs
+//   as without the gate (today's budget rule, PacingHairActor's fade rate over these units only), in queue order among
+//   themselves and AHEAD of other actors' held units (an actor's own units keep their order: once one of its units may no
+//   longer wait, all of its queued units count as U). Overtaking another actor's queued unit is what a near unit's arrival
+//   already does without the gate; units of different actors do not depend on each other.
+// - A key-0 unit (its actor not found) may belong to any actor: everything queued before it runs first, by today's rule,
+//   as before the change (gatefix L2), counted.
+// The old version dropped the gate for the whole call as soon as any queued actor had begun its fade-in (dither below 5:
+// every far actor at the floor 4.0) or a near unit was queued, so the far hidden units ran by the lag-scaled budget onto
+// busy frames (Imperial City Waterfront: 8-14 ms appearances on 20-26 ms frames after 7-10 frames, two drops per flight).
+// Creates and the head/BP commands are not gated.
+constexpr float kGateHiddenMin = 3.95f;  // the fade floor 4.0 = (1 - 0.2) x 5 in floats, which may read 3.9999998
+
+bool GateActive()
+{
+    return g.gateUs.load(std::memory_order_relaxed) > 0 && g.allowDefer && g.lastPaceEnd &&
+           (g.origMaxTick || g.testClock) && g.enabled.load(std::memory_order_relaxed);
+}
+
+bool Gated(const Entry& e)
+{
+    return e.distant;
+}
+
+// After this frame's post-actor tick and before the next cap sleep (delegate arrivals in the world-less tickables)
+bool GateKnown() { return g.gateS3Frame == g.frame && !g.inFrame && g.gateS3Us >= g.lastPaceEnd; }
+
+uint64_t GateRest()
+{
+    if (!g.gateRestN) return 4000;
+    uint32_t v[5];
+    const int n = g.gateRestN;
+    for (int i = 0; i < n; ++i) v[i] = g.gateRest[i];
+    std::sort(v, v + n);
+    return v[n / 2];
+}
+
+uint64_t GateSize(int type)
+{
+    const int n = g.gateLastN[type];
+    if (!n) return static_cast<uint64_t>(g.est[type]);
+    uint32_t v[8];
+    for (int i = 0; i < n; ++i) v[i] = g.gateLast[type][i];
+    std::sort(v, v + n);
+    return v[std::min(n - 1, 3 * n / 4)];
+}
+
+// Whether a unit of this type, run now, keeps the frame within the target (and the prediction kept for the check)
+bool GateFits(int type)
+{
+    const uint64_t now = NowUs();
+    if (now < g.lastPaceEnd) return false;
+    const uint64_t pred = (now - g.lastPaceEnd) + GateRest() + GateSize(type);
+    if (pred > static_cast<uint64_t>(g.gateUs.load(std::memory_order_relaxed))) return false;
+    g.gatePredUs = pred;
+    g.gatePredFrame = g.frame;
+    return true;
+}
+
+// The dither of a fading actor (-1: not fading in, or not readable)
+float GateFade(uintptr_t key)
+{
+    if (!key) return -1.0f;
+    __try {
+        return FadeLevel(reinterpret_cast<const uint8_t*>(key));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1.0f;
+    }
+}
+
+// PacingGateShownHoldMs (hold2): the actor's own spawn fade-in value as the game has it (not the floor, not the shown
+// level); -1 = not in its spawn fade-in. Its end (value 0) switches the character's AI controller on (rev96e B1).
+// holdfix F7 (rev96g): given as the value it would have at the stock rate of 4 per second (value x 4 / rate: 4 x the
+// seconds to the fade's end), so that the due thresholds are times, not values that assume the rate
+constexpr float kStockFadeRate = 4.0f;
+float GateGameValue(uintptr_t key)
+{
+    if (!key) return -1.0f;
+    __try {
+        const uint8_t* const actor = reinterpret_cast<const uint8_t*>(key);
+        if (g.testGameValue) return g.testGameValue(actor);
+        const float level = FadeLevel(actor);  // the class, own-component and state-1 checks
+        if (level < 0.0f || g.testFade) return level;
+        const uint8_t* const comp = *reinterpret_cast<const uint8_t* const*>(actor + g.fadeComp);
+        const float v = *reinterpret_cast<const float*>(comp + g.fadeValue);
+        const float rate = *reinterpret_cast<const float*>(comp + g.fadeValue + 4);  // +0xC0 after the value +0xBC (GateFadeDt)
+        return rate >= 0.5f && rate <= 20.0f ? v * kStockFadeRate / rate : v;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1.0f;
+    }
+}
+
+// PacingGateShownHoldMs (rev96g follow-up, PacingHairActor's fade rate): how much faster than the game's fade the shown
+// level of this actor falls (1: as the game's; > 1 while a released hold converges, hRel / vRel)
+float GateShownSpeed(uintptr_t key)
+{
+    if (!key || !ShownHoldOn() || g.testFade) return 1.0f;
+    __try {
+        const uint8_t* const comp = *reinterpret_cast<const uint8_t* const*>(reinterpret_cast<const uint8_t*>(key) + g.fadeComp);
+        return comp ? ShownHoldSpeed(comp) : 1.0f;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 1.0f;
+    }
+}
+
+// The actor is at least PacingGateNearM from the player (false when its position or the player's is not known)
+bool GateFar(uintptr_t key)
+{
+    if (!key || !Player()) return false;
+    double x = 0, y = 0, z = 0;
+    __try {
+        if (!ActorLocationGuarded(reinterpret_cast<const uint8_t*>(key), &x, &y, &z)) return false;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    const double dx = x - g.px, dy = y - g.py, dz = z - g.pz;
+    const double d = static_cast<double>(g.gateNearCm.load(std::memory_order_relaxed));
+    return dx * dx + dy * dy + dz * dz >= d * d;
+}
+
+// Whether a unit of this actor may be held by the gate: found, still far and unseen (or fade-hidden) by pacing's own test,
+// at least PacingGateNearM away, and not past the fade's floor (a fading actor below kGateHiddenMin shows within a quarter
+// second: the fade drops 4 per second and counts as visible below 3)
+bool GateMayHold(bool resolved, uintptr_t key, bool distant)
+{
+    if (!resolved || !key || !distant) return false;
+    const float fade = GateFade(key);
+    if (fade >= 0.0f && fade < kGateHiddenMin) return false;
+    return GateFar(key);
+}
+
+// The queue's classes for the gate: kGateHeld (W) or one of the U kinds; at most kGateScan entries are classified (the
+// rest count as held: they cannot run before the classified ones, and the bound counts their ages)
+enum : uint8_t { kGateHeld = 0, kGateRuns = 1, kGateKey0 = 2 };
+// PacingGateShownHoldMs (hold2): a gated unit whose character's own fade value is near the fade's end (its end switches
+// the AI controller on, rev96e B1): soft (a few a frame, the spread's rate) or now (all, this replay)
+enum : uint8_t { kGateDue = 3, kGateDueNow = 4 };
+constexpr float kGateDueSoft = 0.5f;  // the soft window above PacingGateShownHoldEnd (fade value; 0.125 s at 4 per second)
+uint64_t g_dueFrame = ~0ull;          // the frame the soft-due units below ran in
+int g_dueRan = 0;                     // soft-due units run in g_dueFrame
+int g_dueRate = 1;                    // fix102 (rev102a S1): the highest spread rate seen in g_dueFrame (the frame's rate)
+constexpr size_t kGateScan = 256;
+struct GateClasses {
+    uint8_t c[kGateScan];
+    size_t n = 0;  // classified entries (min(count, kGateScan))
+    float t[kGateScan];  // PacingGateShownHoldMs (holdfix F2): seconds until due now (0: due now; set while the key is on)
+    int rate = 1;        // PacingGateShownHoldMs (rev96g F2, port102): soft-due units a frame the spread needs (1-4)
+};
+// PacingGateShownHoldMs (holdfix F2): the frame period (s) for the due spread, from the last 8 frame periods (rev96g F2
+// follow-up). fix102 (rev102a S2): the larger of the second longest and the mean of them (each sample capped at 100 ms),
+// not the longest: one hitch (a cell crossing's 50-100 ms frame, usually followed by the spawns it loaded) no longer
+// makes the spread treat the next 8 frames as hitches (10 units 0.6 s from their deadline at 60 fps: soft-due at once at
+// rate 2 before; with the mean of 27 ms none is due yet), while two long frames of 8 (a slow stretch) count in full and
+// a steady pattern of long frames (3x every 5th frame) raises the mean (self-test sim: at most two due units a frame, as
+// with the longest; the second longest alone let three through). The spread's 1.25 margin covers a somewhat longer next
+// frame; a hitch past it is what due now is for. 1/60 when not known.
+float GatePeriodS()
+{
+    uint64_t m1 = 0, m2 = 0, sum = 0;  // the longest, the second longest, the sum (capped samples)
+    int n = 0;
+    for (uint64_t d : g.periodRing) {
+        if (!d) continue;
+        d = std::min<uint64_t>(d, 100000);
+        sum += d, ++n;
+        if (d > m1) m2 = m1, m1 = d;
+        else if (d > m2) m2 = d;
+    }
+    if (!n) return 1.0f / 60.0f;
+    const uint64_t m = std::max(n > 1 ? m2 : m1, sum / static_cast<uint64_t>(n));
+    return std::clamp(static_cast<float>(m) / 1e6f, 0.004f, 0.1f);
+}
+
+void GateClassify(GateClasses& gc)
+{
+    gc.n = std::min<size_t>(g.count, kGateScan);
+    uintptr_t keys[kGateScan];
+    uintptr_t rkeys[kGateScan];  // the resolved actor (0: not resolved / not gated): only those are read for the due rule
+    for (size_t i = 0; i < gc.n; ++i) {
+        const Entry& q = g.fifo[(g.head + i) % kFifoCap];
+        keys[i] = q.key;
+        rkeys[i] = 0;
+        bool hold = false;
+        if (Gated(q) && q.key) {
+            uintptr_t key = 0;
+            bool distant = false;
+            const bool resolved = ResolveDelegate(q.inst, q.type, &key, &distant);
+            hold = GateMayHold(resolved, key, distant);
+            keys[i] = q.key;
+            if (resolved) rkeys[i] = key;
+        }
+        gc.c[i] = hold ? kGateHeld : kGateRuns;
+    }
+    // an actor's units go together, in their order: once one of them may no longer wait, all of them are U
+    for (size_t i = 0; i < gc.n; ++i) {
+        if (gc.c[i] == kGateHeld || !keys[i]) continue;
+        for (size_t j = 0; j < gc.n; ++j)
+            if (gc.c[j] == kGateHeld && keys[j] == keys[i]) gc.c[j] = kGateRuns;
+    }
+    // a key-0 unit (its actor not found) may belong to any queued actor: everything before it runs first (gatefix L2)
+    size_t last0 = 0;
+    for (size_t i = 0; i < gc.n; ++i)
+        if (!keys[i]) last0 = i + 1;
+    for (size_t i = 0; i + 1 < last0; ++i)
+        if (gc.c[i] == kGateHeld) gc.c[i] = kGateKey0;
+    // PacingGateShownHoldMs (hold2): a gated unit of a character whose own spawn fade value (the game's, not the shown
+    // level) is within the soft window above PacingGateShownHoldEnd is soft-due, at or below it due now (all)
+    // holdfix F2 (rev96g): soft-due also early enough that the spread's rate a frame (1, more only when one a frame cannot
+    // meet the deadlines) clears all of them before they are due now (deadline order over every character,
+    // ShownHoldDueSpread); due now stays the hard backstop
+    if (ShownHoldOn()) {
+        const float endV = ShownHoldEndValue();
+        // holdfix F4 (port102; fix102 = rev102a M1): actors whose open hold saw an equipment unit run before their
+        // appearance: until their deadline (0.1 s after that unit) their candidate units count in the spread with that
+        // deadline plus the soft window as their time to due now, so the room rule can still run them first and the spread
+        // starts them early enough (one a frame unless more are needed); past it they are soft-due (deadline 0, ahead of
+        // the spread's units; one more a frame while there are any). Every live hold is listed (at most the hook's 64
+        // slots; rev102a S3c: 16 before).
+        uintptr_t urgent[64];
+        float urgentLeft[64];
+        const int nu = ShownHoldUrgentOwners(urgent, urgentLeft, 64);
+        float tt[kGateScan];
+        size_t idx[kGateScan];
+        uint8_t dd[kGateScan];
+        bool cand[kGateScan];
+        for (size_t i = 0; i < gc.n; ++i) {
+            gc.t[i] = 1e9f;
+            cand[i] = false;
+            // fix102 (rev102a S5): a held unit in the key-0 class (queued before a key-0 unit) is in the due rule too: it
+            // runs ahead of that key-0 unit either way (gatefix L2's order is kept)
+            if (!rkeys[i]) continue;
+            const float v = GateGameValue(rkeys[i]);  // at the stock rate (holdfix F7)
+            if (v < 0.0f) continue;
+            if (v <= endV) {
+                gc.c[i] = kGateDueNow;
+                gc.t[i] = 0.0f;
+                continue;
+            }
+            gc.t[i] = (v - endV) / kStockFadeRate;
+            cand[i] = true;
+        }
+        bool anyUrgent = false;
+        for (size_t i = 0; nu && i < gc.n; ++i) {
+            if (!keys[i] || gc.c[i] == kGateDueNow) continue;
+            int u = -1;
+            for (int k = 0; k < nu && u < 0; ++k)
+                if (urgent[k] == keys[i]) u = k;
+            if (u < 0) continue;
+            if (urgentLeft[u] > 0.0f) {  // before the deadline: in the spread at it (rev102a M1)
+                if (cand[i]) gc.t[i] = std::min(gc.t[i], urgentLeft[u] + kGateDueSoft / kStockFadeRate);
+                continue;
+            }
+            gc.c[i] = kGateDue;
+            gc.t[i] = 0.0f;
+            cand[i] = false;
+            anyUrgent = true;
+        }
+        // rev96g delta follow-up (port102): the earlier queued units of a candidate's actor that are not candidates
+        // themselves (not gated or not resolved: F1 below gives them the candidate's class) count in the spread too, at the
+        // earliest deadline of the actor's later candidates, so that the spread starts early enough for them as well
+        float carryT[kGateScan];
+        {
+            uintptr_t ck[kGateScan];
+            float cmin[kGateScan];
+            size_t nk = 0;
+            for (size_t i = gc.n; i-- > 0;) {
+                carryT[i] = -1.0f;
+                if (cand[i]) {
+                    size_t k = 0;
+                    while (k < nk && ck[k] != keys[i]) ++k;
+                    if (k == nk) ck[nk] = keys[i], cmin[nk++] = gc.t[i];
+                    else cmin[k] = std::min(cmin[k], gc.t[i]);
+                    continue;
+                }
+                if (!keys[i] || gc.c[i] == kGateDueNow || gc.c[i] == kGateDue) continue;
+                for (size_t k = 0; k < nk; ++k)
+                    if (ck[k] == keys[i]) carryT[i] = cmin[k];
+            }
+        }
+        size_t nc = 0;
+        for (size_t i = 0; i < gc.n; ++i) {  // queue order: ties in the spread keep it
+            if (cand[i]) idx[nc] = i, tt[nc++] = gc.t[i];
+            else if (carryT[i] >= 0.0f) idx[nc] = i, tt[nc++] = carryT[i];
+        }
+        gc.rate = 1;
+        if (nc) {
+            gc.rate = ShownHoldDueSpread(tt, nc, GatePeriodS(), kGateDueSoft / kStockFadeRate, dd);
+            for (size_t k = 0; k < nc; ++k)
+                if (dd[k]) gc.c[idx[k]] = kGateDue, gc.t[idx[k]] = tt[k];
+        }
+        if (anyUrgent) ++gc.rate;
+        // holdfix F1 (rev96g): an actor's units keep their order: every earlier entry of a due unit's actor (one that is not
+        // gated or not resolved, e.g. a near unit queued for it) gets the same class and deadline, so that it is not overtaken
+        for (size_t i = gc.n; i-- > 0;) {
+            if ((gc.c[i] != kGateDue && gc.c[i] != kGateDueNow) || !keys[i]) continue;
+            for (size_t j = 0; j < i; ++j) {
+                if (keys[j] != keys[i] || gc.c[j] == kGateDueNow) continue;
+                if (gc.c[j] == kGateDue && gc.t[j] <= gc.t[i]) continue;
+                gc.c[j] = gc.c[i];
+                gc.t[j] = gc.t[i];
+            }
+        }
+    }
+    // held units are counted as held by the gate from the frame they were first held
+    for (size_t i = 0; i < gc.n; ++i) {
+        Entry& q = g.fifo[(g.head + i) % kFifoCap];
+        if (gc.c[i] == kGateHeld && !q.gateFrom) {
+            q.gateFrom = g.frame;
+            s.gateHeld.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    // the fade hold's list: actors with a held appearance or equipment unit (the frame each was first held is kept)
+    uintptr_t nk[State::kGateHoldMax];
+    uint64_t ns[State::kGateHoldMax];
+    int nn = 0;
+    // PacingGateShownHoldMs (hold2) reads the same list (the lab's fade hold PacingGateFadeHoldMs too; 0 in public builds)
+    const bool holdOn = g.gateHoldUs.load(std::memory_order_relaxed) > 0 || ShownHoldOn();
+    // holdfix F2: with the shown hold on, a soft-due unit (being spread out) keeps its character in the list, so that the
+    // body stays fully dithered while its units run; the hold's own clock (End + 0.5 in time) still ends it
+    const bool listDue = ShownHoldOn();
+    for (size_t i = 0; holdOn && i < gc.n && nn < State::kGateHoldMax; ++i) {
+        const Entry& q = g.fifo[(g.head + i) % kFifoCap];
+        // fix102 (rev102a S5): a held unit in the key-0 class keeps its character listed too (before: it dropped out, and the
+        // hold ended as "units ran" with the unit still queued)
+        const bool dueListed = listDue && (gc.c[i] == kGateDue || gc.c[i] == kGateKey0) && q.type != kHair && q.key;
+        if (!dueListed && (gc.c[i] != kGateHeld || q.type == kHair || !q.key)) continue;
+        bool dup = false;
+        for (int k = 0; k < nn && !dup; ++k) dup = nk[k] == q.key;
+        if (dup) continue;
+        uint64_t since = 0;
+        for (int k = 0; k < g.gateHoldN; ++k)
+            if (g.gateHoldKey[k] == q.key) since = g.gateHoldSince[k];
+        if (!since) {  // newly held (rev96e F6: counted once, not once per classify call)
+            since = NowUs();
+            s.gateFloorActors.fetch_add(1, std::memory_order_relaxed);
+        }
+        nk[nn] = q.key;
+        ns[nn++] = since;
+    }
+    memcpy(g.gateHoldKey, nk, sizeof(uintptr_t) * nn);
+    memcpy(g.gateHoldSince, ns, sizeof(uint64_t) * nn);
+    g.gateHoldN = nn;
+    g.gateHoldFrame = g.frame;
+}
+
+// gate2 fade hold: the time step the fade tick of this actor may take. While the actor has a held appearance or equipment
+// unit (the list above, made this frame or the last), at most lab PacingGateFadeHoldMs since it was first held, and its
+// spawn fade-in is still at the floor or above (dither >= kGateHiddenMin), the fade stops at 4 (the game's own floor for
+// far characters): the step goes down to 4 and no further; a value below 4 held up by the game's floor is set to the
+// shown level (at most 4) so that it fades from there once released. Afterwards the fade runs as the game's (4 per second
+// from where it stands): its start moves, not its curve. *value is the component's value (may be raised), floor the
+// game's floor, rate its rate per second.
+float GateFadeStep(uintptr_t actor, float* value, float floor, float rate, float dt)
+{
+    if (!actor || !g.gateHoldN || g.gateHoldFrame + 1 < g.frame || !GateActive()) return dt;
+    int k = 0;
+    while (k < g.gateHoldN && g.gateHoldKey[k] != actor) ++k;
+    if (k == g.gateHoldN) return dt;
+    const uint64_t heldUs = NowUs() - g.gateHoldSince[k];
+    if (heldUs > static_cast<uint64_t>(std::max(1, g.gateHoldUs.load(std::memory_order_relaxed)))) return dt;
+    const uint64_t held = heldUs / 1000;  // ms (lab line, stats)
+    const float shown = std::max(*value, floor);
+    if (shown < kGateHiddenMin) return dt;  // already past the floor: not held (its units run as U)
+    constexpr float kHold = 4.0f;
+    if (rate < 0.5f || rate > 20.0f) rate = 4.0f;
+    ++g.gateFrameFloor;
+    g.gateFrameFloorOldest = std::max(g.gateFrameFloorOldest, held);
+    s.gateFloorTicks.fetch_add(1, std::memory_order_relaxed);
+    AtomicMax(s.gateFloorMax, held);
+    if (*value > kHold) return std::min(dt, (*value - kHold) / rate);
+    *value = std::max(*value, std::min(shown, kHold));
+    return 0.0f;
+}
+
+}  // namespace
+// PacingGateShownHoldMs (hold2): the actor has a held appearance or equipment unit in the gate's list (made this frame or
+// the last, the gate active). rev96g F9 (port102): the list can be a frame old, so the actor must also still have a
+// non-hair unit queued (a hold now ends in the frame its last held unit ran, not one frame later). Game thread.
+bool NpcGateHoldsActor(uintptr_t actor)
+{
+    if (!actor || !g.gateHoldN || g.gateHoldFrame + 1 < g.frame || !GateActive()) return false;
+    bool listed = false;
+    for (int k = 0; k < g.gateHoldN && !listed; ++k) listed = g.gateHoldKey[k] == actor;
+    if (!listed) return false;
+    for (size_t i = 0; i < g.count; ++i) {
+        const Entry& e = g.fifo[(g.head + i) % kFifoCap];
+        if (e.key == actor && e.type != kHair) return true;
+    }
+    return false;
+}
+// PacingGateShownHoldMs (hold2, holdfix F3): a unit of this actor is still queued (any type). Game thread.
+bool NpcGateActorQueued(uintptr_t actor)
+{
+    if (!actor) return false;
+    for (size_t i = 0; i < g.count; ++i)
+        if (g.fifo[(g.head + i) % kFifoCap].key == actor) return true;
+    return false;
+}
+// PacingGateShownHoldMs (build97, rev96g delta follow-up): a unit of this actor that the gate holds (Gated) is still
+// queued; the "AI before built" count's measure (the hold list misses due-now and hair units). Game thread.
+bool NpcGateActorGated(uintptr_t actor)
+{
+    if (!actor) return false;
+    for (size_t i = 0; i < g.count; ++i) {
+        const Entry& e = g.fifo[(g.head + i) % kFifoCap];
+        if (e.key == actor && Gated(e)) return true;
+    }
+    return false;
+}
+// PacingGateShownHoldMs (holdfix F8, rev96g): pacing's own fade component layout (state, value, owner, floor, the
+// actor's component), for the hook's cross-check; false when pacing has not found it
+bool NpcPacingFadeLayout(uint32_t out[5])
+{
+    if (!g.fadeFound) return false;
+    out[0] = g.fadeState, out[1] = g.fadeValue, out[2] = g.fadeOwner, out[3] = g.fadeFloor, out[4] = g.fadeComp;
+    return true;
+}
+// PacingGateShownHoldMs (holdfix F2, rev96g; rate: port102): the deadline spread. In deadline order (ties: queue order)
+// at r units a frame the m-th unit (0-based) needs ceil((m + 1) / r) frames; it and every unit before it in that order are
+// soft-due when its time left is at most that many frame periods x 1.25 (margin for frames longer than the period) + the
+// soft window. r is 1 unless one a frame cannot make some unit's deadline (its due now) any more with that margin
+// (found late, or more units than
+// frames left): then the least r that can, at most kSpreadMaxRate (rev96g F2: below ~45 fps the rest otherwise all ran as
+// due now in one frame; past that cap they still do: due now stays the backstop). Returns r. Pure (self-test).
+int ShownHoldDueSpread(const float* t, size_t n, float periodS, float softS, uint8_t* due)
+{
+    constexpr int kSpreadMaxRate = 4;
+    n = std::min<size_t>(n, kGateScan);
+    size_t ord[kGateScan];
+    for (size_t i = 0; i < n; ++i) {
+        ord[i] = i;
+        due[i] = 0;
+    }
+    for (size_t i = 1; i < n; ++i) {  // stable insertion sort by t (no allocation on the game thread; n is small)
+        const size_t x = ord[i];
+        size_t j = i;
+        for (; j > 0 && t[ord[j - 1]] > t[x]; --j) ord[j] = ord[j - 1];
+        ord[j] = x;
+    }
+    const float slot = periodS * 1.25f;
+    int r = 1;
+    for (size_t m = 0; m < n && slot > 0.0f; ++m) {  // the frames left before its due now, with the due rule's margin
+        const float left = std::max(0.0f, t[ord[m]]);
+        const size_t frames = static_cast<size_t>(std::min(left / slot, 1e6f)) + 1;  // this frame included
+        const size_t need = (m + 1 + frames - 1) / frames;
+        r = std::max<int>(r, static_cast<int>(std::min<size_t>(need, kSpreadMaxRate)));
+    }
+    size_t upto = 0;  // units [0, upto) of the order are due
+    for (size_t m = 0; m < n; ++m) {
+        const size_t frames = (m + 1 + static_cast<size_t>(r) - 1) / static_cast<size_t>(r);
+        if (t[ord[m]] <= slot * static_cast<float>(frames) + softS) upto = m + 1;
+    }
+    for (size_t m = 0; m < upto; ++m) due[ord[m]] = 1;
+    return r;
+}
+namespace {
+
+// The fade tick's time step for this component (FadeTickHook, game thread): the fade hold above for the actor's own spawn
+// fade-in (state 1), else dt
+float GateFadeDt(uint8_t* comp, float dt)
+{
+    __try {
+        if (!g.fadeFound || *reinterpret_cast<const int32_t*>(comp + g.fadeState) != 1) return dt;
+        const uint8_t* const actor = *reinterpret_cast<const uint8_t* const*>(comp + g.fadeOwner);
+        if (!actor || *reinterpret_cast<uint8_t* const*>(actor + g.fadeComp) != comp) return dt;
+        float* const value = reinterpret_cast<float*>(comp + g.fadeValue);
+        const float floor = *reinterpret_cast<const float*>(comp + g.fadeFloor);
+        const float rate = *reinterpret_cast<const float*>(comp + g.fadeValue + 4);  // +0xC0 after the value +0xBC
+        return GateFadeStep(reinterpret_cast<uintptr_t>(actor), value, floor, rate, dt);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return dt;
+    }
+}
+
+// Moves the queue's entry i to the head (the entries before it move one place back, their order kept). Entries are moved
+// bit by bit: the delegate copies are Unreal objects, which Unreal's own containers relocate the same way.
+void GateToFront(size_t i)
+{
+    if (!i || i >= g.count) return;
+    alignas(16) uint8_t tmp[sizeof(Entry)];
+    memcpy(tmp, &g.fifo[(g.head + i) % kFifoCap], sizeof(Entry));
+    for (size_t k = i; k > 0; --k)
+        memcpy(static_cast<void*>(&g.fifo[(g.head + k) % kFifoCap]), &g.fifo[(g.head + k - 1) % kFifoCap], sizeof(Entry));
+    memcpy(static_cast<void*>(&g.fifo[g.head]), tmp, sizeof(Entry));
+}
+
+// Room for a held unit of this type now (post-actor tick only): it fits the target, or (one a frame) the frame is calm.
+// At most one unit of 4 ms or more a frame runs for room. *calm: it runs as the frame's calm run.
+bool GateRoom(int type, bool* calm)
+{
+    *calm = false;
+    const bool heavy = GateSize(type) >= 4000;
+    if (g.gateHeavyFrame == g.frame && heavy) return false;
+    if (OverBudget(type)) return false;  // today's budget, without its lag-scaled catch-up
+    if (GateFits(type)) {
+        if (heavy) g.gateHeavyFrame = g.frame;
+        return true;
+    }
+    const int calmUs = g.gateCalmUs.load(std::memory_order_relaxed);
+    if (calmUs <= 0 || g.gateHeavyFrame == g.frame) return false;
+    const uint64_t now = NowUs();
+    if (now < g.lastPaceEnd || (now - g.lastPaceEnd) + GateRest() >= static_cast<uint64_t>(calmUs)) return false;
+    g.gateHeavyFrame = g.frame;
+    *calm = true;
+    return true;
+}
+
+void GateUnitRan(const Entry& e)
+{
+    if (!e.gateFrom) return;
+    const uint64_t w = g.frame - e.gateFrom;
+    const uint64_t age = g.frame - e.since;
+    const uint64_t now = NowUs();
+    const uint64_t ageUs = now > e.sinceUs ? now - e.sinceUs : 0;
+    AtomicMax(s.gateAgeMaxUs, ageUs);
+    s.gateRan.fetch_add(1, std::memory_order_relaxed);
+    s.gateWaitSum.fetch_add(age, std::memory_order_relaxed);
+    AtomicMax(s.gateWaitMax, w);
+    AtomicMax(s.gateAgeMax, age);
+    s.gateWaitHist[age <= 5 ? 0 : age <= 15 ? 1 : age <= 30 ? 2 : age <= 60 ? 3 : age <= 90 ? 4 : 5].fetch_add(1, std::memory_order_relaxed);
+    if (age > static_cast<uint64_t>(std::max(1, g.gateBound.load(std::memory_order_relaxed))))
+        s.gateForced.fetch_add(1, std::memory_order_relaxed);
+}
+
+
+// At the cap's sleep (t0 = its start = the end of the frame's busy time): the rest after the post-actor tick for the
+// prediction, and the check of the frame's prediction against its real busy time
+void GateFrameEdge(uint64_t t0)
+{
+    if (g.gateS3Frame == g.frame && g.lastPaceEnd && g.gateS3Us >= g.lastPaceEnd && t0 >= g.gateS3Us) {
+        const uint64_t after = g.unitUs >= g.gateS3UnitUs ? g.unitUs - g.gateS3UnitUs : 0;
+        const uint64_t span = t0 - g.gateS3Us;
+        const uint64_t rest = span > after ? span - after : 0;
+        g.gateRest[g.gateRestAt] = static_cast<uint32_t>(std::min<uint64_t>(rest, 1000000));
+        g.gateRestAt = (g.gateRestAt + 1) % 5;
+        if (g.gateRestN < 5) ++g.gateRestN;
+    }
+    const bool fit = g.gatePredFrame == g.frame && g.lastPaceEnd && t0 >= g.lastPaceEnd;
+    const uint64_t busy = g.lastPaceEnd && t0 >= g.lastPaceEnd ? t0 - g.lastPaceEnd : 0;
+    if (fit) {
+        s.gateFitFrames.fetch_add(1, std::memory_order_relaxed);
+        if (busy > g.gatePredUs) {
+            s.gateOverSum.fetch_add(busy - g.gatePredUs, std::memory_order_relaxed);
+            AtomicMax(s.gateErrMax, busy - g.gatePredUs);
+            if (busy > static_cast<uint64_t>(g.gateUs.load(std::memory_order_relaxed)) + 1000)
+                s.gateOver.fetch_add(1, std::memory_order_relaxed);
+        } else
+            s.gateUnderSum.fetch_add(g.gatePredUs - busy, std::memory_order_relaxed);
+    }
+    g.gatePredFrame = ~0ull;
+    g.gateFrameHolds = g.gateFrameRuns = g.gateFrameLate = g.gateFrameDrain = g.gateFrameFallback = 0;
+    g.gateFrameCalm = g.gateFrameU = g.gateFrameKey0 = 0;
+    g.gateFrameOldest = 0;
+    g.gateFrameFloor = 0;
+    g.gateFrameFloorOldest = 0;
+}
+
+// Runs a unit (depth, and the distance and actor key a nested completion inherits) and returns its time in us.
 template <class F>
-uint64_t TimeUnit(int type, bool distant, const uint8_t* ownerWeak, F&& body)
+uint64_t TimeUnit(int type, bool distant, const uint8_t* ownerWeak, uintptr_t key, F&& body)
 {
     const bool outer = g.unitDistant;
     const uint8_t* const outerWeak = g.unitWeak;
+    const uintptr_t outerKey = g.unitKey;
     g.unitDistant = distant;
     g.unitWeak = ownerWeak;
+    g.unitKey = key;
     ++g.depth;
     const uint64_t t0 = NowUs();
     body();
@@ -1067,6 +1751,7 @@ uint64_t TimeUnit(int type, bool distant, const uint8_t* ownerWeak, F&& body)
     --g.depth;
     g.unitDistant = outer;
     g.unitWeak = outerWeak;
+    g.unitKey = outerKey;
     return us;
 }
 
@@ -1075,11 +1760,12 @@ void RunEntry()
     Entry& e = Front();
     const DelegateType& d = g.del[e.type - kAppearance];
     const bool runDistant = e.distant;
-    const uint64_t us = TimeUnit(e.type, runDistant, e.inst + kOwnerWeakOffset, [&] {
+    const uint64_t us = TimeUnit(e.type, runDistant, OwnerWeakOf(e.type, e.inst), e.key, [&] {
         d.execIfSafe(e.inst);
         d.dtor(e.inst, 0);
     });
     LAB_UNIT(e.type, us, reinterpret_cast<const uint8_t*>(e.key), nullptr, g.frame - e.since);
+    GateUnitRan(e);  // PacingBaseGate stats
     g.head = (g.head + 1) % kFifoCap;
     --g.count;
     Account(e.type, us);
@@ -1087,6 +1773,7 @@ void RunEntry()
 
 void ReplayAll()
 {
+    g.gateHoldN = 0;  // gate2 fade hold: nothing waits any more
     if (g.count) {
         s.drains.fetch_add(1, std::memory_order_relaxed);
         g.frameFlags |= 1;
@@ -1094,26 +1781,283 @@ void ReplayAll()
     while (g.count) RunEntry();
 }
 
-void ReplayBudget()
+// PacingHairActor's fade rate (worker gatefix, 2026-11-12 evening): a queued unit whose character's spawn fade-in has left its
+// start value 5 is due before the fade reaches 3 (where it counts as visible; 4 per second): the units this frame must run so
+// that every such unit (and, FIFO, everything queued before it) is done in time at an even rate from now on: with b = the
+// last frame's period without our units, W_j = the estimated time of units 0..j (each type's recent upper quartile) and
+// T_j = the time until it shows ((dither - 3) / 4 s), n units per frame finish unit j in time when
+// (j + 1) / n frames of b + n x unit size fit in T_j, i.e. n >= (j + 1) b / (T_j - W_j); when T_j - W_j < 2 b, unit j and
+// all before it run now. Already showing (below 3): over two frames. Units queued behind a fading character's hair otherwise ran at today's budget (about one 8-10 ms unit per
+// frame) and a 25-deep queue let the hair land after the character began to show (hidden 4K Waterfront runs, gate off).
+// At most this many units a frame (8-10 ms each): a fading character that cannot be finished in time within it shows a
+// little early rather than costing a heap frame.
+// stampfix (2026-11-13, reviews rev94d / rev96a): the first version allowed 4 units a frame (32-40 ms of units behind a deep
+// queue, for several frames: a sudden drop on its own). Now at most 2 units and at most kFadeRateMaxUs of their estimated
+// time a frame (the first unit always; the need is cut to what fits, so a queue of 9-10 ms units goes one a frame and may
+// finish after the character shows); still due before dither 3 (kFadeDue), where the character starts to show.
+constexpr uint64_t kFadeRateMax = 2;
+constexpr uint64_t kFadeRateMaxUs = 16000;
+constexpr float kFadeDue = 3.0f;
+// gate2: with PacingBaseGate on, the units the gate holds (gc: kGateHeld) are left out (they are not ahead of a fading
+// character's units: those run ahead of them), and the result counts the remaining units in queue order.
+uint64_t FadeRateNeed(const GateClasses* gc = nullptr)
 {
+    const uint64_t period = std::min<uint64_t>(std::max<uint64_t>(g.lastPeriodUs, 8000), 100000);
+    uint64_t need = 0, work = 0;
+    size_t pos = 0;  // the unit's place among the units counted
+    for (size_t idx = 0; idx < g.count; ++idx) {
+        if (gc && (idx >= gc->n || gc->c[idx] == kGateHeld)) continue;
+        const size_t i = pos++;
+        const Entry& q = g.fifo[(g.head + idx) % kFifoCap];
+        work += GateSize(q.type);
+        if (!q.distant) continue;  // a near / seen unit is not held by the budget beyond today's rule
+        uintptr_t key = 0;
+        bool distant = false;
+        ResolveDelegate(q.inst, q.type, &key, &distant);
+        const float fade = GateFade(key);
+        if (fade < 0.0f || fade >= 5.0f) continue;
+        if (fade < kFadeDue) {  // already showing: over two frames, not as one heap
+            need = std::max<uint64_t>(need, (i + 2) / 2);
+            continue;
+        }
+        // PacingGateShownHoldMs (rev96g follow-up, port102): a released hold's shown level falls GateShownSpeed times faster
+        // than the game's fade (1 when the key is off)
+        const uint64_t left = static_cast<uint64_t>((fade - kFadeDue) / 4.0f * 1e6f / GateShownSpeed(key));
+        if (left < work + 2 * period) {
+            need = std::max<uint64_t>(need, i + 1);
+            continue;
+        }
+        const uint64_t room = left - work;
+        need = std::max<uint64_t>(need, ((i + 1) * period + room - 1) / room);
+    }
+    // a bounded cost per frame, never a heap: at most kFadeRateMax units and what fits in kFadeRateMaxUs (estimates, the
+    // first unit always)
+    need = std::min<uint64_t>(need, kFadeRateMax);
+    uint64_t fit = 0, sum = 0;
+    for (size_t i = 0; i < g.count && fit < need; ++i) {
+        if (gc && (i >= gc->n || gc->c[i] == kGateHeld)) continue;
+        sum += GateSize(g.fifo[(g.head + i) % kFifoCap].type);
+        if (fit && sum > kFadeRateMaxUs) break;
+        ++fit;
+    }
+    return fit;
+}
+
+// post: the post-actor-tick replay (the frame's own time is known there: PacingBaseGate may release gated units)
+// Today's rule for one queued unit (the head without PacingBaseGate; a unit the gate does not hold with it): true = it runs
+// now. A distant unit over the frame's (lag-scaled) budget waits, unless PacingFadeAware's re-check finds its actor seen
+// (or near) and no longer fade-hidden, i.e. it would no longer have been allowed to wait.
+bool TodayRuns(const Entry& e, uint64_t age, bool forced)
+{
+    if (forced || !e.distant || !OverBudget(e.type, age)) return true;
+    bool recheck = g.fadeAware.load(std::memory_order_relaxed) != 0;
+    const bool release = recheck && !StillMayWait(e);
+    return release;
+}
+
+void GateReplay(bool post);
+
+void ReplayBudget(bool post)
+{
+    const bool gateOn = GateActive();  // PacingBaseGate: decided per unit below (gate2), PacingHairActor's fade rate included
+    if (!gateOn && g.hairActor.load(std::memory_order_relaxed)) {
+        // PacingHairActor: a fading character's queued units are done before it shows (see FadeRateNeed), counted over the
+        // frame's replays; FIFO order unchanged
+        if (g.fadeRateFrame != g.frame) {
+            g.fadeRateFrame = g.frame;
+            g.fadeRateDone = 0;
+            g.fadeRateUs = 0;
+        }
+        const uint64_t need = g.count ? FadeRateNeed() : 0;
+        while (g.count && g.fadeRateDone < need) {
+            // the frame's time cap (estimates; the first unit always runs)
+            const uint64_t next = GateSize(g.fifo[g.head].type);
+            if (g.fadeRateDone && g.fadeRateUs + next > kFadeRateMaxUs) break;
+            g.fadeRateUs += next;
+            ++g.fadeRateDone;
+            s.fadeRate.fetch_add(1, std::memory_order_relaxed);
+            RunEntry();
+        }
+    }
     const uint64_t maxLag = static_cast<uint64_t>(g.maxLag.load(std::memory_order_relaxed));
+    if (gateOn) {
+        GateReplay(post);
+        return;
+    }
     while (g.count) {
-        const Entry& e = Front();
+        Entry& e = Front();
         const uint64_t age = g.frame - e.since;
         const bool forced = age > 2 * maxLag;
-        if (!forced && e.distant && OverBudget(e.type, age)) {
-            // PacingFadeAware: the head is re-checked; it runs now once its actor is seen (or near) and no longer
-            // fade-hidden, i.e. once it would no longer have been allowed to wait.
-            bool recheck = g.fadeAware.load(std::memory_order_relaxed) != 0;
-            const bool release = recheck && !StillMayWait(e);
-            if (!release) break;
-        }
+        if (!TodayRuns(e, age, forced)) break;
         if (forced) {
             s.forced.fetch_add(1, std::memory_order_relaxed);
             g.frameFlags |= 2;
         }
         RunEntry();
     }
+}
+
+// PacingBaseGate's replay (gate2): the units the gate does not hold run first, by today's rule, in their queue order and
+// ahead of the held ones (PacingHairActor's fade rate over them first); then the oldest held unit runs for the bound, or
+// when the frame has room (post-actor tick only), else the held units wait. See the gate's comment above GateFade.
+void GateReplay(bool post)
+{
+    const uint64_t maxLag = static_cast<uint64_t>(g.maxLag.load(std::memory_order_relaxed));
+    const uint64_t bound = static_cast<uint64_t>(std::max(1, g.gateBound.load(std::memory_order_relaxed)));
+    if (g.gateLateFrame != g.frame) {
+        g.gateLateFrame = g.frame;
+        g.gateLateDone = 0;
+    }
+    GateClasses gc;
+    // runs the queue's entry i now (it moves to the head first); why: the lab unit line's release reason
+    auto runAt = [&](size_t i, char why) {
+        const Entry& q = g.fifo[(g.head + i) % kFifoCap];
+        if (q.gateFrom && (why == 'u' || why == 'r')) s.gateTurned.fetch_add(1, std::memory_order_relaxed);
+        if (why == 'k') {
+            ++g.gateFrameKey0;
+            s.gateKey0.fetch_add(1, std::memory_order_relaxed);
+        }
+        // PacingGateShownHoldMs (holdfix F4): an equipment unit runs while the same actor's appearance is still queued: its
+        // open hold is marked, and from then on that actor's queued units are soft-due at once (GateClassify, port102), so
+        // the body is built within a frame or two instead of up to ~0.9 s later, its weapon showing on a hidden body
+        if (q.type == kEquipment && q.key && ShownHoldOn()) {
+            bool appQueued = false;
+            for (size_t j = 0; j < g.count && !appQueued; ++j) {
+                const Entry& o = g.fifo[(g.head + j) % kFifoCap];
+                appQueued = j != i && o.key == q.key && o.type == kAppearance;
+            }
+            if (appQueued) ShownHoldNoteEquipFirst(q.key);
+        }
+        GateToFront(i);
+        RunEntry();
+    };
+    if (g.hairActor.load(std::memory_order_relaxed)) {
+        // PacingHairActor: a fading character's queued units are done before it shows (FadeRateNeed over the units the
+        // gate does not hold, which run ahead of the held ones), counted over the frame's replays
+        if (g.fadeRateFrame != g.frame) {
+            g.fadeRateFrame = g.frame;
+            g.fadeRateDone = 0;
+            g.fadeRateUs = 0;
+        }
+        GateClassify(gc);
+        const uint64_t need = g.count ? FadeRateNeed(&gc) : 0;
+        while (g.count && g.fadeRateDone < need) {
+            GateClassify(gc);
+            size_t i = 0;
+            while (i < gc.n && gc.c[i] == kGateHeld) ++i;
+            if (i >= gc.n) break;
+            // the frame's time cap (estimates; the first unit always runs)
+            const uint64_t next = GateSize(g.fifo[(g.head + i) % kFifoCap].type);
+            if (g.fadeRateDone && g.fadeRateUs + next > kFadeRateMaxUs) break;
+            g.fadeRateUs += next;
+            ++g.fadeRateDone;
+            s.fadeRate.fetch_add(1, std::memory_order_relaxed);
+            runAt(i, gc.c[i] == kGateKey0 ? 'k' : 'r');
+        }
+    }
+    // PacingGateShownHoldMs (hold2): units due before their character's own fade ends run first, ahead of other actors'
+    // units (an actor's own order kept: its gated units are due together): every due-now unit, and soft-due units up to
+    // the spread's rate a frame (1 unless one a frame cannot meet the deadlines, at most 4: rev96g F2, port102)
+    // holdfix F2: the earliest deadline first (due now has deadline 0; ties: queue order, so an actor's units, which share
+    // one deadline after F1, keep their order); the most due units of one replay is logged
+    if (ShownHoldOn()) {
+        if (g_dueFrame != g.frame) {
+            g_dueFrame = g.frame;
+            g_dueRan = 0;
+            g_dueRate = 1;
+        }
+        int ranDue = 0;
+        for (int guard = 0; g.count && guard < 64; ++guard) {
+            GateClassify(gc);
+            // fix102 (rev102a S1): the frame's rate is the highest the spread asked for in this frame: recomputed on the
+            // shortened queue after each run it shrinks, and against the frame's running count only about half ran
+            g_dueRate = std::max(g_dueRate, gc.rate);
+            size_t i = gc.n;
+            for (size_t k = 0; k < gc.n; ++k) {
+                const bool ok = gc.c[k] == kGateDueNow || (gc.c[k] == kGateDue && g_dueRan < g_dueRate);
+                if (ok && (i == gc.n || gc.t[k] < gc.t[i])) i = k;
+            }
+            if (i >= gc.n) break;
+            const bool now = gc.c[i] == kGateDueNow;
+            if (!now) ++g_dueRan;
+            ShownHoldCountDue(now);
+            ++ranDue;
+            runAt(i, now ? 'D' : 'd');
+        }
+        ShownHoldCountDueReplay(ranDue);
+    }
+    bool todayHeld = false;  // a unit not held by the gate waits for today's budget: so do those behind it
+    for (int guard = 0; g.count && guard < 4096; ++guard) {
+        GateClassify(gc);
+        // 1. the units the gate does not hold: today's rule, in queue order
+        size_t u = 0;
+        while (u < gc.n && gc.c[u] == kGateHeld) ++u;
+        if (!todayHeld && u < gc.n) {
+            const Entry& e = g.fifo[(g.head + u) % kFifoCap];
+            const uint64_t age = g.frame - e.since;
+            const bool forced = age > 2 * maxLag;
+            if (TodayRuns(e, age, forced)) {
+                if (forced) {
+                    s.forced.fetch_add(1, std::memory_order_relaxed);
+                    g.frameFlags |= 2;
+                }
+                ++g.gateFrameU;
+                runAt(u, gc.c[u] == kGateKey0 ? 'k' : 'u');
+                continue;
+            }
+            todayHeld = true;
+        }
+        // 2. the held units, oldest first: the bound (gatefix D1's rate rule over the held units' places), then room
+        size_t w[kGateScan];
+        size_t nw = 0;
+        for (size_t i = 0; i < gc.n; ++i)
+            if (gc.c[i] == kGateHeld) w[nw++] = i;
+        for (size_t i = gc.n; i < g.count && nw < kGateScan; ++i) w[nw++] = i;  // beyond the scan: held, for the bound
+        if (!nw) break;
+        // places counted from the frame's start (units already run for the bound this frame included): recomputing from
+        // the shortened queue after each run would ask one unit too few and let the last one reach bound + 1 (gatefix's
+        // D1 relied on today's forced rule for that one; held units have no other bound)
+        // A unit already past the bound (only after the bound was lowered live) needs one unit this frame: such units
+        // run one per frame, never all at once (rev96e note on a live change). (A bound in time was tried: with frames of
+        // changing length it let a unit pass by a frame or ran two in one frame; the bound stays in frames, rev96e F9.)
+        const uint64_t doneB = g.gateLateDone;
+        uint64_t need = 0;
+        for (size_t j = 0; j < nw; ++j) {
+            const uint64_t a = g.frame - g.fifo[(g.head + w[j]) % kFifoCap].since;
+            if (a > bound) {
+                need = std::max<uint64_t>(need, 1);
+                continue;
+            }
+            const uint64_t left = bound + 1 - a;  // frames left for it, this one included
+            if (j + doneB + 1 < left) continue;    // still within reach at one unit a frame from the next frame on
+            need = std::max<uint64_t>(need, (j + doneB + 1 + left - 1) / left);
+        }
+        const Entry& h = g.fifo[(g.head + w[0]) % kFifoCap];
+        const uint64_t hAge = g.frame - h.since;
+        g.gateFrameOldest = std::max(g.gateFrameOldest, hAge);
+        if (g.gateLateDone < need) {
+            ++g.gateLateDone;
+            ++g.gateFrameLate;
+            s.gateLate.fetch_add(1, std::memory_order_relaxed);
+            runAt(w[0], 'b');
+            continue;
+        }
+        bool calm = false;
+        if (post && w[0] < gc.n && GateRoom(h.type, &calm)) {
+            if (calm) {
+                ++g.gateFrameCalm;
+                s.gateCalm.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                ++g.gateFrameRuns;
+                s.gateFit.fetch_add(1, std::memory_order_relaxed);
+            }
+            runAt(w[0], calm ? 'c' : 'f');
+            continue;
+        }
+        g.gateFrameHolds = std::max(g.gateFrameHolds, static_cast<int>(nw));  // the held units this frame
+        break;
+    }
+    if (!g.count) g.gateHoldN = 0;  // the fade hold: nothing held any more
 }
 
 bool Enqueue(int type, const uint8_t* inst, uintptr_t key, bool distant, bool fadeHeld = false)
@@ -1128,9 +2072,11 @@ bool Enqueue(int type, const uint8_t* inst, uintptr_t key, bool distant, bool fa
     else memcpy(e.inst + kCaptureOffset, inst + kCaptureOffset, d.size - kCaptureOffset);
     e.type = type;
     e.since = g.frame;
+    e.sinceUs = NowUs();
     e.key = key;
     e.distant = distant;
     e.fadeHeld = fadeHeld;
+    e.gateFrom = 0;
     if (fadeHeld) g.fadeHeldUnits.fetch_add(1, std::memory_order_relaxed);
     ++g.count;
     s.deferred[type].fetch_add(1, std::memory_order_relaxed);
@@ -1155,7 +2101,10 @@ bool DelegateUnit(int type, void* inst, bool* result)
         // the budget) only if that unit's actor was near or seen. An earlier version always counted as near, so a
         // distant appearance unit replayed at its turn pulled the hair/equipment it completed into the same frame
         // (Silver Road, 4K: 59 ms appearance + 3 units = 115 ms in one frame).
-        if (g.count && FrameOpen() && Enqueue(type, p, 0, g.unitDistant)) { *result = true; return true; }
+        // PacingHairActor (rev94a L1): queued with the running unit's actor key, so a later unit of the same actor (now
+        // matched to it, e.g. a hair step) waits behind it instead of overtaking it; key 0 (as in 1.4.0) with the key off.
+        const uintptr_t nestedKey = g.hairActor.load(std::memory_order_relaxed) ? g.unitKey : 0;
+        if (g.count && FrameOpen() && Enqueue(type, p, nestedKey, g.unitDistant)) { *result = true; return true; }
         return false;
     }
     bool distant = false;
@@ -1170,14 +2119,34 @@ bool DelegateUnit(int type, void* inst, bool* result)
         ReplayAll();  // not deferring now: whatever waits runs first, in order
     } else {
         uintptr_t key;
-        ResolveDelegate(p, &key, &distant);
+        ResolveDelegate(p, type, &key, &distant);
         unitKey = key;
         // With a backlog, a distant unit (or one of an actor that has queued units) queues behind it; a near unit of
         // another actor runs now. Without one, a distant unit waits only when the frame's budget is spent.
         bool wait = g.count ? (distant || FifoHasKey(key)) : (distant && OverBudget(type));
+        // PacingBaseGate: with no backlog, a gated unit the budget would run now runs only after this frame's actor tick
+        // and if the frame stays within the target (an arrival before the post-actor tick queues and is replayed there)
+        bool gateHold = false;
+        const bool labGateable = true;
+        // (only a unit the gate may hold: far, unseen or fade-hidden, not past the fade's floor; gate2)
+        if (!wait && !g.count && distant && labGateable && GateActive() && GateMayHold(true, key, distant)) {
+            bool calm = false;
+            if (GateKnown() && GateRoom(type, &calm)) {
+                ++(calm ? g.gateFrameCalm : g.gateFrameRuns);
+                (calm ? s.gateCalm : s.gateFit).fetch_add(1, std::memory_order_relaxed);
+            } else {
+                wait = true;
+                gateHold = true;
+            }
+        }
         const bool fadeHeld = g.lastFadeHeld;
         if (wait) {
             if (Enqueue(type, p, key, distant, fadeHeld)) {
+                if (gateHold) {  // PacingBaseGate: held although the budget would have run it
+                    g.fifo[(g.head + g.count - 1) % kFifoCap].gateFrom = g.frame;
+                    s.gateHeld.fetch_add(1, std::memory_order_relaxed);
+                    ++g.gateFrameHolds;
+                }
                 *result = true;
                 return true;
             }
@@ -1185,7 +2154,7 @@ bool DelegateUnit(int type, void* inst, bool* result)
         }
     }
     if (OverBudget(type)) g.frameFlags |= 4;
-    const uint64_t us = TimeUnit(type, distant && !nearFade, p + kOwnerWeakOffset, [&] { *result = d.execIfSafe(inst); });
+    const uint64_t us = TimeUnit(type, distant && !nearFade, OwnerWeakOf(type, p), unitKey, [&] { *result = d.execIfSafe(inst); });
     Account(type, us);
     LAB_UNIT(type, us, reinterpret_cast<const uint8_t*>(unitKey), nullptr, 0);
     (void)unitKey;
@@ -1239,20 +2208,25 @@ uint64_t CreateExecHook(void* cmd)
         Log("[pacing] create command at UE (%.0f, %.0f, %.0f), player %s(%.0f, %.0f, %.0f): %s", x * kOldToUe, -y * kOldToUe,
             z * kOldToUe, g.playerKnown ? "" : "unknown ", g.px, g.py, g.pz, distant ? "distant" : "near");
     }
-    if (g.allowDefer && distant && !PairForced() && OverBudget(kCreate, PairLag()))
+    if (g.allowDefer && distant && !PairForced() && OverBudget(kCreate, PairLag())) {
+        // CreatePreloadEarly: what it will load is requested now, not only once the budget lets it run
+        CreatePreloadOnDefer(cmd);
         return Defer(static_cast<uint8_t*>(g.session), kCreate);
+    }
     // CreatePreload (bigcreate; public 1.3.0): a far create whose form asset / class is not loaded waits while it loads
     // asynchronously (CreatePreloadNear: also a near one, a few frames at most, while its spot is out of the camera's view)
     const bool nearWait = !distant && g.allowDefer && !PairForced() &&
                           CreatePreloadNearMayWait(x * kOldToUe, -y * kOldToUe, z * kOldToUe);
     if (CreatePreloadBefore(cmd, (g.allowDefer && distant && !PairForced()) || nearWait, PairLag(),
-                            static_cast<uint64_t>(g.maxLag.load(std::memory_order_relaxed)), nearWait))
+                            static_cast<uint64_t>(g.maxLag.load(std::memory_order_relaxed)), nearWait)) {
+        g.preloadWaitFrame = g.frame;  // PacingFlowProgress: the queue's head waits for its loads this frame
         return Defer(static_cast<uint8_t*>(g.session), kCreate);
+    }
     if (PairForced() && distant) s.forced.fetch_add(1, std::memory_order_relaxed);
     g.lastCreateFar = distant;
     if (OverBudget(kCreate)) g.frameFlags |= distant ? 2 : 4;
     uint64_t r = 0;
-    const uint64_t us = TimeUnit(kCreate, distant, nullptr, [&] { r = g.origCreate(cmd); });
+    const uint64_t us = TimeUnit(kCreate, distant, nullptr, 0, [&] { r = g.origCreate(cmd); });
     Account(kCreate, us);
     return r;
 }
@@ -1272,7 +2246,7 @@ uint64_t GenericExecHook(void* cmd)
     if (heavy && g.allowDefer && g.lastCreateFar && !PairForced() && OverBudget(kGeneric, PairLag()))
         return Defer(static_cast<uint8_t*>(g.session), kGeneric);
     uint64_t r = 0;
-    const uint64_t us = TimeUnit(kGeneric, heavy && g.lastCreateFar, nullptr, [&] { r = g.origGeneric(cmd); });
+    const uint64_t us = TimeUnit(kGeneric, heavy && g.lastCreateFar, nullptr, 0, [&] { r = g.origGeneric(cmd); });
     if (heavy) {
         Account(kGeneric, us);
         LAB_UNIT(kGeneric, us, nullptr, nullptr, PairLag());
@@ -1344,7 +2318,11 @@ void MaxTickRateHook(void* engine)
         StreamBehindLoadingFrameEnd();  // StreamBehindLoadingScreen (no-op unless installed and on)
     }
     BodySpreadFrame();     // BodyRemovalSpread (physics/body_spread.cpp): no-op unless installed
+    ImpactPreloadFrame();  // ImpactPreload (loading/impact_preload.cpp): no-op unless installed and on
+    RowPreloadGtFrame();   // RowPreload (streaming/row_preload.cpp): the menu / loading freeze for the OT (no-op unless installed)
     const uint64_t sleep = t1 - t0, period = g.lastPaceEnd ? t1 - g.lastPaceEnd : 0;
+    GateFrameEdge(t0);  // PacingBaseGate: the frame's rest after the post-actor tick, its prediction check
+    g.lastPeriodUs = period > g.unitUs ? period - g.unitUs : 0;  // PacingHairActor fade rate: the frame without our units
     g.lastPaceEnd = t1;
     if (!period || period > 200000) return;
     const uint64_t busyAll = period > sleep ? period - sleep : 0;
@@ -1401,10 +2379,18 @@ uint8_t FrameRun(void* manager)
     const bool enabled = g.enabled.load(std::memory_order_relaxed);
     g.allowDefer = enabled && GuardsPass(static_cast<const uint8_t*>(g.session));
     g.inFrame = true;
+    g.frameStart2Us = g.frameStart1Us;  // FadeInUnseen (rev96d A2)
+    g.frameStart1Us = g.frameStartUs;
     g.frameStartUs = NowUs();
+    // PacingGateShownHoldMs (fix102, rev102a S2): the due spread's period ring gets a sample every frame (before: only on
+    // frames with candidates, so an old long frame could stay in it)
+    if (g.frameStart1Us && g.frameStartUs > g.frameStart1Us) {
+        g.periodRing[g.periodNext] = g.frameStartUs - g.frameStart1Us;
+        g.periodNext = (g.periodNext + 1) % 8;
+    }
     // The older work first; but while a level flow waits (c), the main queue first: the flow and the OT wait for it.
     if (!g.allowDefer) ReplayAll();
-    else if (g.count && g.heldFrames == 0 && FifoAge() >= PairLag()) ReplayBudget();
+    else if (g.count && g.heldFrames == 0 && FifoAge() >= PairLag()) ReplayBudget(false);
     g.inMainRun = true;
     MapPopupSpreadPairing(true);  // MapPopupSpread: map icon lists may be kept until this run ends
     uint8_t r = 4;
@@ -1466,12 +2452,23 @@ bool FlowWaitActive()
 bool FlowWaits(const void* ret, int32_t key)
 {
     if (!IsFlow(ret, key) || g.E >= g.S || !FlowWaitActive()) return false;
-    // past kMaxFlowWait only while the main queue is getting through the flow's own OT frame, a unit per frame
-    const bool progressing = g.frameTypes[kCreate] + g.frameTypes[kGeneric] > 0 && PairLag() == 0;
+    // past kMaxFlowWait only while the main queue is getting through the flow's own OT frame, a unit per frame.
+    // PacingFlowProgress (drainfix 2026-11-12): also while it gets through older OT frames owed (a create or head/BP unit
+    // ran this frame), and while the queue's head create waits for its asset loads (CreatePreload deferred it this frame):
+    // at the 3-frame bound the drain ran the rest of the owed queue at once, two creates in one frame (15-24 ms, Imperial
+    // City Waterfront), or ran the head create with its load still in flight: 24-28 ms of synchronous load in the frame.
+    const bool fp = g.flowProgress.load(std::memory_order_relaxed);
+    const bool ran = g.frameTypes[kCreate] + g.frameTypes[kGeneric] > 0;
+    const bool loading = fp && g.preloadWaitFrame == g.frame;
+    const bool progressing = (ran && (PairLag() == 0 || fp)) || loading;
     const int bound = progressing ? std::max(kMaxFlowWait, g.flowWaitFrames.load(std::memory_order_relaxed)) : kMaxFlowWait;
     if (g.heldFrames >= bound) {  // waited long enough: the queue drains as before
         if (!g.holdEnd) s.flowDrains.fetch_add(1, std::memory_order_relaxed);
         return false;
+    }
+    if (!g.holdEnd && g.heldFrames >= kMaxFlowWait) {  // PacingFlowProgress: held past 3 only because of the key
+        if (loading && !ran) s.flowLoadHeld.fetch_add(1, std::memory_order_relaxed);
+        else if (ran && PairLag() > 0) s.flowLagHeld.fetch_add(1, std::memory_order_relaxed);
     }
     if (!g.holdEnd && g.flowLogs < 12) {
         ++g.flowLogs;
@@ -1542,8 +2539,11 @@ void HandlerEndHook(void* manager, void* tag, uint64_t a3, uint64_t a4)
     if (ret == g.postTickReturn && OnGameThread()) MapPopupSpreadPostTick();  // MapPopupSpread: safety flush (counted late)
     if (ret == g.postTickReturn && OnGameThread()) BodySpreadPostTick();  // BodyRemovalSpread: its drain point
     if ((ret == g.postTickReturn || g.testAnyCaller) && OnGameThread() && g.depth == 0 && !g.inMainRun && g.inFrame) {
+        g.gateS3Us = NowUs();  // PacingBaseGate: the post-actor tick (the rest of the frame is measured from here)
+        g.gateS3UnitUs = g.unitUs;
+        g.gateS3Frame = g.frame;
         if (!g.allowDefer || !g.enabled.load(std::memory_order_relaxed)) ReplayAll();
-        else ReplayBudget();
+        else ReplayBudget(true);
         g.inFrame = false;
         if (g.holdEnd) {
             // (c) a flow waits: so does this frame's end command. The OT keeps running our reverse commands as they come
@@ -1638,6 +2638,63 @@ void SetNpcPacingOwnerWalk(bool on)
         Log("[pacing] a delegate owner's non-actor objects %s (PacingOwnerWalk %d)", on ? "are skipped" : "end the walk", on);
 }
 
+void SetNpcPacingHairActor(bool on)
+{
+    if (g.hairActor.exchange(on) != on)
+        Log("[pacing] hair units %s (PacingHairActor %d%s)", on ? "are paced by their character" : "count as near (as before)", on,
+            on && !g.hairActorWeak ? "; not available: the hair delegate's mesh component was not recognised" : "");
+}
+
+void SetNpcPacingFlowProgress(bool on)
+{
+    if (g.flowProgress.exchange(on) != on)
+        Log("[pacing] a waiting level flow counts %s (PacingFlowProgress %d)",
+            on ? "creates run with older frames owed and a create waiting for its loads as progress"
+               : "only creates of its own frame as progress (as before)", on);
+}
+
+void SetNpcPacingBaseGate(int value)
+{
+    const int us = value <= 0 ? 0 : value == 1 ? 25000 : std::clamp(value, 18, 50) * 1000;
+    if (g.gateUs.exchange(us) != us)
+        Log("[pacing] far NPC steps after the actor tick %s (PacingBaseGate %d%s)",
+            us ? "run only while the frame stays within the target" : "run under the budget alone (as before)", us / 1000,
+            us && !g.origMaxTick && !g.testClock ? " ms; not available: the frame-rate cap's sleep was not found" : us ? " ms" : "");
+}
+
+// self-test: the fade hold's step for an actor (GateFadeStep)
+float NpcPacingTestFadeHold(const void* actor, float* value, float floor, float rate, float dt)
+{
+    return GateFadeStep(reinterpret_cast<uintptr_t>(actor), value, floor, rate, dt);
+}
+
+void SetNpcPacingGateBounds(int boundFrames, int calmMs, int nearM, int fadeHoldMs)
+{
+    const int b = std::clamp(boundFrames, 10, 180);
+    const int c = calmMs <= 0 ? 0 : std::clamp(calmMs, 10, 30) * 1000;
+    const int n = std::clamp(nearM, 0, 500) * 100;
+    const int h = 0;  // the fade hold is lab-only (rev96e B1)
+    (void)fadeHoldMs;
+    const bool changed = g.gateBound.exchange(b) != b;
+    const bool changedC = g.gateCalmUs.exchange(c) != c;
+    const bool changedN = g.gateNearCm.exchange(n) != n;
+    const bool changedH = g.gateHoldUs.exchange(h) != h;
+    if (!h) g.gateHoldN = 0;
+    if (changed || changedC || changedN || changedH)
+        Log("[pacing] PacingBaseGate: a held far unit runs within %d frames at the latest (PacingGateBoundFrames), on a frame "
+            "whose own time stays below %d ms %s(PacingGateCalmMs), and never holds an actor nearer than %d m (PacingGateNearM); "
+            "fade hold %d ms (lab PacingGateFadeHoldMs%s)", b, c / 1000, c ? "" : "never: off ", n / 100, h / 1000,
+            h ? "" : ": off");
+}
+
+void NpcPacingTestFrameEdge()
+{
+    const uint64_t t = NowUs();
+    GateFrameEdge(t);
+    g.lastPeriodUs = g.lastPaceEnd && t - g.lastPaceEnd > g.unitUs ? t - g.lastPaceEnd - g.unitUs : 0;  // as MaxTickRateHook
+    g.lastPaceEnd = t;
+}
+
 void SetNpcPacingLeanFlowDrain(bool on)
 {
     if (g.leanFlowDrain.exchange(on) != on)
@@ -1660,6 +2717,293 @@ void SetNpcPacingFadeAware(int mode)
 
 
 
+// ---- FadeInUnseen (worker stampfix, 2026-11-13; the idea is Epic's, UE 5.5.0, commit 8dd2cb4237 / CL 36133226) ----
+// The engine's behaviour (UE 5.3): a primitive without an occlusion history (a new one) draws as visible until its first
+// occlusion result arrives, and every drawn primitive gets the frame's LastRenderTime (SceneVisibility.cpp ComputeRelevance ->
+// FPrimitiveSceneInfo::UpdateComponentLastRenderTime). A skinned mesh with OnlyTickPoseWhenRendered and the animation budget
+// allocator's ShouldComponentTick tick and evaluate its pose while that time is within 1.0 s of the world time. The game's
+// behaviour: every spawned NPC fades in by dither over 1.25 s. Together: a crowd created 120-150 m away behind buildings is
+// "rendered" in its first frames (no occlusion result yet) and then ticks and evaluates its animation at full rate for one
+// second although nobody sees it (worker animbudget, census 2026-11-12: parallel evaluations 4 -> 15 a frame, +5-6 ms per
+// frame for ~1.05 s at the IC Waterfront). Epic changed the stamp in UE 5.5.0 (8dd2cb4237, CL 36133226, 2024-09-09; 5.5.4
+// SceneVisibility.cpp:2014-2019): the component's render time is updated only once its occlusion state is known, so that
+// components pending an occlusion result are not counted as rendered. Our version of that idea, without touching the render
+// thread: after the fade component's tick of a far character (PacingMinDistance, as PacingFadeAware) still in its spawn
+// fade-in (state 1), each of its non-static meshes whose LastRenderTime (not LastRenderTimeOnScreen, which texture
+// streaming reads) is older than FadeInUnseenWindowMs (default 200 ms) but still inside the engine's 1 s window gets it
+// set to just past that window: a body the renderer keeps stamping (in view, or through a shadow or ray-traced stamp: its
+// stamp is at most a frame or two old) is never touched and animates every frame at every dither level, exactly as
+// without the key, even across a 150 ms hitch frame; a body stamped only in its first frames (occluded once the first
+// occlusion result came) stops 200 ms after its last stamp instead of 1 s after. No state is kept: the renderer raises the
+// time again whenever it draws the body. (rev96a: the first version reset the time while dither >= 4 and opened a window
+// below it; that relied on dither 4-5 being invisible and opened the window a frame late, so it was replaced by this
+// age rule, which needs no visibility threshold.) Equivalence: an unseen new far
+// character's animation (notifies, montages) then starts when it is first seen, as for every unseen character in the game
+// after its first second, and as in UE 5.5+; not identical to 5.3. Static meshes (weapons, shields) keep their stamps.
+// Hook: the fade component's TickComponent override (exe+0x48D18C0) ends in a tail jump to the tick body (exe+0x48D5A40);
+// that jump's rel32 is pointed at a stub to FadeTickHook, which calls the body and then reads the fresh mesh list the
+// body's refresh (exe+0x48CD850) leaves in the component (+0xE0 data / +0xE8 count; refreshed on every FadeIn tick).
+// Start-up install only (the rel32 is written before game code runs); the key is live afterwards (0 = the hook only calls
+// the body).
+constexpr char kFadeTickCaller[] =
+    "40 53 48 83 EC 30 0F 29 74 24 20 48 8B D9 0F 28 F1 E8 ?? ?? ?? ?? 80 BB ?? ?? 00 00 00 48 8B CB 74 0F 0F 28 74 24 20 "
+    "48 83 C4 30 5B E9 ?? ?? ?? ?? 0F 28 CE 0F 28 74 24 20 48 83 C4 30 5B E9";
+constexpr size_t kFadeTickJmpAt = 62;  // the tail jump to the tick body
+// the refresh (exe+0x48CD850), 0x30 into it: lea rsi,[rcx+list]; xor edi,edi; ...; mov [rsi+8],edi; cmp [rsi+0Ch],edi
+constexpr char kFadeListHead[] = "48 8D B1 ?? ?? 00 00 33 FF 0F 28 FB 45 0F B6 E0 4C 8B EA 89 7E 08 39 7E 0C";
+// its per-mesh loop: SetDoDither, SetDitherScale, then IsA(UStaticMeshComponent) (the getter's call at +24)
+constexpr char kFadeListLoop[] =
+    "48 8B CB E8 ?? ?? ?? ?? 0F 28 CF 48 8B CB E8 ?? ?? ?? ?? 48 85 DB 74 ?? E8 ?? ?? ?? ?? 48 8B 53 10 4C 8D 40 30 48 63 40 "
+    "38 3B 42 38 7F";
+constexpr size_t kFadeStaticClassAt = 24;
+
+using FadeTickFn = void (*)(uint8_t* comp, float dt);
+struct FadeUnseen {
+    bool found = false, installed = false;
+    uint8_t* jmp = nullptr;            // the caller's tail jump (E9 rel32)
+    FadeTickFn body = nullptr;         // the tick body (the jump's target)
+    uint32_t list = 0;                 // the component's mesh list (TArray data; count +8)
+    uint32_t compLast = 0;             // UPrimitiveComponent::LastRenderTime
+    StaticClassFn staticMesh = nullptr;
+    std::atomic<int> mode{0};          // FadeInUnseen: 0 off, 1 far characters (lab 2: any distance)
+    std::atomic<int> windowMs{200};    // lab FadeInUnseenWindowMs
+    double (*testNow)() = nullptr;     // self-test: fake world time
+    double testSlack = -1.0;           // self-test: the last two frames' time (s; < 0 = from the frame clock)
+    // per stats interval (written on the game thread, read and zeroed by the stats thread)
+    std::atomic<uint64_t> ticks{0}, farTicks{0}, clamped{0}, skippedStatic{0}, failed{0};
+} u;
+
+bool IsA(const uint8_t* obj, const uint8_t* cls)
+{
+    if (!obj || !cls) return false;
+    const uint8_t* const oc = *reinterpret_cast<const uint8_t* const*>(obj + 0x10);
+    if (!oc) return false;
+    const int32_t idx = *reinterpret_cast<const int32_t*>(cls + 0x38);
+    if (idx < 0 || idx > *reinterpret_cast<const int32_t*>(oc + 0x38)) return false;
+    const uint8_t* const* chain = *reinterpret_cast<const uint8_t* const* const*>(oc + 0x30);
+    return chain && chain[idx] == cls + 0x30;
+}
+
+double WorldNow(const uint8_t* actor, bool* ok)
+{
+    *ok = false;
+    if (u.testNow) {
+        *ok = true;
+        return u.testNow();
+    }
+    if (!g.actorWorld) return 0.0;
+    const uint8_t* world = static_cast<const uint8_t*>(g.actorWorld(actor));
+    if (!world) return 0.0;
+    *ok = true;
+    return *reinterpret_cast<const double*>(world + g.timeOffset);
+}
+
+// After the fade component's tick (game thread). Returns the meshes whose render time it expired (self-test).
+int FadeUnseenAfterTick(uint8_t* comp)
+{
+    const int mode = u.mode.load(std::memory_order_relaxed);
+    if (!mode || !comp) return 0;
+    int changed = 0;
+    __try {
+        // only a spawn fade-in still running after this tick (state 1): the body refreshed the mesh list in it
+        if (*reinterpret_cast<const int32_t*>(comp + g.fadeState) != 1) return 0;
+        const uint8_t* const actor = *reinterpret_cast<const uint8_t* const*>(comp + g.fadeOwner);
+        if (!actor || *reinterpret_cast<uint8_t* const*>(actor + g.fadeComp) != comp) return 0;  // the actor's own fade
+        uint8_t* const* list = *reinterpret_cast<uint8_t* const* const*>(comp + u.list);
+        const int32_t n = *reinterpret_cast<const int32_t*>(comp + u.list + 8);
+        if (!list || n <= 0 || n > 64) return 0;
+        u.ticks.fetch_add(1, std::memory_order_relaxed);
+        if (mode == 1) {
+            double x, y, z;
+            if (!ActorLocationGuarded(actor, &x, &y, &z) || !FarFrom(x, y, z)) return 0;
+        }
+        u.farTicks.fetch_add(1, std::memory_order_relaxed);
+        bool timeOk = false;
+        const double now = WorldNow(actor, &timeOk);
+        if (!timeOk) return 0;
+        // rev96d A2: the freshest stamp the game thread can see is one or two frames old, so a drawn body's age reaches this
+        // frame's and the previous frame's time: the window counts from there (real time, which world time never exceeds:
+        // world deltas are the real ones, dilated or clamped). A body is dropped only once it has not been drawn for the
+        // window beyond that, also across a hitch frame of 0.2-0.4 s.
+        double slack = u.testSlack;
+        if (slack < 0.0)
+            slack = g.frameStart2Us && g.frameStartUs > g.frameStart2Us
+                        ? std::min(1.0, static_cast<double>(g.frameStartUs - g.frameStart2Us) / 1e6)
+                        : 1.0;  // not known yet: drop nothing
+        const double window = u.windowMs.load(std::memory_order_relaxed) / 1000.0 + slack;
+        const float expired = static_cast<float>(now - 1.0) - 0.001f;  // just outside the engine's 1 s window
+        for (int32_t i = 0; i < n; ++i) {
+            uint8_t* const m = list[i];
+            if (!m) continue;
+            if (u.staticMesh && IsA(m, u.staticMesh())) {
+                u.skippedStatic.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+            float* const last = reinterpret_cast<float*>(m + u.compLast);
+            const double age = now - static_cast<double>(*last);
+            if (age > window && *last > expired) {  // not drawn for the window (+ two frames), still inside the engine's 1 s
+                *last = expired;
+                ++changed;
+            }
+        }
+        if (changed) u.clamped.fetch_add(changed, std::memory_order_relaxed);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        u.failed.fetch_add(1, std::memory_order_relaxed);
+    }
+    return changed;
+}
+
+
+void FadeTickHook(uint8_t* comp, float dt)
+{
+    if (g.gateHoldN && g.gateHoldUs.load(std::memory_order_relaxed) && OnGameThread()) {
+        dt = GateFadeDt(comp, dt);  // lab PacingGateFadeHoldMs (gate2; off by default, rev96e B1)
+    }
+    u.body(comp, dt);
+    if (u.mode.load(std::memory_order_relaxed) && OnGameThread()) FadeUnseenAfterTick(comp);
+}
+
+bool FindFadeUnseen()
+{
+    if (u.found) return true;
+    const GameModule& game = Game();
+    if (!g.fadeFound) {  // (the world time function: FindPlayer, required by the pacing itself)
+        Log("[fadeunseen] the spawn fade-in component was not found: FadeInUnseen not available");
+        return false;
+    }
+    const auto ticks = FindAll(game.text, ParsePattern(kFadeTick));
+    const auto callers = FindAll(game.text, ParsePattern(kFadeTickCaller));
+    const auto rendered = FindAll(game.text, ParsePattern(kCompRendered));
+    if (ticks.size() != 1 || callers.size() != 1 || rendered.size() != 1) {
+        Log("[fadeunseen] code not recognised (tick %zu, caller %zu, render time %zu matches): FadeInUnseen not available",
+            ticks.size(), callers.size(), rendered.size());
+        return false;
+    }
+    uint8_t* const jmp = callers[0] + kFadeTickJmpAt;
+    if (RipTarget(jmp, 1, 5) != ticks[0]) {
+        Log("[fadeunseen] the fade tick's caller does not jump to the tick body: FadeInUnseen not available");
+        return false;
+    }
+    // the refresh: the tick body's call whose target has the list head 0x28-0x48 in
+    uint8_t* refresh = nullptr;
+    uint8_t* head = nullptr;
+    for (uint8_t* p = ticks[0]; p < ticks[0] + 0x200 && !refresh; ++p) {
+        if (*p != 0xE8) continue;
+        uint8_t* const t = RipTarget(p, 1, 5);
+        if (!game.text.Contains(t) || !game.text.Contains(t + 0x80)) continue;
+        if (uint8_t* h = FindNear(t + 0x28, 0x20 + 25, kFadeListHead)) {
+            refresh = t;
+            head = h;
+        }
+    }
+    uint8_t* const loop = refresh ? FindNear(refresh, 0x800, kFadeListLoop) : nullptr;
+    uint8_t* const sm = loop ? RipTarget(loop + kFadeStaticClassAt, 1, 5) : nullptr;
+    const uint32_t list = head ? Disp32(head + 3) : 0;
+    const uint32_t last = Disp32(rendered[0] + kCompLastAt);
+    if (!head || !loop || !game.text.Contains(sm) || !list || list > 0x400 || list % 8 || last > 0x1000 || last % 4 ||
+        Disp32(rendered[0] + kCompTimeAt) != g.timeOffset) {
+        Log("[fadeunseen] the fade component's mesh list or the render time layout not recognised: FadeInUnseen not available");
+        return false;
+    }
+    u.jmp = jmp;
+    u.body = reinterpret_cast<FadeTickFn>(ticks[0]);
+    u.list = list;
+    u.compLast = last;
+    u.staticMesh = reinterpret_cast<StaticClassFn>(sm);
+    u.found = true;
+    Log("[fadeunseen] fade tick caller's jump exe+0x%X -> body exe+0x%X; mesh list +0x%X (refresh exe+0x%X), static mesh class "
+        "exe+0x%X, LastRenderTime +0x%X",
+        static_cast<unsigned>(jmp - game.base), static_cast<unsigned>(ticks[0] - game.base), list,
+        static_cast<unsigned>(refresh - game.base), static_cast<unsigned>(sm - game.base), last);
+    return true;
+}
+
+bool InstallFadeInUnseen(bool beforeGameCode)
+{
+    if (u.installed) return true;
+    if (!g.installed) {
+        Log("[fadeunseen] FadeInUnseen: needs NpcCreationPacing, not installed");
+        return false;
+    }
+    if (!FindFadeUnseen()) return false;
+    if (!beforeGameCode) {  // the rel32 is not written atomically: only before the game's code runs
+        Log("[fadeunseen] FadeInUnseen: start-up install only, not installed");
+        return false;
+    }
+    uint8_t* const stub = AllocNearGame(16);
+    if (!stub) {
+        Log("[fadeunseen] no memory near the game's code: FadeInUnseen not installed");
+        return false;
+    }
+    uint8_t code[14] = {0xFF, 0x25, 0, 0, 0, 0};  // jmp [rip+0]; dq FadeTickHook
+    const uint64_t hook = reinterpret_cast<uint64_t>(&FadeTickHook);
+    memcpy(code + 6, &hook, 8);
+    memcpy(stub, code, sizeof code);
+    DWORD old;
+    VirtualProtect(stub, 16, PAGE_EXECUTE_READ, &old);
+    FlushInstructionCache(GetCurrentProcess(), stub, 16);
+    const int32_t rel = static_cast<int32_t>(stub - (u.jmp + 5));
+    uint8_t insn[5] = {0xE9};
+    memcpy(insn + 1, &rel, 4);
+    if (!WriteCode(u.jmp, insn)) {
+        Log("[fadeunseen] code write failed: FadeInUnseen not installed");
+        return false;
+    }
+    u.installed = true;
+    Log("[fadeunseen] fade tick hook installed (FadeInUnseen; lab: PacingBaseGate's fade hold)");
+    return true;
+}
+
+void SetFadeInUnseen(int mode, int windowMs)
+{
+    const int m = std::clamp(mode, 0, 1);
+    (void)windowMs;
+    const int was = u.mode.exchange(u.installed ? m : 0);
+    if (was != u.mode.load())
+        Log("[fadeunseen] FadeInUnseen %d%s", u.mode.load(),
+            u.mode.load() ? ": a far character in its spawn fade-in not drawn for the window no longer counts as rendered"
+                          : " (as the game)");
+}
+
+void LogFadeInUnseenStats()
+{
+    if (!u.installed) return;
+    const uint64_t t = u.ticks.exchange(0), f = u.farTicks.exchange(0), c = u.clamped.exchange(0);
+    const uint64_t st = u.skippedStatic.exchange(0), x = u.failed.exchange(0);
+    if (!(t || c || x)) return;
+    Log("[fadeunseen] %llu fade-in ticks (%llu of far characters): %llu mesh render times expired after %d ms not drawn, %llu "
+        "static meshes left alone, %llu faults",
+        (unsigned long long)t, (unsigned long long)f, (unsigned long long)c, u.windowMs.load(), (unsigned long long)st,
+        (unsigned long long)x);
+}
+
+// self-test
+bool FadeInUnseenInfo(uint32_t* jmpRva, uint32_t* bodyRva, uint32_t* list, uint32_t* compLast, uint32_t* staticClassRva)
+{
+    if (!FindFadeUnseen()) return false;
+    const uint8_t* base = Game().base;
+    *jmpRva = static_cast<uint32_t>(u.jmp - base);
+    *bodyRva = static_cast<uint32_t>(reinterpret_cast<uint8_t*>(u.body) - base);
+    *list = u.list;
+    *compLast = u.compLast;
+    *staticClassRva = static_cast<uint32_t>(reinterpret_cast<uint8_t*>(u.staticMesh) - base);
+    return true;
+}
+void FadeInUnseenTestSlack(double seconds) { u.testSlack = seconds; }
+int FadeInUnseenTestTick(uint8_t* comp, int mode, double (*now)(), const uint8_t* (*staticMesh)())
+{
+    const int savedMode = u.mode.load();
+    const StaticClassFn savedSm = u.staticMesh;
+    u.mode = mode;
+    u.testNow = now;
+    u.staticMesh = staticMesh;
+    const int r = FadeUnseenAfterTick(comp);
+    u.mode = savedMode;
+    u.testNow = nullptr;
+    u.staticMesh = savedSm;
+    return r;
+}
+
 void LogNpcPacingStats()
 {
     if (!g.installed) return;
@@ -1670,6 +3014,8 @@ void LogNpcPacingStats()
             Log("[pacing] PacingFadeAware: %llu units of far NPCs still invisible in their spawn fade-in waited; %llu released by "
                 "the re-check", static_cast<unsigned long long>(held), static_cast<unsigned long long>(released));
     }
+    LogFadeInUnseenStats();  // FadeInUnseen
+    LogShownHoldStats();  // PacingGateShownHoldMs (hold2; no line while nothing happened)
     uint64_t run[kNumTypes], def[kNumTypes], runAll = 0, defAll = 0;
     for (int i = 0; i < kNumTypes; ++i) {
         run[i] = s.run[i].exchange(0);
@@ -1708,6 +3054,52 @@ void LogNpcPacingStats()
             Log("[pacing] PacingLeanFlowDrain: %llu level flows at their wait bound drained the main queue only; %llu waiting "
                 "delegates stayed queued", static_cast<unsigned long long>(ld), static_cast<unsigned long long>(lk));
     }
+    {   // PacingFlowProgress
+        const uint64_t fl = s.flowLoadHeld.exchange(0), fg = s.flowLagHeld.exchange(0);
+        if (fl || fg)
+            Log("[pacing] PacingFlowProgress: level flows held past 3 frames %llu times while the queue's head create waited for "
+                "its loads, %llu times while creates ran with older OT frames owed", static_cast<unsigned long long>(fl),
+                static_cast<unsigned long long>(fg));
+    }
+    {   // PacingHairActor's fade rate
+        const uint64_t fr = s.fadeRate.exchange(0);
+        if (fr) Log("[pacing] PacingHairActor: %llu units ran ahead of the budget so that fading characters are built before "
+                    "they show (at most 2 and 16 ms a frame)", static_cast<unsigned long long>(fr));
+    }
+    {   // PacingBaseGate (gate2: per unit, hard bound)
+        const uint64_t held = s.gateHeld.exchange(0), ran = s.gateRan.exchange(0), sum = s.gateWaitSum.exchange(0);
+        const uint64_t late = s.gateLate.exchange(0), fitRuns = s.gateFit.exchange(0), calm = s.gateCalm.exchange(0);
+        const uint64_t turned = s.gateTurned.exchange(0), key0 = s.gateKey0.exchange(0), ageMax = s.gateAgeMax.exchange(0);
+        const uint64_t fit = s.gateFitFrames.exchange(0);
+        const uint64_t floorTicks = s.gateFloorTicks.exchange(0), floorActors = s.gateFloorActors.exchange(0);
+        const uint64_t floorMax = s.gateFloorMax.exchange(0);
+        s.gateDrain.exchange(0);
+        s.gateFallback.exchange(0);
+        const uint64_t over = s.gateOver.exchange(0), oSum = s.gateOverSum.exchange(0), uSum = s.gateUnderSum.exchange(0);
+        const uint64_t eMax = s.gateErrMax.exchange(0), forced = s.gateForced.exchange(0);
+        s.gateWaitMax.exchange(0);
+        uint64_t h[6];
+        for (int i = 0; i < 6; ++i) h[i] = s.gateWaitHist[i].exchange(0);
+        if (held || ran || late || fitRuns || calm)
+            Log("[pacing] PacingBaseGate %d ms (bound %d frames, calm below %.1f ms, near %d m): %llu far hidden units held, "
+                "%llu held units ran at an age of %.1f frames on average (<= 5: %llu, 6-15: %llu, 16-30: %llu, 31-60: %llu, "
+                "61-90: %llu, > 90: %llu; oldest %llu, past the bound %llu): %llu for room, %llu on a calm frame, %llu for the "
+                "bound, %llu once their actor could no longer wait, %llu before a key-0 unit; %llu frames with a fitting run "
+                "(busy above the target by > 1 ms: %llu, over the prediction %.2f ms per frame, max %.1f, under %.2f)",
+                g.gateUs.load() / 1000, g.gateBound.load(), g.gateCalmUs.load() / 1000.0, g.gateNearCm.load() / 100,
+                static_cast<unsigned long long>(held), static_cast<unsigned long long>(ran),
+                ran ? static_cast<double>(sum) / ran : 0.0, static_cast<unsigned long long>(h[0]),
+                static_cast<unsigned long long>(h[1]), static_cast<unsigned long long>(h[2]), static_cast<unsigned long long>(h[3]),
+                static_cast<unsigned long long>(h[4]), static_cast<unsigned long long>(h[5]), static_cast<unsigned long long>(ageMax),
+                static_cast<unsigned long long>(forced), static_cast<unsigned long long>(fitRuns),
+                static_cast<unsigned long long>(calm), static_cast<unsigned long long>(late), static_cast<unsigned long long>(turned),
+                static_cast<unsigned long long>(key0), static_cast<unsigned long long>(fit), static_cast<unsigned long long>(over),
+                fit ? oSum / 1000.0 / fit : 0.0, eMax / 1000.0, fit ? uSum / 1000.0 / fit : 0.0);
+        if (floorTicks)
+            Log("[pacing] PacingBaseGate: %llu far characters' fade-ins waited at the floor (dither 4) for their held steps, "
+                "%llu fade ticks, the longest %llu frames", static_cast<unsigned long long>(floorActors),
+                static_cast<unsigned long long>(floorTicks), static_cast<unsigned long long>(floorMax));
+    }
 }
 
 bool NpcPacingDistantUnit(uint64_t* ownerWeak, uint64_t* frame)
@@ -1726,6 +3118,7 @@ bool NpcPacingDistantUnit(uint64_t* ownerWeak, uint64_t* frame)
     *frame = g.frame;
     return *ownerWeak != 0;
 }
+
 
 bool NpcPacingStillDistant(uint64_t ownerWeak)
 {
@@ -1795,6 +3188,7 @@ bool NpcPacingInfo(NpcPacingInfoOut* out)
     out->flowReturn[1] = g.flowReturn[1];
     out->chooseWriter = reinterpret_cast<void*>(g.chooseWriter);
     out->numMaxTickSlots = g.numMaxTickSlots;
+    out->hairActorWeak = g.hairActorWeak;
     return true;
 }
 
@@ -1817,6 +3211,7 @@ void NpcPacingTestSetup(const NpcPacingTestFakes& f)
     if (f.weakGet) g.weakGet = reinterpret_cast<WeakGetFn>(f.weakGet);
     if (f.chooseWriter) g.chooseWriter = reinterpret_cast<ChooseWriterFn>(f.chooseWriter);
     if (f.rootOffset) { g.rootOffset = f.rootOffset; g.locationOffset = f.locationOffset; }
+    if (f.hairActorWeak) g.hairActorWeak = f.hairActorWeak;
     g.actorWorld = nullptr;  // fakes are never rendered
     g.outerOk = true;
     g.installed = true;
@@ -1838,6 +3233,9 @@ bool NpcPacingFadeInfo(uint32_t offsets[5], void** staticClass)
 void NpcPacingTestFade(const uint8_t* (*staticClass)()) { g.fadeClass = staticClass; }
 
 void NpcPacingTestRendered(bool (*rendered)(const void* actor)) { g.testRendered = rendered; }
+void NpcPacingTestFadeValue(float (*fade)(const void* actor)) { g.testFade = fade; }
+void NpcPacingTestGameValue(float (*value)(const void* actor)) { g.testGameValue = value; }
+float NpcPacingTestGatePeriodS() { return GatePeriodS(); }
 
 uint64_t NpcPacingFrame() { return g.frame; }  // RigTraceReuse's stats line
 

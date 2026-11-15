@@ -88,6 +88,23 @@ uint32_t g_leftAlonePriLogged = 0;
 int g_switchLogs = 0;
 unsigned g_addsLoading = 0, g_addsPlay = 0, g_sets = 0, g_loadings = 0;
 
+// StreamInBudget (worker gatefix 2026-11-12, from worker streambudget's measurements): the two stock per-frame budgets of
+// streaming in, s.AdaptiveAddToWorld.AddToWorldTimeSliceMax (the game's 4 ms) and s.AsyncLoadingTimeLimit (the game's
+// 5 ms), set lower while the player plays (key 1: 1 / 3 ms, key 2: 2 / 3 ms), the game's values in Altar's loading mode
+// and with key 0. Same rules as the granularity: set through IConsoleVariable::Set, only when the variable holds the game's
+// value or ours; a value set at the command line or the console, or any other value, is the player's and left alone.
+constexpr float kGameSlice = 4.0f, kGameAsync = 5.0f;
+constexpr uint32_t kSetByHotfix = 0x08000000u;  // at or above this (hotfix, command line, code, console): not ours to change
+std::atomic<int> g_budgetKey{0};
+void* g_slice = nullptr;  // IConsoleVariable* s.AdaptiveAddToWorld.AddToWorldTimeSliceMax
+void* g_async = nullptr;  // IConsoleVariable* s.AsyncLoadingTimeLimit
+bool g_budgetGaveUp = false;
+int g_budgetFindTries = 0;
+float g_sliceWritten = 0.0f, g_asyncWritten = 0.0f;  // the values we set last (0: none, or the game's put back)
+int g_budgetLoggedKey = 0;
+unsigned g_budgetSets = 0;
+int g_budgetLeftAloneLogs = 0;
+
 void** VTable(void* obj) { return *static_cast<void***>(obj); }
 uint32_t CvarFlags(void* c) { return reinterpret_cast<GetFlagsFn>(VTable(c)[kGetFlags / 8])(c); }
 int32_t CvarInt(void* c) { return reinterpret_cast<GetIntFn>(VTable(c)[kGetInt / 8])(c); }
@@ -144,6 +161,80 @@ bool FindCvars()
         g_gaveUp = true;
     }
     return false;
+}
+
+// StreamInBudget: its two console variables (game thread; SEH-guarded; retried for a while)
+bool FindBudgetCvars()
+{
+    if (g_slice && g_async) return true;
+    if (g_budgetGaveUp) return false;
+    __try {
+        void** const slot = SeparableSkinConsoleManager();
+        void* const manager = slot ? *slot : nullptr;
+        if (manager) {
+            const auto find = reinterpret_cast<FindCvarFn>(VTable(manager)[kFindVar / 8]);
+            void* const slice = find(manager, L"s.AdaptiveAddToWorld.AddToWorldTimeSliceMax", false);
+            void* const async = find(manager, L"s.AsyncLoadingTimeLimit", false);
+            if (slice && async) {
+                g_slice = slice;
+                g_async = async;
+                Log("[streambudget] console variables found: s.AdaptiveAddToWorld.AddToWorldTimeSliceMax %.2f ms (priority %u), "
+                    "s.AsyncLoadingTimeLimit %.2f ms (priority %u)", CvarFloat(slice), (CvarFlags(slice) & kSetByMask) >> 24,
+                    CvarFloat(async), (CvarFlags(async) & kSetByMask) >> 24);
+                return true;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log("[streambudget] fault while looking up the console variables: off");
+        g_budgetGaveUp = true;
+        return false;
+    }
+    if (++g_budgetFindTries >= 2000) {
+        Log("[streambudget] the console variables not found: off");
+        g_budgetGaveUp = true;
+    }
+    return false;
+}
+
+bool Near(float a, float b) { return a - b < 0.001f && b - a < 0.001f; }
+
+// One variable: the value the game should see now (want), set only over the game's value or ours, at the variable's own
+// priority (at least the project's) unless that is the player's (hotfix, command line, code, console)
+void BudgetVar(void* c, float game, float want, float& written, const char* name)
+{
+    const float now = CvarFloat(c);
+    if (Near(now, want)) return;
+    const uint32_t pri = CvarFlags(c) & kSetByMask;
+    const bool ours = written != 0.0f && Near(now, written);
+    if (pri >= kSetByHotfix || (!ours && !Near(now, game))) {
+        if (g_budgetLeftAloneLogs < 20) {
+            ++g_budgetLeftAloneLogs;
+            Log("[streambudget] %s is %.2f (priority %u; not the game's %.1f, not ours): left alone", name, now, pri >> 24, game);
+        }
+        written = 0.0f;
+        return;
+    }
+    wchar_t text[24];
+    swprintf(text, 24, L"%.3f", want);
+    reinterpret_cast<SetFn>(VTable(c)[kSet / 8])(c, text, pri > kSetByProjectSetting ? pri : kSetByProjectSetting);
+    ++g_budgetSets;
+    written = Near(want, game) ? 0.0f : want;
+    if (g_budgetSets <= 20 || (g_budgetSets % 100) == 0)
+        Log("[streambudget] %s %.2f -> %.2f ms (set #%u)", name, now, CvarFloat(c), g_budgetSets);
+}
+
+void BudgetApply(int key, bool loading)
+{
+    if (!FindBudgetCvars()) return;
+    if (key != g_budgetLoggedKey) {
+        g_budgetLoggedKey = key;
+        Log("[streambudget] StreamInBudget=%d (AddToWorld slice max %.2f ms, async loading limit %.2f ms now)", key,
+            CvarFloat(g_slice), CvarFloat(g_async));
+    }
+    const bool game = key == 0 || loading;
+    BudgetVar(g_slice, kGameSlice, game ? kGameSlice : key == 1 ? 1.0f : 2.0f, g_sliceWritten,
+              "s.AdaptiveAddToWorld.AddToWorldTimeSliceMax");
+    BudgetVar(g_async, kGameAsync, game ? kGameAsync : 3.0f, g_asyncWritten, "s.AsyncLoadingTimeLimit");
 }
 
 uint64_t AddHook(uint64_t world, uint64_t level, uint64_t xform, uint64_t a4, uint64_t a5, uint64_t a6, uint64_t a7, uint64_t a8)
@@ -264,9 +355,14 @@ void StreamGranBeforeAdd(bool considerTimeLimit)
 {
     if (!g_active || !considerTimeLimit) return;  // without the time limit the call registers everything (granularity 0)
     const int key = g_key.load(std::memory_order_relaxed);
-    if (key == 0 && g_written == 0) return;      // off and nothing of ours in place
+    const int budgetKey = g_budgetKey.load(std::memory_order_relaxed);
+    const bool granWork = !(key == 0 && g_written == 0);  // off and nothing of ours in place
+    const bool budgetWork = !(budgetKey == 0 && g_sliceWritten == 0.0f && g_asyncWritten == 0.0f);
+    if (!granWork && !budgetWork) return;
     if (!FindCvars()) return;
     __try {
+        if (budgetWork) BudgetApply(budgetKey, CvarFloat(g_limit) >= kLoadingLimitMs);  // StreamInBudget
+        if (!granWork) return;
         const bool loading = CvarFloat(g_limit) >= kLoadingLimitMs;
         if (loading != g_loading) {
             g_loading = loading;
@@ -332,9 +428,43 @@ void SetStreamRegisterGranularity(int value)
     }
 }
 
+// Monitor thread, once per second: StreamInBudget (live; 0 off, 1 = slice 1 / async 3 ms, 2 = slice 2 / async 3 ms); applied
+// by the game thread at the next AddToWorld call (the AddToWorld hook is installed at start-up when either key is on).
+void SetStreamInBudget(int value)
+{
+    if (value < 0 || value > 2) value = 0;
+    const int before = g_budgetKey.exchange(value, std::memory_order_relaxed);
+    if (value != 0 && !g_active && before != value) {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            Log("[streambudget] StreamInBudget=%d: not active (needs the AddToWorld hook, installed at start-up with this key or "
+                "StreamRegisterGranularity on; %s)", value, g_installTried ? "it was not: see the [streamgran] lines" : "restart the game");
+        }
+    }
+}
+
+void StreamBudgetTestSetup(void* slice, void* async)
+{
+    g_slice = slice;
+    g_async = async;
+    g_sliceWritten = g_asyncWritten = 0.0f;
+    g_budgetKey.store(0);
+    g_budgetLoggedKey = 0;
+    g_budgetGaveUp = false;
+    g_budgetFindTries = 0;
+}
+
 void StreamGranLogStats()
 {
     if (!g_active) return;
+    {   // StreamInBudget: only when its sets changed
+        static unsigned lastBudgetSets = 0;
+        if (g_budgetSets != lastBudgetSets) {
+            lastBudgetSets = g_budgetSets;
+            Log("[streambudget] stats: %u sets, key %d", g_budgetSets, g_budgetKey.load(std::memory_order_relaxed));
+        }
+    }
     // only when something changed since the last line (rev130m SG-N1); the counters are the game thread's, read unlocked
     static unsigned lastLoadings = ~0u, lastPlay = ~0u, lastLoading = ~0u, lastSets = ~0u;
     static int lastKey = -1;

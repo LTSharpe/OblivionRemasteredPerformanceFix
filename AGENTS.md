@@ -23,6 +23,10 @@ then open only the doc or source file you need. Plain-language overview: [README
   made in a menu; only with `SaveThumbLeftoverFix=0` or on the OBSE route, as the fix removes them; they get the menu
   picture a few frames later, or none if it drops, in a finished save's buffer that nothing reads; the menu picture
   itself stays identical).
+  New in 1.5.0, timing only or equivalent: `CellEvictSplit` (a busy cell's characters behind the player are unloaded over
+  a few old-engine frames, in the game's order), `PacingGateShownHoldMs` (a far character held by the pacing starts its
+  fade-in once its build has run, at most about 1 s later; its AI start does not move), `FadeInUnseen` (a far character
+  not drawn yet skips its first second of full-rate animation, so its pose at first sight can differ).
   `FarPawnMoveHalfRate` / `FarHorseMove` are **not identical** (user decision, on by default, switchable off): calm
   pawns and horses >= 100 m away move at `FarPawnMoveHz` (30) with the skipped frames' time summed, as on a 30 fps PC.
   A fix whose code does not match switches itself off and logs why.
