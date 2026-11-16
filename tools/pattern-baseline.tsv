@@ -344,6 +344,17 @@ npcs/ot_frame_trim.cpp:kPoll:0a66c41650	1	npcs/ot_frame_trim.cpp:57
 npcs/ot_frame_trim.cpp:kLists:4b79e4d0d1	1	npcs/ot_frame_trim.cpp:62
 npcs/ot_frame_trim.cpp:kCheck:681c7321e1	1	npcs/ot_frame_trim.cpp:68
 npcs/ot_frame_trim.cpp:kTimer:dbeb0c9576	1	npcs/ot_frame_trim.cpp:73
+npcs/perception_los_prefetch.cpp:kRound:8c936c4810	1	npcs/perception_los_prefetch.cpp:67
+npcs/perception_los_prefetch.cpp:kLoop:532d56e9e0	1	npcs/perception_los_prefetch.cpp:72
+npcs/perception_los_prefetch.cpp:kSelfRoot:0a99201a04	9+	npcs/perception_los_prefetch.cpp:78
+npcs/perception_los_prefetch.cpp:kCall:2f0ff006c6	1	npcs/perception_los_prefetch.cpp:80
+npcs/perception_los_prefetch.cpp:kJoin:fa3ffc1d0e	1	npcs/perception_los_prefetch.cpp:85
+npcs/perception_los_prefetch.cpp:kHelper:8c15966a25	1	npcs/perception_los_prefetch.cpp:88
+npcs/perception_los_prefetch.cpp:kFov:c48573aec2	1	npcs/perception_los_prefetch.cpp:100
+npcs/perception_los_prefetch.cpp:kFovGetter:1338c666e5	2	npcs/perception_los_prefetch.cpp:106
+npcs/perception_los_prefetch.cpp:kFovTailBytes:d1814a0a21	1	npcs/perception_los_prefetch.cpp:107
+npcs/perception_los_prefetch.cpp:kGather:976163d2ca	1	npcs/perception_los_prefetch.cpp:116
+npcs/perception_los_prefetch.cpp:kMalloc:90910fe57d	1	npcs/perception_los_prefetch.cpp:123
 npcs/repath_parallel.cpp:kImplA:31a9505dd4	1	npcs/repath_parallel.cpp:67
 npcs/repath_parallel.cpp:kImplB:fcccd1bf88	1	npcs/repath_parallel.cpp:75
 npcs/repath_parallel.cpp:kStaticC:77b18b73e5	1	npcs/repath_parallel.cpp:82

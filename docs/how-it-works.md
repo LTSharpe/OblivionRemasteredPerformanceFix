@@ -1456,6 +1456,38 @@ searches on the game thread as before. Off on PCs with fewer than 8 usable logic
 already runs such searches on other threads for its background path finding. In a proof build 11 of 11 compared
 results were identical. `RepathParallel=0` turns it off (live; installed at start-up).
 
+### Characters' sight lines worked out on helper threads (`PerceptionLosPrefetch`, equivalent, off by default)
+
+**The problem.** Five times a second every character looks around: for each character in front of it and within its
+range, the game checks whether it can see it, with up to three sight lines (to the body, then to two points of the
+skeleton), one after the other on the game's main thread. In a crowd of 40 soldiers or a battle of 76 characters this is
+the largest single item of that thread: a soldier's round takes 0.4 to 0.9 ms, and several rounds run in each frame.
+
+*Analogy:* a guard who checks each window of a corridor one by one, when three colleagues could look through them at
+the same time and just tell him what they saw.
+
+**What we did.** When a round starts, right after the game has listed the characters around, the fix picks the ones the
+round's loop will check, with the same tests the loop makes (the kind of character, not itself, within range computed
+from the same values in the same order, in front of it with the game's own field-of-view test), and works out their sight
+lines on four helper threads with the game's own sight-line code. Then the game's loop runs as always, in its own order;
+each time it asks for a sight line, it gets the answer already worked out for that pair, or waits for that one answer
+if it is not ready yet. Anything the fix did not prepare (another kind of round, other arguments) runs the game's own
+code. Rounds of the player (which look along the camera) are left as they are.
+
+**Why the game can't change.** The sight-line code only reads the world. Between the moment the fix works an answer out
+and the moment the loop asks for it, the round itself only sorts characters, notes who it saw in its own list and sends
+messages to the old engine; none of that moves anyone or changes what a sight line sees. Other threads (animation,
+physics) run during the game's own round too, so an answer worked out a moment earlier can only differ by a race the
+game itself does not order (the same reasoning as `RigTraceReuse`). We checked it with a mode that runs the game's own
+check anyway and compares: 0 differences in over 1.1 million sight lines, in the crowd and in the battle.
+`PerceptionLosPrefetch=2` runs that check (results in the `[perclos]` log line).
+
+**Measured** (one PC: Ryzen 7 5800X3D, RTX 5080; `-Scenario actors -Scenes actors-crowd,actors-battle`, A-B-B-A in one
+game). 4K with FSR Performance, no frame generation: the main thread's work per frame 60 -> 41 ms in the battle (14 -> 20
+fps) and 19.5 -> 17.8 ms in the crowd. In the small window, a soldier's round 750-900 -> 205-230 us in the battle and
+400-450 -> 135-150 us in the crowd. Off by default until reviewed; off on PCs with fewer than 8 usable logical
+processors. With OBSE64 it is not available (the log says so).
+
 ### Far-away calm characters and horses move in 30 steps a second (`FarPawnMoveHalfRate`, `FarHorseMove`, not identical)
 
 **The problem.** Every character's movement update (walking along its route, staying on the ground) runs every frame,

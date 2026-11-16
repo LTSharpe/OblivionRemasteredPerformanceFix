@@ -9,6 +9,20 @@ Downloads, checksums and build attestations: https://github.com/LTSharpe/Oblivio
 Bug fixes say whose bug it was: **game bug** = also happens without OblivionPerfFix (in the game, its engine or a
 driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 
+## Unreleased
+- **New, off by default: `PerceptionLosPrefetch`.** Five times a second every character checks the line of sight to
+  each character in front of it and in range (up to three sight lines per pair), one after the other on the game's main
+  thread; in crowds and battles that is the largest single item of that thread. This works the round's sight lines out on
+  4 helper threads first (with the game's own field-of-view test, so nothing is traced for nothing) and hands each answer
+  to the game's own loop, in its own order, when it asks; the loop starts before all are done. Equivalent: nothing the
+  round does between the two can move anyone or change what a sight line sees. `PerceptionLosPrefetch=2` checks only
+  (the game's check runs too; differences are counted in the `[perclos]` line): 0 differences in over 1.1 million
+  checked sight lines. Ours, one PC (Ryzen 7 5800X3D, RTX 5080), `-Scenario actors -Scenes actors-crowd,actors-battle`,
+  A-B-B-A in one game: at 4K (`native-nofg`: FSR Performance, no frame generation) the main thread's work per frame
+  60.3 / 59.5 -> 39.6 / 42.2 ms in the 76-character battle (13.7-14.2 -> 19.0-20.8 fps) and 19.4 / 19.6 -> 17.2 / 18.5 ms
+  in the 40-soldier crowd; a soldier's perception round 750-900 -> 205-230 us (battle) and 400-450 -> 135-150 us (crowd)
+  in the `small` profile. Off below 8 usable logical processors; not on the OBSE64 route.
+
 ## 1.5.0-beta
 2026-11-15. For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Numbers marked "ours" are from our
 test PC (Ryzen 7 5800X, RX 9070 XT: one PC with an AMD graphics card; nothing here was tested on an NVIDIA card).

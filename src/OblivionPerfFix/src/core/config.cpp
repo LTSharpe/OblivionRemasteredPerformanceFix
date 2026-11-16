@@ -148,6 +148,13 @@ Config LoadConfig(const wchar_t* iniPath)
     c.rigTraceReuse = get(L"Fixes", L"RigTraceReuse", c.rigTraceReuse);
     if (c.rigTraceReuse < 0 || c.rigTraceReuse > 2) c.rigTraceReuse = 1;  // 0 off, 1 on, 2 verify; anything else = on
     c.rigImportTemplate = get(L"Fixes", L"RigImportTemplate", c.rigImportTemplate);  // 0 off, else on (lab: 2 verify)
+    c.perceptionLosPrefetch = get(L"Fixes", L"PerceptionLosPrefetch", c.perceptionLosPrefetch);
+    if (c.perceptionLosPrefetch < 0 || c.perceptionLosPrefetch > 2) c.perceptionLosPrefetch = 0;  // 0 off, 1 on, 2 verify; else off
+    c.perceptionLosPrefetchMin = get(L"Fixes", L"PerceptionLosPrefetchMin", c.perceptionLosPrefetchMin);
+    c.perceptionLosPrefetchThreads = get(L"Fixes", L"PerceptionLosPrefetchThreads", c.perceptionLosPrefetchThreads);
+    c.perceptionLosPrefetchOverlap = get(L"Fixes", L"PerceptionLosPrefetchOverlap", c.perceptionLosPrefetchOverlap) != 0;
+    c.perceptionLosIgnoreCache = get(L"Fixes", L"PerceptionLosIgnoreCache", c.perceptionLosIgnoreCache) != 0;
+    c.perceptionLosCrossRound = get(L"Fixes", L"PerceptionLosCrossRound", c.perceptionLosCrossRound) != 0;
     c.chaosMaxPayloadSize = get(L"Fixes", L"ChaosMaxPayloadSize", c.chaosMaxPayloadSize);
     c.osPageCache = get(L"Fixes", L"OsPageCache", c.osPageCache);
     c.osPageCacheMB = get(L"Fixes", L"OsPageCacheMB", c.osPageCacheMB);

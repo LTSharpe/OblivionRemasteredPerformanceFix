@@ -281,6 +281,19 @@ struct Config {
     int rigTraceReuse = 1;               // RigTraceReuse: npcs/rig_trace_reuse.cpp, a Control Rig sphere trace repeated with identical
                                          // inputs inside one rig execution reuses its result (equivalent): 1 on, 2 verify (runs and
                                          // compares), 0 off; installed only if not 0 at start-up (version.dll route), then live
+    int perceptionLosPrefetch = 0;       // PerceptionLosPrefetch: npcs/perception_los_prefetch.cpp, a perception round's line-of-sight
+                                         // checks precomputed on helper threads and served in the game's order (equivalent): 1 on,
+                                         // 2 verify, 0 off (default off until reviewed); installed only if not 0 at start-up
+                                         // (version.dll route), then live; off while ParallelHelpersAllowed is false
+    int perceptionLosPrefetchMin = 4;    // not in the shipped ini: precomputed checks needed for a batch (live)
+    int perceptionLosPrefetchThreads = 4;  // not in the shipped ini: helper threads, 0..8 (start-up)
+    bool perceptionLosPrefetchOverlap = true;   // not in the shipped ini: the loop starts before the batch is done, a round-end
+                                                // join waits for the rest (live; 2026-11-14 A-B-B-A x2: -24 % per round in
+                                                // the battle, -10 % in the crowd, 0 differences in 1.1 M verified checks)
+    bool perceptionLosIgnoreCache = false;      // not in the shipped ini: the NPC's two ignore-list gathers once per batched round
+                                                // (the helper's NPC calls get a copy; needs the round-end join; live)
+    bool perceptionLosCrossRound = false;       // not in the shipped ini, experimental: the first round of a frame also precomputes
+                                                // the NPCs expected later in that frame (live; needs NpcCreationPacing's frame count)
     int rigImportTemplate = 1;           // RigImportTemplate: npcs/rig_import_template.cpp, the first bone import of a new rig is a copy
                                          // of a stored identical import (equivalent), RemoveElement guard; 1 on, 0 off (lab: 2 verify);
                                          // installed only if not 0 at start-up (version.dll route), then live
@@ -1338,6 +1351,26 @@ void RigTraceTestSetReuse(bool on);                               // self-test o
 uint64_t RigTraceTestReused();                                    // self-test only
 void RigTraceTestSetMode(int mode);                               // self-test only: 0 off, 1 reuse, 2 verify
 uint64_t RigTraceTestVerified(uint64_t* diff);                    // self-test only: verified repeats (and how many differed)
+// perception_los_prefetch.cpp (PerceptionLosPrefetch, default off): a perception round's line-of-sight checks precomputed
+// on helper threads at the round's start, served to the game's loop in its own order (equivalent)
+bool InstallPerceptionLosPrefetch(bool beforeGameCode, int threads);  // start-up only (version.dll route)
+void SetPerceptionLosPrefetch(int mode, int minJobs, bool helpersAllowed, bool overlap, bool ignoreCache, bool crossRound);  // live
+void PerceptionLosTestSetCross(bool on, uint64_t (*frameFn)());                   // self-test only
+void PerceptionLosTestCrossCounts(uint64_t* npcs, uint64_t* rounds, uint64_t* served);  // self-test only
+void PerceptionLosTestGatherSites(const GameModule& game, uint32_t* att, uint32_t* child);  // self-test: the NPC gathers' RVAs
+void PerceptionLosTestSetCache(void* fakeAttached, void* fakeChild, void* fakeMalloc, bool on);  // self-test only
+void PerceptionLosTestGather(uint8_t* actor, void* out, bool child);                           // self-test only
+void PerceptionLosTestCacheCounts(uint64_t* served, uint64_t* verified, uint64_t* diff);        // self-test only
+void PerceptionLosTestSetOverlap(bool on);  // self-test only: the overlap with a stand-in round-end hook
+bool PerceptionLosTestJoin();               // self-test only: the round-end join (true = a batch was open)
+uint32_t PerceptionLosTestJoinSite(const GameModule& game);  // self-test: the round-end join's call site RVA (0 = not found)
+void LogPerceptionLosPrefetchStats();
+const char* PerceptionLosTestDiscover(const GameModule& game, uint32_t* round, uint32_t* callSite, uint32_t* helper,
+                                      uint32_t* fov);  // self-test: nullptr = found (fov 0 = the field-of-view filter not found)
+void PerceptionLosTestSetup(void* fakeHelper, void* fakeClass, void* fakeFov, float rangeConst, int mode, int minJobs, int threads);  // self-test only
+void PerceptionLosTestPrefetch(uint8_t* self, const uint8_t* list, const uint8_t* settings);                          // self-test only
+uint8_t PerceptionLosTestCall(uint8_t* self, uint8_t* other, uint8_t* out, int tries, uint8_t flag);                 // self-test only
+void PerceptionLosTestCounts(uint64_t* served, uint64_t* verified, uint64_t* diff, uint64_t* fallback, uint64_t* jobs);  // self-test only
 // rig_import_template.cpp (RigImportTemplate, public since 1.3.0): the first bone import of a new rig is a copy of a stored
 // identical import (equivalent); RemoveElement's DestroyElement call guarded so a copied block is never freed under live elements
 bool InstallRigImportTemplate(bool beforeGameCode);  // start-up only (version.dll route); the guard first
