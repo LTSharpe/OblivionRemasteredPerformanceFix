@@ -320,7 +320,7 @@ bool InstallRayTracingBuildBatch(bool beforeGameCode)
     g_region = AllocNearGame(64);
     if (!g_region) return Fail("no memory near the game");
     auto failFree = [](const char* why) {   // nothing points at the region yet: give it back
-        VirtualFree(g_region, 0, MEM_RELEASE);
+        FreeOwnCode(g_region);
         g_region = nullptr;
         return Fail(why);
     };

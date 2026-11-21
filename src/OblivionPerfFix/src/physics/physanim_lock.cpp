@@ -125,12 +125,12 @@ bool InstallPhysAnimNoEmptyLock(bool beforeGameCode)
         return Fail("GetBoneSpaceTransforms does not start with the pending-task check");
     const uint32_t taskOff = *reinterpret_cast<const uint32_t*>(bone + kTaskOff);
     if (taskOff < 0x100 || taskOff > 0x4000) return Fail("unexpected parallel evaluation task offset");
-    if (!beforeGameCode) return Fail("only installed when the game starts (version.dll route; not on the OBSE64 route)");
+    if (!beforeGameCode) return Fail("only installed when the game starts (loaded late here)");
     // region: [0,16) jmp to the hook; [16,48) trampoline = the 9-byte prologue + jmp back to site+9
     uint8_t* const region = AllocNearGame(64);
     if (!region) return Fail("no free memory near the game's code");
     const int64_t rel = region - (site + 5);
-    if (rel != static_cast<int32_t>(rel)) { VirtualFree(region, 0, MEM_RELEASE); return Fail("the hook is out of reach"); }
+    if (rel != static_cast<int32_t>(rel)) { FreeOwnCode(region); return Fail("the hook is out of reach"); }
     const uint8_t jmpAbs[6] = {0xFF, 0x25, 0, 0, 0, 0};
     void* const hook = reinterpret_cast<void*>(&UpdateHook);
     memcpy(region, jmpAbs, sizeof jmpAbs);
@@ -142,7 +142,7 @@ bool InstallPhysAnimNoEmptyLock(bool beforeGameCode)
     memcpy(tramp + kPrologue + sizeof jmpAbs, &back, sizeof back);
     DWORD old;
     if (!VirtualProtect(region, 64, PAGE_EXECUTE_READ, &old)) {
-        VirtualFree(region, 0, MEM_RELEASE);
+        FreeOwnCode(region);
         return Fail("could not make the trampoline executable");
     }
     FlushInstructionCache(GetCurrentProcess(), region, 64);
@@ -157,7 +157,7 @@ bool InstallPhysAnimNoEmptyLock(bool beforeGameCode)
     if (!WriteCode(site, bytes)) {
         g_game = nullptr;
         g_tramp = nullptr;
-        VirtualFree(region, 0, MEM_RELEASE);
+        FreeOwnCode(region);
         return Fail("could not patch the function");
     }
     g_installed = true;

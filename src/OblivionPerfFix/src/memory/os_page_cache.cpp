@@ -8,6 +8,8 @@
 // This file detours the two OS entry points (FPlatformMemory::BinnedAllocFromOS = VirtualAlloc(MEM_COMMIT|MEM_RESERVE,
 // PAGE_READWRITE), BinnedFreeToOS = VirtualFree(MEM_RELEASE); both two-instruction thunks through the exe's imports).
 // With the cache off the detours call the same import slots with the same arguments (the game's behaviour).
+// OsPageCacheAsyncRelease (live, default off): the releases the cache does not keep are made by one background thread
+// instead of the game's thread (the queue below MaxBlock).
 //
 #include "common.h"
 
@@ -104,6 +106,236 @@ int g_mode = 0;
 
 uint64_t MaxBlock(uint64_t cap) { return (std::min)(16ull << 20, cap / 8); }
 
+// ---- OsPageCacheAsyncRelease: the releases the game's threads make, handed to one background thread ----
+// BinnedFreeToOS is always VirtualFree(p, 0, MEM_RELEASE) of a whole block the manager has finished with (its callers,
+// above, pass the block's own size); the manager has already taken it out of its own accounting before the call, and no
+// code of the game touches the range again. With the key on (and the cache on, no MemoryRelief relief), the blocks a
+// game thread would release here (the cache's evictions in Put, the blocks it does not keep in FreeCore) go into a
+// first-in-first-out queue, and one thread releases them in that order with the same call. Until then Windows keeps the
+// range reserved, so it cannot hand the same addresses to anyone else: only the moment the memory goes back changes.
+// - Bounds: at most kAsyncBlocks blocks and kAsyncBytes bytes queued (64 MB: a release thread that gets no CPU for a while
+//   keeps at most that much extra committed); a release that does not fit is made at once on
+//   the calling thread (as the game does), as is one that finds the queue's lock busy for a few microseconds (the lock
+//   is only ever held for one entry's copy; a thread ended inside it at the process's exit must not hang the others).
+// - Drained (released at once, on the calling thread): when a request to Windows fails (then retried), when MemoryRelief
+//   reports RAM or commit short, and when either key is switched off. The thread is started at the first switch-on and
+//   never ends: whatever is queued is released by it or by a drain. At the process's end Windows takes the whole address
+//   space back, queued ranges included, so nothing waits there. While memory is low (OsPageCacheMemoryLow: MemoryRelief's
+//   latest one-second sample has less than twice its RAM or commit threshold free, without its 3-second rule) every
+//   release is made at once and the tick drains the queue. After OsPageCacheAsyncPause (a crash being written) the
+//   thread releases nothing more and new releases are made at once again.
+// - Priority: normal. VirtualFree holds the process's address-space lock, which page faults and VirtualAlloc of the
+//   game's threads also take; a lower priority could leave it preempted while holding it. The CPU time is the same the
+//   game's thread spent on the call before.
+constexpr uint32_t kAsyncBlocks = 4096;
+constexpr uint64_t kAsyncBytes = 64ull << 20;  // the cache's own default cap
+struct AsyncEntry {
+    void* ptr;
+    uint64_t bytes;
+    uint64_t qpc;  // when it was queued
+};
+struct AsyncQueue {
+    SRWLOCK lock = SRWLOCK_INIT;
+    AsyncEntry e[kAsyncBlocks];
+    uint32_t head = 0, count = 0;  // head = the oldest entry
+    uint64_t bytes = 0;
+};
+AsyncQueue g_q;
+std::atomic<uint32_t> g_qLen{0};  // g_q.count, readable without the lock
+std::atomic<bool> g_asyncKey{false};  // the ini key
+std::atomic<bool> g_asyncOn{false};   // the key, the cache on, no relief, the thread running, not paused
+std::atomic<bool> g_asyncPaused{false};
+std::atomic<bool> g_asyncHold{false};  // self-test only: the thread takes nothing
+std::atomic<bool> g_asyncLow{false};   // memory low (OsPageCacheMemoryLow): releases at once
+std::atomic<uint32_t> g_inFlight{0};   // entries taken off the queue and not yet released (0 or 1: the thread takes one at a time)
+HANDLE g_asyncWake = nullptr;
+bool g_asyncThread = false;
+bool g_asyncEverOn = false;
+LARGE_INTEGER g_asyncFreq{};
+std::atomic<uint64_t> g_aQueued{0}, g_aQueuedBytes{0}, g_aReleased{0}, g_aDrained{0}, g_aFullBlocks{0}, g_aFullBytes{0},
+    g_aBusy{0}, g_aPaused{0}, g_aMaxBlocks{0}, g_aMaxBytes{0}, g_aMaxWaitUs{0}, g_aDrains{0}, g_aDrainBusy{0}, g_aOffWait{0},
+    g_aLow{0}, g_aThreadUs{0}, g_aThreadMaxUs{0};
+
+void StoreMax(std::atomic<uint64_t>& m, uint64_t v)
+{
+    uint64_t c = m.load(std::memory_order_relaxed);
+    while (v > c && !m.compare_exchange_weak(c, v, std::memory_order_relaxed)) {}
+}
+
+// The queue's lock for a game thread: a few microseconds of tries, never a wait.
+bool TryLockQueue()
+{
+    for (int i = 0; i < 256; ++i) {
+        if (TryAcquireSRWLockExclusive(&g_q.lock)) return true;
+        YieldProcessor();
+    }
+    return false;
+}
+
+uint64_t QpcNow()
+{
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    return static_cast<uint64_t>(t.QuadPart);
+}
+
+// A block the game's thread is done with: queued for the release thread, or released now. Same result as g_osFree for
+// every argument (a null pointer is passed on: VirtualFree fails for it as it does for the game).
+BOOL OsRelease(void* ptr, uint64_t bytes)
+{
+    if (!ptr) return g_osFree(ptr);
+    if (!g_asyncOn.load(std::memory_order_relaxed)) {
+        if (g_asyncPaused.load(std::memory_order_relaxed)) g_aPaused.fetch_add(1, std::memory_order_relaxed);
+        return g_osFree(ptr);
+    }
+    if (g_asyncLow.load(std::memory_order_relaxed)) {
+        g_aLow.fetch_add(1, std::memory_order_relaxed);
+        return g_osFree(ptr);
+    }
+    if (!TryLockQueue()) {
+        g_aBusy.fetch_add(1, std::memory_order_relaxed);
+        return g_osFree(ptr);
+    }
+    bool wake = false, queued = false;
+    if (!g_asyncOn.load(std::memory_order_relaxed)) {
+        // switched off (or paused) while waiting for the lock: as the game
+        if (!g_asyncPaused.load(std::memory_order_relaxed)) g_aOffWait.fetch_add(1, std::memory_order_relaxed);
+    } else if (g_q.count >= kAsyncBlocks) {
+        g_aFullBlocks.fetch_add(1, std::memory_order_relaxed);
+    } else if (g_q.bytes + bytes > kAsyncBytes) {
+        g_aFullBytes.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        AsyncEntry& e = g_q.e[(g_q.head + g_q.count) % kAsyncBlocks];
+        e.ptr = ptr;
+        e.bytes = bytes;
+        e.qpc = QpcNow();
+        wake = g_q.count == 0;
+        ++g_q.count;
+        g_q.bytes += bytes;
+        g_qLen.store(g_q.count, std::memory_order_relaxed);
+        StoreMax(g_aMaxBlocks, g_q.count);
+        StoreMax(g_aMaxBytes, g_q.bytes);
+        queued = true;
+    }
+    ReleaseSRWLockExclusive(&g_q.lock);
+    if (!queued) {
+        if (g_asyncPaused.load(std::memory_order_relaxed)) g_aPaused.fetch_add(1, std::memory_order_relaxed);
+        return g_osFree(ptr);
+    }
+    g_aQueued.fetch_add(1, std::memory_order_relaxed);
+    g_aQueuedBytes.fetch_add(bytes, std::memory_order_relaxed);
+    if (wake && g_asyncWake) SetEvent(g_asyncWake);
+    return TRUE;  // VirtualFree(MEM_RELEASE) of a block the manager allocated succeeds; the manager ignores the result
+}
+
+// Takes the oldest entry (lock held by the caller).
+AsyncEntry PopLocked()
+{
+    AsyncEntry e = g_q.e[g_q.head];
+    g_q.head = (g_q.head + 1) % kAsyncBlocks;
+    --g_q.count;
+    g_q.bytes -= e.bytes;
+    g_qLen.store(g_q.count);
+    return e;
+}
+
+void NoteWait(const AsyncEntry& e)
+{
+    const uint64_t now = QpcNow();
+    if (g_asyncFreq.QuadPart && now > e.qpc)
+        StoreMax(g_aMaxWaitUs, QpcToMicroseconds(now - e.qpc, static_cast<uint64_t>(g_asyncFreq.QuadPart)));
+}
+
+// Everything queued, released now on the calling thread, oldest first. failedRequest (a game thread whose request to
+// Windows failed): the lock only if free within a few microseconds, and a wait of at most 100 ms for the entry the thread
+// is releasing, so that its address space is back too. Otherwise (the 1-second tick) the lock is waited for.
+uint64_t DrainQueue(bool failedRequest)
+{
+    uint64_t n = 0;
+    for (;;) {
+        AsyncEntry batch[64];
+        int k = 0;
+        if (!failedRequest) AcquireSRWLockExclusive(&g_q.lock);
+        else if (!TryLockQueue()) {
+            g_aDrainBusy.fetch_add(1, std::memory_order_relaxed);
+            break;
+        }
+        while (k < 64 && g_q.count) batch[k++] = PopLocked();
+        ReleaseSRWLockExclusive(&g_q.lock);
+        for (int i = 0; i < k; ++i) {
+            NoteWait(batch[i]);
+            g_osFree(batch[i].ptr);
+        }
+        n += k;
+        if (k < 64) break;
+    }
+    if (failedRequest)
+        for (int i = 0; i < 100 && g_inFlight.load(std::memory_order_acquire); ++i) Sleep(1);
+    if (n) {
+        g_aDrained.fetch_add(n, std::memory_order_relaxed);
+        g_aDrains.fetch_add(1, std::memory_order_relaxed);
+    }
+    return n;
+}
+
+DWORD WINAPI ReleaseThread(void*)
+{
+    for (;;) {
+        WaitForSingleObject(g_asyncWake, 1000);
+        while (!g_asyncPaused.load(std::memory_order_relaxed) && !g_asyncHold.load(std::memory_order_relaxed)) {
+            AcquireSRWLockExclusive(&g_q.lock);
+            if (!g_q.count) {
+                ReleaseSRWLockExclusive(&g_q.lock);
+                break;
+            }
+            g_inFlight.store(1);  // before the queue shows empty (OsPageCacheTestWaitIdle, the failed-request drain)
+            const AsyncEntry e = PopLocked();
+            ReleaseSRWLockExclusive(&g_q.lock);
+            NoteWait(e);
+            const uint64_t t0 = QpcNow();
+            g_osFree(e.ptr);
+            const uint64_t t1 = QpcNow();
+            if (g_asyncFreq.QuadPart && t1 > t0) {  // the thread's own time in the call (the test's reading)
+                const uint64_t us = QpcToMicroseconds(t1 - t0, static_cast<uint64_t>(g_asyncFreq.QuadPart));
+                g_aThreadUs.fetch_add(us, std::memory_order_relaxed);
+                StoreMax(g_aThreadMaxUs, us);
+            }
+            g_aReleased.fetch_add(1, std::memory_order_relaxed);
+            g_inFlight.store(0);
+        }
+    }
+}
+
+bool StartReleaseThread()
+{
+    if (g_asyncThread) return true;
+    QueryPerformanceFrequency(&g_asyncFreq);
+    if (!g_asyncWake) g_asyncWake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!g_asyncWake) return false;
+    HANDLE t = CreateThread(nullptr, 64 * 1024, ReleaseThread, nullptr, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
+    if (!t) return false;
+    DescribeThread(t, L"OblivionPerfFix OS release");
+    CloseHandle(t);
+    g_asyncThread = true;
+    return true;
+}
+
+// Applies the key with the cache's own state (SetOsPageCache); a switch-off drains on the calling thread (the 1-second tick).
+void ApplyAsync(bool cacheOn)
+{
+    const bool want = g_asyncKey.load() && cacheOn && !g_asyncPaused.load();
+    if (want && !g_asyncThread && !StartReleaseThread()) {
+        static bool logged = false;
+        if (!logged) Log("[oscache] OsPageCacheAsyncRelease: the release thread could not be started, releases stay on the calling thread");
+        logged = true;
+        return;
+    }
+    g_asyncOn.store(want);
+    if (want) g_asyncEverOn = true;
+    if ((!want || g_asyncLow.load()) && !g_asyncPaused.load())
+        DrainQueue(false);  // off or memory low: everything queued goes now (also a release that raced the switch)
+}
+
 void ResetCache(Cache& c)
 {
     c.freeNodes = kNil;
@@ -172,6 +404,7 @@ bool Put(void* ptr, uint64_t size)
     if (!ptr || size < 4096 || (size & 4095) || size > MaxBlock(cap)) return false;
     Cache& c = *g_cache;
     void* evict[kMaxEvict + 2];
+    uint64_t evictBytes[kMaxEvict + 2];  // their sizes (OsPageCacheAsyncRelease's byte bound)
     int ne = 0;
     bool kept = true;
     const uint64_t now = g_nowMs();
@@ -181,6 +414,7 @@ bool Put(void* ptr, uint64_t size)
         kept = false;
     } else {
         if (c.freeNodes == kNil) {  // no node left: the oldest block goes
+            evictBytes[ne] = c.nodes[c.oldest].bytes;
             evict[ne++] = c.nodes[c.oldest].ptr;
             Unlink(c, c.oldest);
             g_evictRoom.fetch_add(1, std::memory_order_relaxed);
@@ -207,12 +441,14 @@ bool Put(void* ptr, uint64_t size)
         ++c.count;
         // one size holds at most half the cap: its oldest blocks go first
         while (b.bytes > cap / 2 && b.oldest != i && ne < kMaxEvict) {
+            evictBytes[ne] = c.nodes[b.oldest].bytes;
             evict[ne++] = c.nodes[b.oldest].ptr;
             Unlink(c, b.oldest);
             g_evictSize.fetch_add(1, std::memory_order_relaxed);
         }
         // the cap: the oldest blocks go
         while (c.held > cap && c.oldest != i && ne < kMaxEvict) {
+            evictBytes[ne] = c.nodes[c.oldest].bytes;
             evict[ne++] = c.nodes[c.oldest].ptr;
             Unlink(c, c.oldest);
             g_evictCap.fetch_add(1, std::memory_order_relaxed);
@@ -224,7 +460,7 @@ bool Put(void* ptr, uint64_t size)
         if (c.held > c.peak) c.peak = c.held;
     }
     ReleaseSRWLockExclusive(&c.lock);
-    for (int k = 0; k < ne; ++k) g_osFree(evict[k]);
+    for (int k = 0; k < ne; ++k) OsRelease(evict[k], evictBytes[k]);
     return kept;
 }
 
@@ -262,8 +498,10 @@ void* AllocCore(SIZE_T size, bool cachePath)
         g_missBytes.fetch_add(size, std::memory_order_relaxed);
     }
     void* p = g_osAlloc(size);
-    if (!p && g_cache && g_cache->count) {  // out of memory or address space: what the cache holds goes back, once more
+    // out of memory or address space: what the cache holds and what waits in the release queue go back, then once more
+    if (!p && ((g_cache && g_cache->count) || g_qLen.load(std::memory_order_relaxed) || g_inFlight.load(std::memory_order_relaxed))) {
         g_allocFails.fetch_add(1, std::memory_order_relaxed);
+        DrainQueue(true);
         g_flushed.fetch_add(Release(0), std::memory_order_relaxed);
         p = g_osAlloc(size);
     }
@@ -278,6 +516,7 @@ BOOL FreeCore(void* ptr, SIZE_T size)
             return TRUE;
         }
         g_passed.fetch_add(1, std::memory_order_relaxed);
+        return OsRelease(ptr, size);  // OsPageCacheAsyncRelease (as g_osFree while it is off)
     }
     return g_osFree(ptr);
 }
@@ -295,14 +534,37 @@ BOOL FreeHook(void* ptr, SIZE_T size)
     return FreeCore(ptr, size);
 }
 
+// In DllMain no thread allocates, so a plain 5-byte jump at the entry. Before WinMain (OBSE64 route) the allocator is already
+// live (GMalloc is made by the first allocation in the exe's static set-up, and any thread allocating through FMemory may run
+// the thunks), and a 5-byte jump would cover the first instruction and part of the second (alloc thunk: 3 + 6 bytes, free
+// thunk: 2 + 6): a thread paused between them would resume inside the jump. So there the hot-patch form (obseparity review
+// S1): the 5-byte jump goes into the 0xCC padding before the thunk (no thread runs it), then one 2-byte short jump back to
+// it (EB F9) replaces the start of the first instruction in one atomic store. Without 5 bytes of padding: not patched.
+constexpr uint8_t kShortBack[2] = {0xEB, 0xF9};  // jmp at - 5
+
+bool HotPatchFits(const uint8_t* at)
+{
+    for (int i = 1; i <= 5; ++i)
+        if (at[-i] != 0xCC) return false;
+    return WriteCodeAtomicFits(at, 2);
+}
+
 bool PatchJmp(uint8_t* at, const uint8_t* stub)
 {
-    const int64_t rel = stub - (at + 5);
+    const bool hot = CurrentLoadStage() != LoadStage::InDllMain;
+    uint8_t* const jmpAt = hot ? at - 5 : at;
+    const int64_t rel = stub - (jmpAt + 5);
     if (rel != static_cast<int32_t>(rel)) return false;
     uint8_t code[5] = {0xE9};
     const int32_t r32 = static_cast<int32_t>(rel);
     memcpy(code + 1, &r32, 4);
-    return WriteCode(at, code);
+    if (!hot) return WriteCode(at, code);
+    if (!HotPatchFits(at)) {
+        Log("[oscache] exe+0x%llX: no 5 bytes of padding before it, so it cannot be switched in one step while other threads "
+            "may allocate: not patched", static_cast<unsigned long long>(at - Game().base));
+        return false;
+    }
+    return WriteCode(jmpAt, code) && WriteCodeAtomic(at, kShortBack);
 }
 
 // AllocateImpl's cache-miss calls: "test r14,r14; je; mov rcx,r14; call [EnterCriticalSection]; mov rcx,rbp; call
@@ -315,11 +577,14 @@ constexpr size_t kCall1 = 17, kCall2 = 39;
 
 }  // namespace
 
+// self-test: the thunk patch on a fake thunk as the current stage writes it (review 2, R1: the hot-patch path)
+bool OsPageCacheTestPatchThunk(uint8_t* thunk, const uint8_t* stub) { return PatchJmp(thunk, stub); }
+
 bool InstallOsPageCache(bool beforeGameCode, const wchar_t* traceDir, int trace)
 {
     if (g_installed) return true;
     if (!beforeGameCode) {
-        Log("[oscache] only installed while the game starts (version.dll), not installed");
+        Log("[oscache] only installed while the game starts (loaded late here), not installed");
         return false;
     }
     uint8_t* const a = FindOne(kAllocThunk, "BinnedAllocFromOS");
@@ -366,7 +631,19 @@ bool InstallOsPageCache(bool beforeGameCode, const wchar_t* traceDir, int trace)
     DWORD old;
     VirtualProtect(region, 64, PAGE_EXECUTE_READ, &old);
     FlushInstructionCache(GetCurrentProcess(), region, 64);
-    if (!PatchJmp(a, region) || !PatchJmp(f, region + 16)) {
+    if (CurrentLoadStage() != LoadStage::InDllMain && (!HotPatchFits(a) || !HotPatchFits(f))) {
+        Log("[oscache] an OS thunk has no 5 bytes of padding before it: it cannot be switched in one step while other "
+            "threads may allocate (loaded before WinMain): not installed");
+        return false;
+    }
+    if (!PatchJmp(a, region)) {
+        Log("[oscache] could not patch the OS thunks: not installed");
+        return false;
+    }
+    if (!PatchJmp(f, region + 16)) {  // put BinnedAllocFromOS back: half a cache (allocs kept, frees not seen) is not wanted
+        const uint8_t orig[5] = {0x48, 0x8B, 0xD1, 0x41, 0xB9};
+        if (CurrentLoadStage() == LoadStage::InDllMain) WriteCode(a, orig);
+        else WriteCodeAtomic(a, std::span<const uint8_t>(orig, 2));  // the short jump out; the padding's jump is never run
         Log("[oscache] could not patch the OS thunks: not installed");
         return false;
     }
@@ -399,6 +676,13 @@ void SetOsPageCache(int mode, int capMB, int trimSeconds, bool relief)
     lastTrim = trimSeconds;
     g_on.store(on);
     g_mode = mode;
+    {  // OsPageCacheAsyncRelease follows the cache: off (and drained) while the cache is off or relieved
+        const bool was = g_asyncOn.load();
+        ApplyAsync(on);
+        if (was != g_asyncOn.load())
+            Log("[oscache] OsPageCacheAsyncRelease %s", g_asyncOn.load() ? "on: released blocks go to Windows from a background thread"
+                                                                         : "off: released blocks go to Windows at once, as the game");
+    }
     if (!on) g_flushed.fetch_add(Release(0), std::memory_order_relaxed);
     else {
         g_trimmed.fetch_add(Release(g_trimMs.load()), std::memory_order_relaxed);
@@ -435,6 +719,37 @@ void LogOsPageCacheStats()
         static_cast<unsigned long long>(g_evictRoom.load()), static_cast<unsigned long long>(g_trimmed.load()),
         static_cast<unsigned long long>(g_flushed.load()), static_cast<unsigned long long>(g_allocFails.load()), g_cache->count,
         g_cache->held / 1048576.0, g_cache->peak / 1048576.0);
+    if (g_asyncEverOn)
+        Log("[oscache] async release: queued %llu (%.0f MB), released by the thread %llu (in VirtualFree %.1f ms, longest call "
+            "%.2f ms), drained %llu (%llu drains), at once: queue full %llu, bytes full %llu, lock busy %llu, memory low %llu, "
+            "key off %llu, paused %llu, drain lock busy %llu; queue now %u, largest %llu blocks %.1f MB, longest wait %.2f ms",
+            static_cast<unsigned long long>(g_aQueued.load()), g_aQueuedBytes.load() / 1048576.0,
+            static_cast<unsigned long long>(g_aReleased.load()), g_aThreadUs.load() / 1000.0, g_aThreadMaxUs.load() / 1000.0,
+            static_cast<unsigned long long>(g_aDrained.load()), static_cast<unsigned long long>(g_aDrains.load()),
+            static_cast<unsigned long long>(g_aFullBlocks.load()), static_cast<unsigned long long>(g_aFullBytes.load()),
+            static_cast<unsigned long long>(g_aBusy.load()), static_cast<unsigned long long>(g_aLow.load()),
+            static_cast<unsigned long long>(g_aOffWait.load()), static_cast<unsigned long long>(g_aPaused.load()),
+            static_cast<unsigned long long>(g_aDrainBusy.load()), g_qLen.load(), static_cast<unsigned long long>(g_aMaxBlocks.load()),
+            g_aMaxBytes.load() / 1048576.0, g_aMaxWaitUs.load() / 1000.0);
+}
+
+// [Fixes] OsPageCacheAsyncRelease, live (main's 1-second tick, before SetOsPageCache, which applies it).
+void SetOsPageCacheAsyncRelease(int mode)
+{
+    if (!g_installed) return;
+    g_asyncKey.store(mode != 0);
+}
+
+// MemoryRelief's monitor, every one-second sample: true while RAM or commit room is under twice its relief thresholds.
+void OsPageCacheMemoryLow(bool low) { g_asyncLow.store(low); }
+
+// A crash is being written: the release thread stops (after the one block it may be releasing at that moment) and
+// releases are made at once again; the queued ranges stay reserved and untouched, so a dump that reads them sees what
+// it saw a moment before. Safe from any thread, no lock, no wait.
+void OsPageCacheAsyncPause()
+{
+    g_asyncPaused.store(true);
+    g_asyncOn.store(false);
 }
 
 bool OsPageCacheInfo(OsPageCacheInfoOut* out)
@@ -465,6 +780,59 @@ void OsPageCacheTestInit(void* (*osAlloc)(SIZE_T), BOOL (*osFree)(void*), uint64
     for (auto* s : {&g_hits, &g_hitBytes, &g_misses, &g_missBytes, &g_puts, &g_passed, &g_evictCap, &g_evictSize, &g_evictRoom,
                     &g_trimmed, &g_flushed, &g_allocFails})
         s->store(0);
+    // OsPageCacheAsyncRelease: off, an empty queue (a release thread of an earlier init stays, idle)
+    g_asyncKey = false;
+    g_asyncOn = false;
+    g_asyncPaused = false;
+    g_asyncHold = false;
+    g_asyncLow = false;
+    AcquireSRWLockExclusive(&g_q.lock);
+    g_q.head = g_q.count = 0;
+    g_q.bytes = 0;
+    g_qLen = 0;
+    ReleaseSRWLockExclusive(&g_q.lock);
+    for (auto* s : {&g_aQueued, &g_aQueuedBytes, &g_aReleased, &g_aDrained, &g_aFullBlocks, &g_aFullBytes, &g_aBusy, &g_aPaused,
+                    &g_aMaxBlocks, &g_aMaxBytes, &g_aMaxWaitUs, &g_aDrains, &g_aDrainBusy, &g_aOffWait, &g_aLow, &g_aThreadUs,
+                    &g_aThreadMaxUs})
+        s->store(0);
+}
+BOOL OsPageCacheTestRelease(void* ptr, size_t bytes) { return OsRelease(ptr, bytes); }
+void OsPageCacheTestHold(bool hold)
+{
+    g_asyncHold = hold;
+    if (!hold && g_asyncWake) SetEvent(g_asyncWake);
+}
+void OsPageCacheTestResume() { g_asyncPaused = false; }  // after OsPageCacheAsyncPause (the next SetOsPageCache applies the key)
+bool OsPageCacheTestWaitIdle(uint32_t ms)
+{
+    for (uint32_t t = 0; t < ms; ++t) {
+        if (!g_qLen.load() && !g_inFlight.load()) return true;
+        Sleep(1);
+    }
+    return !g_qLen.load() && !g_inFlight.load();
+}
+void OsPageCacheTestLockQueue(bool lock)  // a thread that ended inside the queue's lock (the process's exit)
+{
+    if (lock) AcquireSRWLockExclusive(&g_q.lock);
+    else ReleaseSRWLockExclusive(&g_q.lock);
+}
+bool OsPageCacheTestAsyncOn() { return g_asyncOn.load(); }
+void OsPageCacheTestAsyncStats(OsPageCacheAsyncStatsOut* out)
+{
+    out->queued = g_aQueued.load();
+    out->released = g_aReleased.load();
+    out->drained = g_aDrained.load();
+    out->fullBlocks = g_aFullBlocks.load();
+    out->fullBytes = g_aFullBytes.load();
+    out->busy = g_aBusy.load();
+    out->paused = g_aPaused.load();
+    out->drainBusy = g_aDrainBusy.load();
+    out->maxBlocks = g_aMaxBlocks.load();
+    out->maxBytes = g_aMaxBytes.load();
+    out->offWait = g_aOffWait.load();
+    out->low = g_aLow.load();
+    out->threadUs = g_aThreadUs.load();
+    out->queuedNow = g_qLen.load();
 }
 void* OsPageCacheTestAlloc(size_t size, bool cachePath) { return AllocCore(size, cachePath); }
 BOOL OsPageCacheTestFree(void* ptr, size_t size) { return FreeCore(ptr, size); }

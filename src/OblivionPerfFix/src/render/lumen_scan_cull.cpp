@@ -823,7 +823,7 @@ void LogLumenScanCullStats(bool detailed)
 bool InstallLumenScanCull(bool beforeGameCode, int key)
 {
     if (!key) { Log("[lumenscan] LumenScanCull off in OblivionPerfFix.ini (takes a restart to switch on)"); return false; }
-    if (!beforeGameCode) { Log("[lumenscan] LumenScanCull: start-up only (version.dll), not installed"); return false; }
+    if (!beforeGameCode) { Log("[lumenscan] LumenScanCull: start-up only (loaded late here), not installed"); return false; }
     const GameModule& game = Game();
     ScanSites s{};
     const char* why = "";
@@ -943,7 +943,7 @@ uint8_t* LumenScanCullTestStub(const void* prep, const void* original, const voi
 void LumenScanCullTestFreeStub(uint8_t* mem)
 {
     RtlDeleteFunctionTable(reinterpret_cast<RUNTIME_FUNCTION*>(mem + 512));
-    VirtualFree(mem, 0, MEM_RELEASE);
+    FreeOwnCode(mem);
 }
 
 }  // namespace opf

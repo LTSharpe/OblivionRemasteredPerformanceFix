@@ -117,7 +117,7 @@ bool SetChaosMaxPayloadSize(int cm, bool beforeGameCode)
     g_set = static_cast<float>(cm);
     Log("[chaosmps] ChaosMaxPayloadSize=%d: p.MaxPayloadSize 100000 -> %g cm%s (elements up to that size go into the acceleration "
         "trees instead of the list every query walks; an Engine.ini value still wins)", cm, static_cast<double>(*var),
-        beforeGameCode ? "" : " on the OBSE64 route, before the engine starts");
+        beforeGameCode ? "" : " (loaded late: the engine may already have read it)");
     return true;
 }
 

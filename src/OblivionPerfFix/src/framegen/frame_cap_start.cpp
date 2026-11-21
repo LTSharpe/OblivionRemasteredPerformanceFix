@@ -290,7 +290,7 @@ bool PatchEntry(uint8_t* fn, uint8_t* stub, bool beforeGameCode)
     if ((reinterpret_cast<uintptr_t>(fn) & 7) == 0) {
         auto* q = reinterpret_cast<volatile LONG64*>(fn);
         DWORD old;
-        if (!VirtualProtect(fn, 8, PAGE_EXECUTE_READWRITE, &old)) return false;
+        if (!CodeSiteProtect(fn, 8, &old)) return false;
         const LONG64 before = *q;
         LONG64 after = before;
         memcpy(&after, insn, sizeof insn);
@@ -401,7 +401,7 @@ bool InstallFrameCapStart(bool beforeGameCode, int mode)
     if (g_orig) return true;
     if (*g_state != 0) {
         Log("[fpscap] the game has already switched frame generation on%s: fix not installed",
-            beforeGameCode ? "" : " (OBSE64 route)");
+            beforeGameCode ? "" : " (loaded late)");
         return false;
     }
     uint8_t* const region = AllocNearGame(0x40);
@@ -426,7 +426,7 @@ bool InstallFrameCapStart(bool beforeGameCode, int mode)
     }
     Log("[fpscap] frame generation switch exe+0x%llX detoured (setter exe+0x%llX, SavedSettings +0x%X%s%s): %s",
         static_cast<unsigned long long>(g_switch - Game().base), static_cast<unsigned long long>(reinterpret_cast<uint8_t*>(g_set) - Game().base),
-        g_mapOffset, g_freeze ? "" : ", no freeze subsystem: menus not checked", beforeGameCode ? "" : ", OBSE64 route",
+        g_mapOffset, g_freeze ? "" : ", no freeze subsystem: menus not checked", beforeGameCode ? "" : ", loaded late",
         mode == 1 ? "the saved Frame Rate Limit is applied after FSR frame generation's start-up switch on AMD and Intel GPUs"
                   : "log only");
     return true;

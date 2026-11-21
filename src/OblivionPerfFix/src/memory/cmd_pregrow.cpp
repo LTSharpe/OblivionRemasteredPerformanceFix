@@ -10,9 +10,15 @@
 // So: once, before the first world is up, on this module's own thread, paced: the pool is brought to N allocators, each with those
 // chunks. The lists recorded here are closed and never submitted, so nothing can reach the image; no game logic runs. On by default
 // (user, after the play-test; findings "play1105"), for 16 GB cards and up only: the memory is held from early in the session, and no figure at the start can predict a card's budget falling later. The gates
-// below lean towards off for that reason. The size and when it runs: findings "cmdpromote" (15.8 s after the DLL loads here, about
-// 3 s long, about 9 s before the harness's first world and 10-20 s before a player's; a player who is faster, or a slow start, gets
-// "off" or a stop at the fade to the world, never a pass in play).
+// below lean towards off for that reason. The size: findings "cmdpromote".
+// When it runs (findings "bootstutter", "pregrow106"): behind the first loading screen. Until 1.5.0 it started 5 s after the
+// device, which on every launch fell on the first second of the start-up logos and made them stutter (our bug: 19 frames of
+// 30-130 ms in the first 2.5 s against 3 without the pass), because the new allocators' first memory goes through the driver's
+// paging queue that the frames being shown wait behind. The thread now starts as before (the gates below), then waits, touching
+// nothing, until NpcCreationPacing's frame hook sees the freeze subsystem in its loading mode (the game's own loading screen: the
+// player has nothing to see or do there), and runs from there; it still stops at the first fade to the world, so it never runs in
+// play. Every first world comes after a loading screen (Continue, Load, New game, coc), 4-14 s long here against a pass of about
+// 1.5 s. Without the frame hook (it never ran: NpcCreationPacing off at start-up, or not found) it starts at once, as before.
 //
 // The give-back (findings "cmdgiveback"). Once, if the pass grew anything: when the game's video memory has been within
 // CmdMemGiveBackHeadroomMB (512) of its budget for 3 seconds in a row, the direct pool is trimmed to the session's peak in flight plus a
@@ -53,7 +59,14 @@ constexpr int kGroups = 2;              // census: stock ends with 2 groups on n
 constexpr int kDredLists = 374;         // lists whose breadcrumb buffers stock the runtime's free list: batch = 22 allocators
 constexpr int kReserveMax = 48;         // left in the pool for the engine while the rest is held
 constexpr int kPaceMs = 3;              // pause per allocator
-constexpr int kDelaySeconds = 5;        // after the device's first obtain
+// Behind the loading screen (pregrow106, rev106d S2): the first batch as before (it stocks the DRED free list), then batches of
+// kLaterBatch, at most one per game-thread frame. In the old batches of 22 each batch's end made one frame of 80-140 ms
+// (pg-a1 / a2: slow frames every ~120 ms = one batch), so smaller batches spread that over frames; tied to the game's frames,
+// a frame the work slows lets the next batch wait (bounded: a long frame of the game's own, a sync load, shows nothing).
+constexpr int kLaterBatch = 3;
+constexpr ULONGLONG kFrameWaitMaxMs = 100;
+constexpr ULONGLONG kHookWaitMs = 20000;  // the pass thread starts before the first game-thread frame (a slow start): wait this long for the frame hook
+constexpr int kDelaySeconds = 5;        // after the device's first obtain: the gates are looked at from then; the pass itself waits for the first loading screen
 constexpr ULONGLONG kQuietMs = 100;     // an obtain this recent: the engine is alive. A quit from a world deletes the device 0.84-1.22 s after the last obtain (findings "cmdpromote"); a quit from
                                         // the menu or the logos has less to tear down and was not measured, so well under that: a late obtain only makes this thread wait a moment
 constexpr ULONGLONG kQuietLimitMs = 30000;  // a batch waits this long for the engine, then the pass ends
@@ -275,8 +288,11 @@ bool GiveBack(const Ops& o, void* const* in, int n, PlanResult& r)
     return true;
 }
 
-void RunPlan(const Ops& o, int target, int lists, int batch, PlanResult& r)
+// batch: the first batch (it stocks the runtime's DRED free list); later: the batches after it (0 = the same). Smaller later batches
+// hold fewer wrappers off the pool at once and check for the fade more often (pregrow106).
+void RunPlan(const Ops& o, int target, int lists, int batch, PlanResult& r, int later = 0)
 {
+    if (later <= 0 || later > batch) later = batch;
     if (target > kMax) target = kMax;
     int nWarm = 0;
     const auto isWarm = [&](void* w) { for (int i = 0; i < nWarm; ++i) if (s_warm[i] == w) return true; return false; };
@@ -309,7 +325,8 @@ void RunPlan(const Ops& o, int target, int lists, int batch, PlanResult& r)
         r.stop = o.check(o.ctx);
         if (r.stop) break;
         int b = 0;
-        while (b < batch && nWarm + b < grow - reserve) {
+        const int size = nWarm ? later : batch;
+        while (b < size && nWarm + b < grow - reserve) {
             void* const w = o.pop(o.ctx);
             if (!w) break;
             s_held[b++] = w;
@@ -341,7 +358,7 @@ void RunPlan(const Ops& o, int target, int lists, int batch, PlanResult& r)
         nOut = 0;
         int done = 0;
         while (done < toGrow && !r.stop) {
-            const int b = toGrow - done < batch ? toGrow - done : batch;
+            const int b = toGrow - done < later ? toGrow - done : later;
             GrowBatch(o, s_held + done, b, lists, s_out, &nOut, &nWarm, r);
             done += b;
             if (done < toGrow && !r.stop) r.stop = o.check(o.ctx);
@@ -371,6 +388,9 @@ struct Pass {
     int requested = 0;
     int test = 0;  // lab build only: a faked condition
     int batches = 0;
+    bool frameTied = false;  // started behind the loading screen: at most one later batch per game-thread frame
+    uint32_t paceFrame = 0;
+    int inFrame = 0, perFrame = 0;
 };
 
 std::atomic<int> g_requested{0};  // the key, once armed
@@ -381,6 +401,28 @@ GiveBackState g_giveBack;         // monitor thread
 ULONGLONG g_passEndMs = 0, g_giveBackAtMs = 0;  // g_passEndMs: written before g_passGrown
 const char* g_lastWhy = nullptr;  // why the waiting gates are still closed (monitor thread)
 Pass g_pass;
+
+// The start behind the first loading screen. The frame hook (game thread) sets g_frameSeen on every frame and, only while the
+// pass waits, reads the freeze subsystem's mode (ReadMenuFreeze is game-thread code: its getter walks the engine's world contexts).
+std::atomic<int> g_frameSeen{0};     // NpcCreationPacing's frame hook has called CmdMemPregrowFrame: the loading screen can be seen
+std::atomic<int> g_waitLoading{0};   // 1 while the pass thread waits for it
+std::atomic<int> g_loadingSeen{0};   // the loading mode was seen while waiting
+std::atomic<int> g_latchNamed{-1};   // the named-freeze count at that moment (for the log)
+std::atomic<uint32_t> g_frameCount{0};  // game-thread frames seen by the hook (the batches' clock behind the loading screen)
+bool (*g_readFreeze)(int32_t*, int32_t*) = &ReadMenuFreeze;  // the self-test swaps it
+
+// The freeze subsystem's loading mode (1: SetMode(1) at the end of a transition's fade to black). The first
+// load from the main menu still has the menu's named freeze on the stack (ledger: named 1, mode 1), so only the mode counts.
+bool LoadingMode(bool known, int32_t mode) { return known && mode == 1; }
+
+enum StartStep { kStartWait, kStartGo, kStartOff };
+// signal: the frame hook runs; loadingSeen: it saw the loading mode while the pass waited; worldUp: the first fade has run.
+StartStep StartRule(bool signal, bool loadingSeen, bool worldUp)
+{
+    if (worldUp) return kStartOff;             // the pass would be the burst it exists to prevent
+    if (!signal || loadingSeen) return kStartGo;  // no way to see the loading screen: at once, as before
+    return kStartWait;
+}
 
 int PaceMs()
 {
@@ -584,10 +626,19 @@ bool OpMayTouchPool(void* c)
         Sleep(10);  // for as long as it takes: at a quit the process exit ends this thread here
     }
 }
-void OpPace(void*)
+void OpPace(void* c)
 {
+    Pass& p = *static_cast<Pass*>(c);
     const int ms = PaceMs();
     if (ms > 0) Sleep(static_cast<DWORD>(ms));
+    if (!p.frameTied || p.perFrame <= 0) return;
+    const uint32_t f = g_frameCount.load();
+    if (f != p.paceFrame) { p.paceFrame = f; p.inFrame = 0; }
+    if (++p.inFrame < p.perFrame) return;
+    // This frame has had its share: wait for the next game-thread frame, bounded.
+    for (const ULONGLONG t0 = GetTickCount64(); g_frameCount.load() == f && GetTickCount64() - t0 < kFrameWaitMaxMs;) Sleep(1);
+    p.paceFrame = g_frameCount.load();
+    p.inFrame = 0;
 }
 
 // SEH frame: no objects with destructors.
@@ -595,7 +646,7 @@ int RunGuarded(Pass& p, int target, PlanResult& r)
 {
     __try {
         const Ops o{&p, &OpPop, &OpObtain, &OpRelease, &OpCreated, &OpRecord, &OpUnbind, &OpResetAlloc, &OpCheck, &OpMayTouchPool, &OpPace};
-        RunPlan(o, target, ListsFor(kGroups), BatchFor(kDredLists, kGroups), r);
+        RunPlan(o, target, ListsFor(kGroups), BatchFor(kDredLists, kGroups), r, p.frameTied ? p.perFrame : 0);
         return 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return 1;
@@ -636,12 +687,100 @@ int FreeGuarded(Res& r)
     }
 }
 
+// The wait before the pass, with its world, clock and gates injected (the self-test runs it on a fake clock).
+enum WaitResult { kWaitGo, kWaitGoNoHook, kWaitOffWorld, kWaitOffGates };
+struct WaitEnv {
+    void* ctx;
+    bool (*frameSeen)(void* ctx);    // the frame hook has run
+    bool (*loadingSeen)(void* ctx);  // it saw the loading mode while we waited
+    void (*setWaiting)(void* ctx, bool on);
+    bool (*worldUp)(void* ctx);
+    const char* (*gates)(void* ctx);  // the opening gates on fresh figures: nullptr = open
+    ULONGLONG (*now)(void* ctx);
+    void (*sleep)(void* ctx, int ms);
+};
+struct WaitOut {
+    ULONGLONG hookMs = 0, loadingMs = 0, gatesMs = 0;  // time spent in each step
+    const char* why = nullptr;                           // the last closed gate
+};
+WaitResult WaitCore(const WaitEnv& e, ULONGLONG hookWaitMs, WaitOut& out)
+{
+    // 1. The frame hook: on a slow start the thread can begin before the first game-thread frame has ended. Wait a bounded time.
+    ULONGLONG t = e.now(e.ctx);
+    while (!e.frameSeen(e.ctx)) {
+        if (e.worldUp(e.ctx)) return kWaitOffWorld;
+        if (e.now(e.ctx) - t >= hookWaitMs) { out.hookMs = e.now(e.ctx) - t; return kWaitGoNoHook; }
+        e.sleep(e.ctx, 10);
+    }
+    out.hookMs = e.now(e.ctx) - t;
+    // 2. The loading screen.
+    t = e.now(e.ctx);
+    e.setWaiting(e.ctx, true);
+    StartStep s;
+    while ((s = StartRule(true, e.loadingSeen(e.ctx), e.worldUp(e.ctx))) == kStartWait) e.sleep(e.ctx, 10);
+    e.setWaiting(e.ctx, false);
+    out.loadingMs = e.now(e.ctx) - t;
+    if (s == kStartOff) return kWaitOffWorld;
+    // 3. The opening gates again (the menu may have taken minutes).
+    t = e.now(e.ctx);
+    while ((out.why = e.gates(e.ctx)) != nullptr) {
+        if (e.worldUp(e.ctx)) { out.gatesMs = e.now(e.ctx) - t; return kWaitOffGates; }
+        e.sleep(e.ctx, 50);
+    }
+    out.gatesMs = e.now(e.ctx) - t;
+    return kWaitGo;
+}
+
+bool WeFrameSeen(void*) { return g_frameSeen.load() != 0; }
+bool WeLoadingSeen(void*) { return g_loadingSeen.load() != 0; }
+void WeSetWaiting(void*, bool on) { g_waitLoading.store(on ? 1 : 0); }
+bool WeWorldUp(void*) { return WorldIsUp(); }
+const char* WeGates(void* c)
+{
+    Facts f;
+    f.engineLive = EngineActive();
+    f.translate = RdgParallelTranslateActive();
+    Sample(static_cast<Pass*>(c)->adapter, f, nullptr);
+    return OpeningGate(f);
+}
+ULONGLONG WeNow(void*) { return GetTickCount64(); }
+void WeSleep(void*, int ms) { Sleep(static_cast<DWORD>(ms)); }
+
+// Before anything touches the pool or the device: wait for the first loading screen, then for the opening gates again.
+// false = the world came up first: nothing done. A quit while waiting ends the process here (nothing is held).
+bool WaitForLoadingScreen(Pass& p)
+{
+    p.frameTied = false;
+    Log("[cmdmem] pre-grow: waiting for the first loading screen");
+    const WaitEnv e{&p, &WeFrameSeen, &WeLoadingSeen, &WeSetWaiting, &WeWorldUp, &WeGates, &WeNow, &WeSleep};
+    WaitOut o;
+    switch (WaitCore(e, kHookWaitMs, o)) {
+    case kWaitGoNoHook:
+        Log("[cmdmem] pre-grow: NpcCreationPacing's frame hook did not run in %.0f s, so the loading screen can't be seen: starting now, as before",
+            o.hookMs / 1000.0);
+        return true;
+    case kWaitOffWorld:
+        Log("[cmdmem] pre-grow off: the world came up with no loading screen seen: nothing done");
+        return false;
+    case kWaitOffGates:
+        Log("[cmdmem] pre-grow off: the world came up before the gates opened again (%s): nothing done", o.why ? o.why : "-");
+        return false;
+    case kWaitGo: break;
+    }
+    p.frameTied = true;
+    p.perFrame = kLaterBatch;
+    Log("[cmdmem] pre-grow: the first loading screen is up (named freezes %d; %.1f s waited, gates again %.0f ms): starting, later batches of %d, one per frame",
+        g_latchNamed.load(), (o.hookMs + o.loadingMs) / 1000.0, static_cast<double>(o.gatesMs), p.perFrame);
+    return true;
+}
+
 // What the pass grew (0: nothing, or an exception: nothing may rely on the pool's state then).
 int PassBody()
 {
     // Normal priority: it holds the pool and takes driver locks for moments, so it must not wait behind the game's workers while it
     // does (the pace keeps the pass light).
     Pass& p = g_pass;
+    if (!WaitForLoadingScreen(p)) return 0;
     const double t0 = NowMs();
     double costLocal = 0, costNonLocal = 0;
     HRESULT hr = S_OK;
@@ -712,6 +851,20 @@ void Off(const char* why)
 }
 
 }  // namespace
+
+// npc_pacing.cpp, MaxTickRateHook: game thread, once per frame. Costs one load unless the pass waits for the loading screen.
+__declspec(noinline) void CmdMemPregrowFrame()  // not inlined: the self-test finds its call in MaxTickRateHook
+{
+    if (!g_frameSeen.load(std::memory_order_relaxed)) g_frameSeen.store(1);
+    g_frameCount.fetch_add(1, std::memory_order_relaxed);
+    if (!g_waitLoading.load(std::memory_order_relaxed) || g_loadingSeen.load(std::memory_order_relaxed)) return;
+    int32_t named = -1, mode = -1;
+    const bool known = g_readFreeze(&named, &mode);
+    if (LoadingMode(known, mode)) {
+        g_latchNamed.store(named);
+        g_loadingSeen.store(1);
+    }
+}
 
 // allocator_trim.cpp, AllocatorTrimTick (monitor thread, once a second)
 void CmdMemPregrowTick(void* device, uint64_t deviceAgeMs)
@@ -830,7 +983,7 @@ void SetCmdMemPregrow(int requested, bool poolsFound, bool beforeGameCode, int g
     if (requested <= 0) return;
     if (!beforeGameCode) {
         // The size counts the allocators made since the hooks went in, the world test the fades since then: both would be wrong with a device or a world that exists already.
-        Log("[cmdmem] pre-grow off: not installed on the OBSE64 route (it must start before the game's code, as the version.dll route does): nothing done");
+        Log("[cmdmem] pre-grow off: not installed: loaded late (it must start before the game's code): nothing done");
         return;
     }
     if (!poolsFound) {
@@ -839,8 +992,8 @@ void SetCmdMemPregrow(int requested, bool poolsFound, bool beforeGameCode, int g
     }
     g_giveBackMB.store(giveBackHeadroomMB);
     g_requested.store(requested);
-    if (requested == 1) Log("[cmdmem] pre-grow armed (automatic size, up to %d direct allocators; AMD with its own video memory and parallel translate; once, before the first world)", kAutoN);
-    else Log("[cmdmem] pre-grow armed (up to %d direct allocators; AMD with its own video memory and parallel translate; once, before the first world)", requested);
+    if (requested == 1) Log("[cmdmem] pre-grow armed (automatic size, up to %d direct allocators; AMD with its own video memory and parallel translate; once, behind the first loading screen)", kAutoN);
+    else Log("[cmdmem] pre-grow armed (up to %d direct allocators; AMD with its own video memory and parallel translate; once, behind the first loading screen)", requested);
 }
 
 // ---- Self-test: a fake pool ----
@@ -1016,6 +1169,91 @@ const char* CmdPregrowSelfTest()
     f = ok; f.usedMB = f.budgetMB - kFloorVramHeadMB + 1; if (!OpeningGate(f)) return "low video memory headroom passes";
     f = ok; f.ramFreeMB = kFloorRamMB - 1; if (!OpeningGate(f)) return "low RAM passes";
     f = ok; f.commitRoomMB = kFloorCommitMB - 1; if (!OpeningGate(f)) return "low commit passes";
+    // The start behind the first loading screen (pregrow106).
+    if (StartRule(true, false, false) != kStartWait) return "start: the logos / menu do not wait";
+    if (StartRule(true, true, false) != kStartGo) return "start: the loading screen does not start it";
+    if (StartRule(false, false, false) != kStartGo) return "start: no frame hook does not start at once (as before)";
+    if (StartRule(true, false, true) != kStartOff || StartRule(true, true, true) != kStartOff || StartRule(false, false, true) != kStartOff)
+        return "start: runs after the first fade";
+    if (!LoadingMode(true, 1) || LoadingMode(true, 0) || LoadingMode(true, 2) || LoadingMode(false, 1)) return "start: loading mode";
+    {
+        // The frame hook with a fake freeze state: reads only while the pass waits, latches the loading mode.
+        static int32_t s_named = 1, s_mode = 0, s_reads = 0;
+        const auto fake = [](int32_t* named, int32_t* mode) { ++s_reads; *named = s_named; *mode = s_mode; return true; };
+        auto* const realRead = g_readFreeze;
+        const int saved[3] = {g_frameSeen.load(), g_waitLoading.load(), g_loadingSeen.load()};
+        g_readFreeze = fake;
+        g_frameSeen = 0; g_waitLoading = 0; g_loadingSeen = 0;
+        const char* bad = nullptr;
+        s_mode = 1;  // a loading screen while nobody waits: not read, not latched
+        CmdMemPregrowFrame();
+        if (!g_frameSeen.load()) bad = "start: the frame hook is not seen";
+        else if (s_reads || g_loadingSeen.load()) bad = "start: the freeze state read while not waiting";
+        if (!bad) {
+            g_waitLoading = 1; s_mode = 0; s_named = 1;  // logos / main menu (named freeze, mode 0)
+            CmdMemPregrowFrame(); CmdMemPregrowFrame();
+            if (g_loadingSeen.load() || s_reads != 2) bad = "start: the menu counts as a loading screen";
+        }
+        if (!bad) {
+            s_mode = 1;  // the first load from the main menu: the menu's named freeze still on, mode 1
+            CmdMemPregrowFrame();
+            if (!g_loadingSeen.load()) bad = "start: the first load from the main menu not seen";
+        }
+        if (!bad) {
+            s_mode = 0;  // latched: no more reads, still seen
+            CmdMemPregrowFrame();
+            if (!g_loadingSeen.load() || s_reads != 3) bad = "start: the loading screen not latched";
+        }
+        g_readFreeze = realRead;
+        g_frameSeen = saved[0]; g_waitLoading = saved[1]; g_loadingSeen = saved[2];
+        if (bad) return bad;
+    }
+    {
+        // MaxTickRateHook calls CmdMemPregrowFrame (a lost call line would send every launch to the old start): its code holds a
+        // direct call to it.
+        const uint8_t* const h = static_cast<const uint8_t*>(NpcPacingMaxTickHookCode());
+        const uint8_t* const target = reinterpret_cast<const uint8_t*>(&CmdMemPregrowFrame);
+        bool found = false;
+        for (int i = 0; h && i + 5 <= 0x4000 && !found; ++i)
+            if (h[i] == 0xE8 && h + i + 5 + *reinterpret_cast<const int32_t*>(h + i + 1) == target) found = true;
+        if (!found) return "start: MaxTickRateHook does not call CmdMemPregrowFrame";
+    }
+    {
+        // The wait on a fake clock: the frame hook, the loading screen, the world, the gates.
+        struct FW {
+            ULONGLONG t = 0, hookAt = 0, loadingAt = ~0ull, worldAt = ~0ull, gatesAt = 0;
+            bool waiting = false, polledNotWaiting = false;
+            int setOn = 0, setOff = 0;
+        };
+        static FW w;
+        const WaitEnv e{&w,
+                        [](void*) { return w.t >= w.hookAt; },
+                        [](void*) { if (!w.waiting) w.polledNotWaiting = true; return w.t >= w.loadingAt; },
+                        [](void*, bool on) { w.waiting = on; ++(on ? w.setOn : w.setOff); },
+                        [](void*) { return w.t >= w.worldAt; },
+                        [](void*) -> const char* { return w.t >= w.gatesAt ? nullptr : "closed"; },
+                        [](void*) { return w.t; },
+                        [](void*, int ms) { w.t += static_cast<ULONGLONG>(ms); }};
+        const auto run = [&](ULONGLONG hookAt, ULONGLONG loadingAt, ULONGLONG worldAt, ULONGLONG gatesAt, WaitOut& o) {
+            w = FW{};
+            w.hookAt = hookAt; w.loadingAt = loadingAt; w.worldAt = worldAt; w.gatesAt = gatesAt;
+            return WaitCore(e, 20000, o);
+        };
+        WaitOut o;
+        // the logos and menu for 30 s, then the loading screen: go, the waiting flag on only meanwhile
+        if (run(0, 30000, ~0ull, 0, o) != kWaitGo || w.t < 30000 || w.t > 30020 || w.waiting || w.setOn != 1 || w.setOff != 1 || w.polledNotWaiting)
+            return "wait: the loading screen does not start it, or the waiting flag is wrong";
+        // a slow start: the frame hook only after 8 s (under the bound): it still waits for the loading screen
+        if (run(8000, 30000, ~0ull, 0, o) != kWaitGo || o.hookMs < 8000 || w.t < 30000) return "wait: a late frame hook falls back";
+        // no frame hook within the bound: the old start, the waiting flag never set
+        if (run(~0ull, 30000, ~0ull, 0, o) != kWaitGoNoHook || w.t < 20000 || w.t > 20020 || w.setOn) return "wait: no frame hook";
+        // the world before the frame hook, before the loading screen, before the gates open: off, the flag cleared
+        if (run(~0ull, ~0ull, 5000, 0, o) != kWaitOffWorld || w.setOn) return "wait: world up before the frame hook";
+        if (run(0, ~0ull, 12000, 0, o) != kWaitOffWorld || w.waiting || w.setOff != 1) return "wait: world up with no loading screen";
+        if (run(0, 3000, 9000, ~0ull, o) != kWaitOffGates || !o.why || w.waiting) return "wait: world up while the gates are closed";
+        // the gates closed for 2 s on the loading screen, then open: go after them
+        if (run(0, 3000, ~0ull, 5000, o) != kWaitGo || w.t < 5000 || o.gatesMs < 1950) return "wait: the gates are not waited for";
+    }
     if (SizeFor(ok, 1, 1.9, 0.0) != kAutoN) return "automatic size on a good PC";
     if (SizeFor(ok, 100, 1.9, 0.0) != 100) return "asked size on a good PC";
     if (SizeFor(ok, 100000, 0.0, 0.0) != kMax) return "size cap";
@@ -1091,6 +1329,20 @@ const char* CmdPregrowSelfTest()
         if (r.stop || r.grown != 260 || p.made != 260 || r.lists != 260 * 17) return "normal pass: wrong counts";
         for (int i = 0; i < p.made; ++i) if (p.w[i].lists != 17) return "normal pass: a wrapper not grown exactly once";
         if (p.maxListsSinceReset > 22 * 17) return "lists over the DRED batch";
+    }
+    // Behind the loading screen: the first batch of 22, later ones of 3; the same result.
+    for (int inPool : {0, 30, 100, 250}) {
+        FakeInit(p, inPool);
+        PlanResult r;
+        const Ops o = kFakeOps(p);
+        const int checks0 = p.checks;
+        RunPlan(o, 260, 17, 22, r, 3);
+        if (p.fail) return p.fail;
+        if ((why = FakeBooks(p, 0, 0)) != nullptr) return why;
+        if (r.stop || r.grown != 260 || p.made != 260 || r.lists != 260 * 17) return "later batches: wrong counts";
+        for (int i = 0; i < p.made; ++i) if (p.w[i].lists != 17) return "later batches: a wrapper not grown exactly once";
+        if (p.maxListsSinceReset > 22 * 17) return "later batches: lists over the DRED batch";
+        if (p.checks - checks0 < 60) return "later batches: the fade is not checked per batch";
     }
     // Pool already over the target: the extra ones are not grown, not lost.
     FakeInit(p, 300);

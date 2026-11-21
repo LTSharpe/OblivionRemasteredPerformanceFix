@@ -63,14 +63,18 @@
 #include "common.h"
 
 #include <d3d12.h>
+#include <dxgi1_4.h>
+#include <tlhelp32.h>
 
 #include <atomic>
 #include <cstring>
+#include <cwchar>
 #include <mutex>
 
 #include "shaders/gpu_menu_shot_cs.h"
 
 namespace opf {
+IDXGIAdapter3* GameAdapter();  // memory_monitor.cpp: the game's GPU once it renders (not AddRef'd, set once)
 namespace {
 
 // ---- patterns (build 19115871 addresses in the comments) ----
@@ -336,6 +340,151 @@ void SwitchOff(const char* why)
 {
     if (g_mode.exchange(0) != 0) Log("[gpushot] %s: GpuMenuShot switched off for this session (menu screenshots the game's way)", why);
 }
+
+// ---- setups the takeover is not made on (gh54, GitHub issue #54) ----
+// An Intel Arc B580 with OptiScaler (DLSS frame generation sent to XeFG) hung the GPU (DXGI_ERROR_DEVICE_HUNG, DRED page
+// fault on a freed heap) at the session's first takeover, 1.4.0 and 1.5.0; GpuMenuShot=0 stopped it. Our recorded
+// commands were checked (bounds, states, buffer lifetimes, fences) without finding the fault, and it does not happen on the
+// AMD GPUs it was verified on. The takeover also drops the stock GPU drain of the menu-open frame (the game's synchronous
+// read-back waits for the GPU), which a third-party swap-chain or frame-generation layer may rely on. So on an Intel GPU, or
+// with such a layer loaded, menu screenshots stay the game's (as GpuMenuShot=0). Decided once a session, at the first menu
+// screenshot at which it can be (a loaded layer at once; the vendor once the game's GPU is known); one log line.
+const char* const kSetupWhy = "not on this setup (see the line above)";
+int g_setupState = -1;          // game thread: -1 not decided, 0 the takeover may run, 1 not on this setup
+char g_setupWhy[400] = {};
+
+bool PathUnder(const wchar_t* path, const wchar_t* dir)
+{
+    const size_t n = wcslen(dir);
+    return n && _wcsnicmp(path, dir, n) == 0 && (path[n] == L'\\' || path[n] == L'/');
+}
+
+}  // namespace
+// The image of a loaded module holds the ASCII text (committed, readable pages only; self-tested).
+bool GpuMenuShotImageHolds(const uint8_t* base, size_t size, const char* text)
+{
+    const size_t tn = strlen(text);
+    const uint8_t* p = base;
+    const uint8_t* const end = base + size;
+    while (p < end) {
+        MEMORY_BASIC_INFORMATION mi{};
+        if (!VirtualQuery(p, &mi, sizeof mi) || !mi.RegionSize) return false;
+        const uint8_t* const r0 = static_cast<const uint8_t*>(mi.BaseAddress);
+        const uint8_t* r1 = r0 + mi.RegionSize;
+        if (r1 > end) r1 = end;
+        const DWORD pr = mi.Protect & 0xFF;
+        const bool readable = mi.State == MEM_COMMIT && !(mi.Protect & PAGE_GUARD) &&
+                              (pr == PAGE_READONLY || pr == PAGE_READWRITE || pr == PAGE_WRITECOPY || pr == PAGE_EXECUTE_READ ||
+                               pr == PAGE_EXECUTE_READWRITE || pr == PAGE_EXECUTE_WRITECOPY);
+        if (readable && r1 - (p > r0 ? p : r0) >= static_cast<ptrdiff_t>(tn)) {
+            const uint8_t* q = p > r0 ? p : r0;
+            for (; q + tn <= r1; ++q)
+                if (*q == static_cast<uint8_t>(text[0]) && memcmp(q, text, tn) == 0) return true;
+        }
+        p = r1;
+    }
+    return false;
+}
+namespace {
+
+// The loaded modules' layer, read once (game thread; rev gh54 S1/S2/S4): g_layerScanned false until the module list was read.
+bool g_layerScanned = false;
+const char* g_layer = nullptr;  // the reason when a layer is loaded
+char g_layerDetail[MAX_PATH + 8] = {};
+
+// One pass over the loaded modules (Toolhelp32, KERNEL32). false = the list could not be read (tried again at the next
+// screenshot).
+bool ScanLayers()
+{
+    wchar_t sys[MAX_PATH] = {};
+    const UINT sn = GetSystemDirectoryW(sys, MAX_PATH);
+    if (!sn || sn >= MAX_PATH) return false;  // without it every system DXGI would look like a proxy
+    HMODULE self = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCWSTR>(&ScanLayers), &self);
+    HANDLE snap = INVALID_HANDLE_VALUE;
+    for (int tries = 0; tries < 4 && snap == INVALID_HANDLE_VALUE; ++tries) {
+        snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, 0);
+        if (snap == INVALID_HANDLE_VALUE && GetLastError() != ERROR_BAD_LENGTH) break;  // BAD_LENGTH: a module (un)loading, retry
+    }
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    const char* layer = nullptr;
+    MODULEENTRY32W me{};
+    me.dwSize = sizeof me;
+    for (BOOL ok = Module32FirstW(snap, &me); ok && !layer; ok = Module32NextW(snap, &me)) {
+        if (me.hModule == self) continue;
+        const char* const why = GpuMenuShotLayerRule(me.szModule, PathUnder(me.szExePath, sys));
+        if (why == kGpuMenuShotLayerScan) {
+            // Held while its image is read, so it cannot be unloaded in between (the snapshot is only a copy of the list).
+            HMODULE pin = nullptr;
+            if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, reinterpret_cast<LPCWSTR>(me.modBaseAddr), &pin) && pin) {
+                if (pin == me.hModule && GpuMenuShotImageHolds(me.modBaseAddr, me.modBaseSize, "OptiScaler")) layer = "OptiScaler";
+                FreeLibrary(pin);
+            }
+        } else if (why) {
+            layer = why;
+        }
+        if (layer) snprintf(g_layerDetail, sizeof g_layerDetail, " (%ls)", me.szModule);
+    }
+    CloseHandle(snap);
+    g_layer = layer;
+    return true;
+}
+
+// true = decided (*verdict: nullptr = the takeover may run, else the reason; detail names the module when a layer is the
+// reason). false = not yet: the GPU is not known and no layer was seen, or the module list could not be read.
+// GameAdapter() is read once here, so a monitor-thread update in between cannot decide without a check (rev gh54 M1).
+bool SetupCheck(const char** verdict, char* detail, size_t detailSize)
+{
+    detail[0] = 0;
+    *verdict = nullptr;
+    if (!g_layerScanned) g_layerScanned = ScanLayers();
+    IDXGIAdapter3* const ad = GameAdapter();
+    if (!ad && !g_layer) return false;  // the vendor is not known yet: decided at a later screenshot
+    uint32_t vendor = 0;
+    if (ad) {
+        DXGI_ADAPTER_DESC d{};
+        if (SUCCEEDED(ad->GetDesc(&d))) vendor = d.VendorId;
+    }
+    *verdict = GpuMenuShotSetupRule(vendor, g_layer);
+    if (!*verdict && !g_layerScanned) return false;  // no reason yet, but the modules are still unread
+    if (*verdict && *verdict == g_layer) snprintf(detail, detailSize, "%s", g_layerDetail);  // the module named when it is the reason
+    return true;
+}
+}  // namespace
+
+// Self-tested rules. A module's name and whether it was loaded from the Windows system folder (the driver store is under it):
+// a reason, kGpuMenuShotLayerScan (a proxy DLL name outside the system folder: its image is searched for OptiScaler's name),
+// or nullptr. The game's own DLLs (UE4SS's dwmapi.dll, Streamline, FidelityFX, XeSS) are not layers here; dbghelp.dll is
+// searched (an OptiScaler proxy name; the game's own copy sits in Engine\Binaries\ThirdParty\DbgHelp and lacks the text).
+const char* const kGpuMenuShotLayerScan = "scan";
+const char* GpuMenuShotLayerRule(const wchar_t* name, bool fromSystemFolder)
+{
+    wchar_t low[MAX_PATH] = {};
+    size_t i = 0;
+    for (; name[i] && i + 1 < MAX_PATH; ++i) low[i] = static_cast<wchar_t>(towlower(name[i]));
+    if (wcsstr(low, L"optiscaler")) return "OptiScaler";
+    if (wcsstr(low, L"dlss-enabler") || wcsstr(low, L"dlss_enabler")) return "DLSS Enabler";
+    if (wcsstr(low, L"dlssg_to_fsr3")) return "a DLSS-G to FSR 3 frame generation replacement";
+    if (fromSystemFolder) return nullptr;
+    if (!wcscmp(low, L"dxgi.dll") || !wcscmp(low, L"d3d12.dll") || !wcscmp(low, L"d3d11.dll"))
+        return "a DXGI / Direct3D proxy DLL (a third-party swap-chain layer)";
+    static const wchar_t* const kProxyNames[] = {L"winmm.dll", L"version.dll", L"wininet.dll", L"winhttp.dll", L"dinput8.dll",
+                                                 L"dbghelp.dll", L"nvngx.dll", L"nvapi64.dll", L"_nvngx.dll"};
+    for (const wchar_t* p : kProxyNames)
+        if (!wcscmp(low, p)) return kGpuMenuShotLayerScan;
+    if (i > 4 && !wcscmp(low + i - 4, L".asi")) return kGpuMenuShotLayerScan;
+    return nullptr;
+}
+// The setup's verdict: nullptr = the takeover may run.
+const char* GpuMenuShotSetupRule(uint32_t vendorId, const char* layer)
+{
+    if (vendorId == 0x8086) return "an Intel GPU";
+    if (layer) return layer;
+    return nullptr;
+}
+
+namespace {
 
 // ---- RHI thread ----
 // RetrieveTexture as RHICopyTexture does it: the presentable back-buffer reference resolved, then the linked object for
@@ -1071,6 +1220,20 @@ int GpuMenuShotPrepare(int32_t x0, int32_t y0, int32_t w, int32_t h, bool hdr, c
     const int mode = GpuMenuShotMode();
     *why = nullptr;
     if (!mode) { *why = "off"; return 0; }
+    // gh54: not on an Intel GPU or with a third-party swap-chain / frame-generation layer (decided once, logged once).
+    if (g_setupState < 0) {
+        char detail[MAX_PATH + 8];
+        const char* setup = nullptr;
+        if (SetupCheck(&setup, detail, sizeof detail)) {
+            g_setupState = setup ? 1 : 0;
+            if (setup) {
+                snprintf(g_setupWhy, sizeof g_setupWhy, "%s%s", setup, detail);
+                Log("[gpushot] not taken over on this setup: %s: menu screenshots stay the game's (as GpuMenuShot=0; a GPU "
+                    "crash at menu opens was reported there, GitHub issue #54)", g_setupWhy);
+            }
+        }
+    }
+    if (g_setupState == 1) { *why = kSetupWhy; return 0; }
     if (g_bbFormat.load(std::memory_order_relaxed) != kPfA2B10G10R10 || g_bbW.load() < x0 + w || g_bbH.load() < y0 + h) {
         g_probeWanted.store(true, std::memory_order_relaxed);
         *why = g_bbFormat.load() < 0 ? "the back buffer not seen yet (probe queued)" : "the back buffer is not R10G10B10A2 at this size (probe queued)";
@@ -1176,7 +1339,7 @@ int GpuMenuShotEndCapture()
 // generation the helper hands the picture over with.
 uint32_t GpuMenuShotServiceArm(int job, uint64_t weak, int32_t adj, void* weakGet, int32_t w, int32_t h)
 {
-    if (uint32_t* const stale = g_svc.pixels.exchange(nullptr)) VirtualFree(stale, 0, MEM_RELEASE);
+    if (uint32_t* const stale = g_svc.pixels.exchange(nullptr)) FreeOwnCode(stale);
     g_svc.weak = weak;
     g_svc.adj = adj;
     g_svc.weakGet = weakGet;
@@ -1202,13 +1365,13 @@ void GpuMenuShotServicePixels(uint32_t gen, uint32_t* pixels, int32_t w, int32_t
     if (!pixels) return;
     uint64_t expect = static_cast<uint64_t>(gen) << 8 | 1;
     if (g_svc.word.load(std::memory_order_acquire) != expect || w != g_svc.w || h != g_svc.h) {
-        VirtualFree(pixels, 0, MEM_RELEASE);
+        FreeOwnCode(pixels);
         return;
     }
     g_svc.pixels.store(pixels, std::memory_order_release);
     if (!g_svc.word.compare_exchange_strong(expect, static_cast<uint64_t>(gen) << 8 | 2, std::memory_order_acq_rel)) {
         // Dropped meanwhile: whoever gets the pointer back frees it (exactly one owner).
-        if (uint32_t* const back = g_svc.pixels.exchange(nullptr)) VirtualFree(back, 0, MEM_RELEASE);
+        if (uint32_t* const back = g_svc.pixels.exchange(nullptr)) FreeOwnCode(back);
     }
 }
 
@@ -1220,7 +1383,7 @@ void ReleaseService()
 {
     uint64_t cur = g_svc.word.load(std::memory_order_acquire);
     while (!g_svc.word.compare_exchange_weak(cur, cur & ~uint64_t{0xFF}, std::memory_order_acq_rel)) {}
-    if (uint32_t* const px = g_svc.pixels.exchange(nullptr)) VirtualFree(px, 0, MEM_RELEASE);
+    if (uint32_t* const px = g_svc.pixels.exchange(nullptr)) FreeOwnCode(px);
 }
 void DropService(const char* why)
 {
@@ -1427,7 +1590,7 @@ bool GpuMenuShotVerify(int job, const uint32_t* ref, int32_t w, int32_t h)
             }
     }
     const uint64_t done = s_compares.fetch_add(1, std::memory_order_relaxed) + 1;
-    VirtualFree(expect, 0, MEM_RELEASE);
+    FreeOwnCode(expect);
     j.readback->Unmap(0, &none);
     if (diffs == 0) {
         s_verifyOk.fetch_add(1, std::memory_order_relaxed);
@@ -1459,6 +1622,7 @@ void GpuMenuShotTaken(int job, uint64_t gtTicks)
 void GpuMenuShotDeclined(const char* why)
 {
     s_declined.fetch_add(1, std::memory_order_relaxed);
+    if (why == kSetupWhy) return;  // logged once when decided (gh54)
     Log("[gpushot] menu screenshot left to the game: %s", why ? why : "?");
 }
 

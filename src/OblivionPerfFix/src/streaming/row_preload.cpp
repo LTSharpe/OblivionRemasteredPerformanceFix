@@ -213,6 +213,8 @@ void Step(uint8_t* tes)
             }
             if (!g.s.isInterior(cell) && g.s.inExtBuffer(*g.s.tesSlot, reinterpret_cast<uint64_t>(cell))) {
                 c_already.fetch_add(1, std::memory_order_relaxed);
+                if (!g.testFakes) CreateAheadCell(cell);  // CreateAhead: its character references (no-op unless on)
+                if (!g.testFakes) CellObjectPreloadCell(cell);  // CellObjectPreload: its objects' files (no-op unless on)
                 continue;
             }
         }
@@ -239,6 +241,8 @@ void Step(uint8_t* tes)
         if (us > 2000) c_over2.fetch_add(1, std::memory_order_relaxed);
         if (us > 4000) c_over4.fetch_add(1, std::memory_order_relaxed);
         if (g.nPre < kMaxPre) g.pre[g.nPre++] = cell;
+        if (!g.testFakes) CreateAheadCell(cell);  // CreateAhead: its character references (no-op unless on)
+        if (!g.testFakes) CellObjectPreloadCell(cell);  // CellObjectPreload: its objects' files (no-op unless on)
         return;
     }
 }
@@ -453,6 +457,8 @@ bool InstallRowPreload(bool beforeGameCode)
         static_cast<unsigned long long>(rs.load - game.base), static_cast<unsigned long long>(rs.insert - game.base));
     return true;
 }
+
+bool RowPreloadInstalled() { return g.installed; }  // CellObjectPreload's install check (fixmerge, rev-preload N1)
 
 void SetRowPreload(int mode)
 {

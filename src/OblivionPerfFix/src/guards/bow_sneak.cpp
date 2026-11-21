@@ -215,13 +215,13 @@ bool ApplyBowSneakAttackFix()
     }
     DWORD old;
     if (!VirtualProtect(stub, 32, PAGE_EXECUTE_READ, &old)) {
-        VirtualFree(stub, 0, MEM_RELEASE);
+        FreeOwnCode(stub);
         return Fail("stub protection");
     }
     FlushInstructionCache(GetCurrentProcess(), stub, 32);
     const int64_t relQueue = stub - (queueCall + 5), relImpact = stub + 16 - (impactCall + 5);
     if (relQueue != static_cast<int32_t>(relQueue) || relImpact != static_cast<int32_t>(relImpact)) {
-        VirtualFree(stub, 0, MEM_RELEASE);
+        FreeOwnCode(stub);
         return Fail("stub out of reach");
     }
     g_thunk = reinterpret_cast<HitFn>(thunk);

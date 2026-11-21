@@ -27,6 +27,23 @@ then open only the doc or source file you need. Plain-language overview: [README
   a few old-engine frames, in the game's order), `PacingGateShownHoldMs` (a far character held by the pacing starts its
   fade-in once its build has run, at most about 1 s later; its AI start does not move), `FadeInUnseen` (a far character
   not drawn yet skips its first second of full-rate animation, so its pose at first sight can differ).
+  New in 1.6.0, timing only or equivalent: `GcPassAfterBusy` (the engine's timer garbage collection pass waits up to
+  500 ms for a calm frame, through the engine's own one-frame delay; the same pass runs, only its moment moves, and a
+  later pass also collects what became garbage in the wait). `GcPrepAhead` is **equivalent**: the cells left behind are
+  prepared for the next garbage collection pass by the engine's own function in calm frames of its last second, not inside
+  the pass, each holding the engine's GC lock as the pass does; the state is the one the engine has with
+  `LevelStreaming.ShouldReuseUnloadedButStillAroundLevels=0`,
+  so a cell prepared early and wanted back before the pass is loaded again instead of reused. `CellObjectPreload` (the files of objects in cells loaded
+  ahead are requested in the background; the same packages through the same loader, earlier; no create moves).
+  `CreateAhead` (a character's SpawnActor half is built a few seconds early in frames with time to spare and adopted by
+  the game's own create only when it asks for exactly that; same place, rotation, scale and age), `RepathDefer`
+  (**equivalent**: a long route search finishes in the background while the character keeps its old route for 1-6 ticks;
+  used only if start and goal are within 50 uu), `NavQueryPriority` (the path-search task at normal priority: same
+  searches, same order), `WaterInfoAfterCrossing` (**equivalent**: a water zone asked to redraw during a cell crossing is
+  redrawn once, up to 500 ms after the first request, with the water and ground of that moment). `StartupBarFinish=2`
+  changes what you see on purpose (user decision, on by default): every loading screen ends about 1.5 s sooner
+  (`StartupBarFinish=1` = only the black screen at start-up). `PhysicsSubstepCap` is **not identical** (user decision, on by default): one physics step for
+  frames of 20-30 ms instead of two, Epic's own settings (`MaxSubstepDeltaTime` 0.03, `MaxSubsteps` 4).
   `FarPawnMoveHalfRate` / `FarHorseMove` are **not identical** (user decision, on by default, switchable off): calm
   pawns and horses >= 100 m away move at `FarPawnMoveHz` (30) with the skipped frames' time summed, as on a 30 fps PC.
   A fix whose code does not match switches itself off and logs why.

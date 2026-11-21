@@ -157,13 +157,13 @@ bool ApplyAutosaveFollowsMenu()
     }
     DWORD old;
     if (!VirtualProtect(stub, 32, PAGE_EXECUTE_READ, &old)) {
-        VirtualFree(stub, 0, MEM_RELEASE);
+        FreeOwnCode(stub);
         return Fail("stub protection");
     }
     FlushInstructionCache(GetCurrentProcess(), stub, 32);
     const int64_t relLevelUp = stub - (levelUpCall + 5), relScripted = stub + 16 - (scriptedCall + 5);
     if (relLevelUp != static_cast<int32_t>(relLevelUp) || relScripted != static_cast<int32_t>(relScripted)) {
-        VirtualFree(stub, 0, MEM_RELEASE);
+        FreeOwnCode(stub);
         return Fail("stub out of reach");
     }
     g_autosave = reinterpret_cast<AutosaveFn>(autosave);

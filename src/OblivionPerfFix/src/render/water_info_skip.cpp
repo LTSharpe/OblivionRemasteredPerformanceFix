@@ -263,7 +263,7 @@ bool CheckPins(const GameModule& game, uint8_t* fn, const char** why)
 bool InstallWaterInfoSkip(bool beforeGameCode, int key, uint8_t* gtFn, const wchar_t* iniPath)
 {
     if (!key) { Log("[waterinfo] WaterInfoSkip off in OblivionPerfFix.ini (takes a restart to switch on)"); return false; }
-    if (!beforeGameCode) { Log("[waterinfo] WaterInfoSkip: start-up only (version.dll), not installed"); return false; }
+    if (!beforeGameCode) { Log("[waterinfo] WaterInfoSkip: start-up only (loaded late here), not installed"); return false; }
     if (!gtFn) { Log("[waterinfo] WaterInfoSkip: the water-info render's game-thread detour is not in: not installed"); return false; }
     const char* why = "";
     if (!CheckPins(Game(), gtFn, &why)) { Log("[waterinfo] WaterInfoSkip: %s does not match in UpdateWaterInfoRendering: not installed", why); return false; }

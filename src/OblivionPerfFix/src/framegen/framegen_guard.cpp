@@ -236,7 +236,10 @@ bool WatchFrameGenLibrary(bool beforeGameCode)
     if (g_installed) return true;
     if (HMODULE m = GetModuleHandleW(kLibrary)) {
         // already loaded: only before the game's code runs is nothing using it yet
-        if (!beforeGameCode) return Fail("the library was already loaded (install as version.dll)");
+        if (!beforeGameCode) return Fail("the library was already loaded (loaded late here)");
+        // before WinMain the game has not loaded it yet: another mod or tool did, and may already use it (obseaudit D-3)
+        if (CurrentLoadStage() != LoadStage::InDllMain)
+            return Fail("the library was already loaded before the game's start (by another mod or tool)");
         if (Install(m)) g_on = true;
         return g_installed;
     }

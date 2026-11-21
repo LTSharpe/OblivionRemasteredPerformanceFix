@@ -251,7 +251,7 @@ void SetOtFrameTrim(int mode)
 bool InstallOtFrameTrim(bool beforeGameCode, int mode)
 {
     if (g_installed) return true;
-    if (!beforeGameCode) { Log("[otframe] OtFrameTrim: start-up only (version.dll route), not installed"); return false; }
+    if (!beforeGameCode) { Log("[otframe] OtFrameTrim: start-up only (loaded late here), not installed"); return false; }
     const char* why = "";
     OtFrameTrimDiscovery d{};
     if (!Install(Game(), d, &why)) {

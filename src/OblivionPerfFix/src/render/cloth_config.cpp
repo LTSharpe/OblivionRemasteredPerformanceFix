@@ -478,12 +478,12 @@ uint8_t* AllocNear(size_t size)
         const uintptr_t regionEnd = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
         if (mbi.State == MEM_FREE && a + size <= regionEnd)
             if (void* p = VirtualAlloc(reinterpret_cast<void*>(a), size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE))
-                return static_cast<uint8_t*>(p);
+                return static_cast<uint8_t*>(RegisterOwnCode(p));
         a = (regionEnd + gran - 1) & ~(gran - 1);
     }
     for (uintptr_t a = (base & ~(gran - 1)) - gran; a > gran && end - a < kReach; a -= gran)
         if (void* p = VirtualAlloc(reinterpret_cast<void*>(a), size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE))
-            return static_cast<uint8_t*>(p);
+            return static_cast<uint8_t*>(RegisterOwnCode(p));
     return nullptr;
 }
 
@@ -509,7 +509,7 @@ bool Redirect(uint8_t* call, void* hook, bool beforeGameCode)
 
     const int64_t rel = stub - (call + 5);
     if (rel != static_cast<int32_t>(rel)) {
-        VirtualFree(region, 0, MEM_RELEASE);
+        FreeOwnCode(region);
         Log("[cloth] call stub out of reach: fix disabled");
         return false;
     }
@@ -526,7 +526,7 @@ bool Redirect(uint8_t* call, void* hook, bool beforeGameCode)
         ok = true;  // unreachable: the stub is never the original target
     } else if (hi < qword + 8) {
         auto* q = reinterpret_cast<volatile LONG64*>(qword);
-        ok = VirtualProtect(reinterpret_cast<void*>(qword), 8, PAGE_EXECUTE_READWRITE, &old) != 0;
+        ok = CodeSiteProtect(reinterpret_cast<void*>(qword), 8, &old) != 0;
         if (ok) {
             const LONG64 before = *q;
             LONG64 after = before;
@@ -543,7 +543,7 @@ bool Redirect(uint8_t* call, void* hook, bool beforeGameCode)
         ok = false;
     }
     if (!ok) {
-        VirtualFree(region, 0, MEM_RELEASE);
+        FreeOwnCode(region);
         Log("[cloth] writing the call at exe+0x%X failed: fix disabled", static_cast<unsigned>(call - Game().base));
         return false;
     }

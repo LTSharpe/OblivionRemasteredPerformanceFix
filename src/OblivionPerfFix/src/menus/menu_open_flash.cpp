@@ -372,7 +372,7 @@ bool InstallMenuOpenFlashFix(bool beforeGameCode)
     } else ok = false;
     if (!ok) {
         for (int i = 0; i < nslots; ++i) WritePointer(g_shotSlots[i], shots);  // the hook only passes through meanwhile
-        VirtualFree(region, 0, MEM_RELEASE);
+        FreeOwnCode(region);
         Log("[menuflash] could not redirect RequestCapture's jmp or ProcessScreenShots' slots: fix not installed");
         return false;
     }

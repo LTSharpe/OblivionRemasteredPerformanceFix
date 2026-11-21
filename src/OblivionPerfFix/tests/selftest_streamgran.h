@@ -58,7 +58,9 @@ static void StreamGranRun()
     Check(gran.i == 1 && gran.flags == 0x03000000u && gran.sets == 1, "streamgran: key 1 sets 1 through Set at the project priority");
     StreamGranBeforeAdd(true);
     Check(gran.sets == 1, "streamgran: no Set while the value is already right");
+    Check(StreamLoadingModeNow() == 0, "streamgran: StreamLoadingModeNow reads 0 in play (WaterInfoAfterCrossing)");
     limit.f = 10000.0f;  // Altar's loading mode
+    Check(StreamLoadingModeNow() == 1, "streamgran: StreamLoadingModeNow reads 1 in Altar's loading mode");
     StreamGranBeforeAdd(true);
     Check(gran.i == 10, "streamgran: loading mode (time limit 10 s): the game's 10");
     StreamGranBeforeAdd(true);
@@ -150,4 +152,5 @@ static void StreamGranRun()
         StreamBudgetTestSetup(nullptr, nullptr);
     }
     StreamGranTestSetup(nullptr, nullptr);
+    Check(StreamLoadingModeNow() == -1, "streamgran: StreamLoadingModeNow reads -1 (unknown) without the hook / variables");
 }

@@ -190,6 +190,7 @@ if ($SelfTest) {
     Invoke-BelowNormal { cmd /c "call `"$vcvars`" >nul && cd /d `"$PSScriptRoot`" && cl /nologo /MP /std:c++20 /O2 /MT /EHsc /W4 /WX /permissive- /DUNICODE /D_UNICODE $defs /Isrc\core `"@$testRsp`" /Fo`"$test\\`" /Fe`"$test\selftest.exe`" /link /DYNAMICBASE" }
     if ($LASTEXITCODE) { throw "selftest build failed ($LASTEXITCODE)" }
     Push-Location $test
+    $env:OPF_SELFTEST_SRC = $PSScriptRoot  # the install-order test reads src\core\main.cpp (selftest_installorder.h)
     try {
         if ($Exe) { Write-Host "self-test against $Exe"; & .\selftest.exe $Exe } else { & .\selftest.exe }
         if ($LASTEXITCODE) { throw "selftest failed ($LASTEXITCODE)" }

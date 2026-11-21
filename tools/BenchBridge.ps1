@@ -34,6 +34,7 @@ $script:GameInstall = try { Get-OblivionGame } catch {
 }
 $script:GameLaunchMethod = if ($script:GameInstall.LaunchMethod) { $script:GameInstall.LaunchMethod }
                           elseif ($script:GameInstall.Source -eq 'Steam') { 'Steam' } else { 'Direct' }
+if ($env:OBLIVION_OBSE_BED) { $script:GameLaunchMethod = 'Obse' }   # lab: through obse64_loader.exe (Enable-BenchObse)
 $script:GameDir = $script:GameInstall.GameDir
 $script:GameExe = $script:GameInstall.Exe
 $script:GameWin64 = Join-Path $script:GameDir 'OblivionRemastered\Binaries\Win64'
@@ -240,6 +241,12 @@ function Start-SteamLaunch([string[]]$GameArgs = @()) {
 }
 
 function Start-OblivionLaunch([string[]]$GameArgs = @()) {
+    if ($script:GameLaunchMethod -eq 'Obse') {   # lab test bed (no game arguments: the loader passes none)
+        Write-Host (Enable-BenchObse)
+        Start-ObseLaunch
+        return
+    }
+    if (Test-Path -LiteralPath $script:ObseMarker) { Write-Host (Disable-BenchObse) }   # an interrupted OBSE64 run's leftovers
     if ($script:GameLaunchMethod -eq 'Steam') {
         Start-SteamLaunch -GameArgs $GameArgs
         return
@@ -419,8 +426,106 @@ function Enable-BenchUE4SS {
    Never throws: returns what it did, or why not. #>
 function Disable-BenchUE4SS {
     if (Get-Process $script:GameProcesses -ErrorAction SilentlyContinue) { return 'UE4SS left enabled: the game is still running' }
-    try { & (Join-Path $PSScriptRoot 'Install-UE4SS.ps1') -Disable -Quiet; 'UE4SS disabled (a game started outside the benchmark runs without it)' }
-    catch { "could not disable UE4SS: $_" }
+    $obse = Disable-BenchObse
+    $ue = try { & (Join-Path $PSScriptRoot 'Install-UE4SS.ps1') -Disable -Quiet; 'UE4SS disabled (a game started outside the benchmark runs without it)' }
+          catch { "could not disable UE4SS: $_" }
+    if ($obse) { "$ue; $obse" } else { $ue }
+}
+
+# ---------------------------------------------------------------- OBSE64 route (lab test bed, 2026-11-21, worker obseparity)
+# $env:OBLIVION_OBSE_BED (Run-Benchmark.ps1 -Obse <dir>) names a folder with obse64_loader.exe, obse64_<runtime>.dll and the
+# plugin to test (OblivionPerfFix.dll, OblivionPerfFix.ini, optional OblivionPerfFix-dumpwriter.exe). For that game only:
+# version.dll is moved aside (it would win the one-instance check), the loader and OBSE64's DLL go next to the exe, the
+# plugin into OBSE\Plugins\, and the game is started by the loader (hidden: no console, no window). After the game has
+# closed (Disable-BenchUE4SS, also from -Close) everything is taken out again and version.dll put back; bench-obse.json in
+# the runtime folder records what was done, so an interrupted run is undone by the next runner start or -Close.
+$script:ObseBed = $env:OBLIVION_OBSE_BED
+$script:ObseMarker = Join-Path $script:BenchRun 'bench-obse.json'
+
+function Enable-BenchObse {
+    $bed = $script:ObseBed
+    if (-not $bed -or -not (Test-Path -LiteralPath $bed -PathType Container)) { throw "OBSE64 test bed folder not found: $bed" }
+    if (Test-Path -LiteralPath $script:ObseMarker) { Disable-BenchObse | Write-Host }
+    $loader = Join-Path $bed 'obse64_loader.exe'
+    $core = @(Get-ChildItem -LiteralPath $bed -Filter 'obse64_*.dll' | Where-Object { $_.Name -match '^obse64_\d+_\d+_\d+\.dll$' })
+    $plugin = Join-Path $bed 'OblivionPerfFix.dll'
+    if (-not (Test-Path -LiteralPath $loader) -or $core.Count -ne 1 -or -not (Test-Path -LiteralPath $plugin)) {
+        throw "OBSE64 test bed incomplete in $bed (needs obse64_loader.exe, one obse64_<version>.dll, OblivionPerfFix.dll)"
+    }
+    # the loader shows a message box when its DLL does not fit the exe: check here instead (ProductVersion 1.512.105.0 -> 1_512_105)
+    $raw = [IO.File]::ReadAllBytes($script:GameExe)   # .NET reads no string table of this exe: find ProductVersion's text
+    $from = [Math]::Max(0, $raw.Length - 8MB) -band -2
+    $text = [Text.Encoding]::Unicode.GetString($raw, $from, $raw.Length - $from)
+    $want = if ($text -match "ProductVersion\x00+(\d+)\.(\d+)\.(\d+)\.\d+") { "obse64_$($Matches[1])_$($Matches[2])_$($Matches[3]).dll" } else { '?' }
+    if ($core[0].Name -ne $want) { throw "OBSE64 test bed: $($core[0].Name) does not fit this game ($want expected)" }
+    $done = [ordered]@{ created = @(); moved = @(); dirs = @() }
+    $save = { $done | ConvertTo-Json | Set-Content -LiteralPath $script:ObseMarker -Encoding utf8 }
+    & $save
+    $proxy = Join-Path $script:GameWin64 'version.dll'
+    if (Test-Path -LiteralPath $proxy) {
+        $aside = "$proxy.bench-obse"
+        if (Test-Path -LiteralPath $aside) { throw "OBSE64 test bed: $aside exists already (an earlier run's leftover): put it back by hand" }
+        Move-Item -LiteralPath $proxy -Destination $aside
+        $done.moved += , @($aside, $proxy); & $save
+    }
+    foreach ($f in @($loader, $core[0].FullName)) {
+        $to = Join-Path $script:GameWin64 (Split-Path $f -Leaf)
+        if (Test-Path -LiteralPath $to) { throw "OBSE64 test bed: $to exists already (OBSE64 installed by someone else?): not touched" }
+        Copy-Item -LiteralPath $f -Destination $to
+        $done.created += $to; & $save
+    }
+    $obseDir = Join-Path $script:GameWin64 'OBSE'
+    $plugins = Join-Path $obseDir 'Plugins'
+    foreach ($d in @($obseDir, $plugins)) {
+        # an empty folder left by an earlier run counts as ours (taken out again afterwards)
+        if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory $d | Out-Null; $done.dirs += $d; & $save }
+        elseif (-not (Get-ChildItem -LiteralPath $d -Force)) { $done.dirs += $d; & $save }
+    }
+    foreach ($n in 'OblivionPerfFix.dll', 'OblivionPerfFix.ini', 'OblivionPerfFix-dumpwriter.exe') {
+        $f = Join-Path $bed $n
+        if (-not (Test-Path -LiteralPath $f)) { continue }
+        $to = Join-Path $plugins $n
+        if (Test-Path -LiteralPath $to) { throw "OBSE64 test bed: $to exists already: not touched" }
+        Copy-Item -LiteralPath $f -Destination $to
+        $done.created += $to; & $save
+    }
+    "OBSE64 route: $($core[0].Name) and the loader next to the exe, the plugin from $bed in OBSE\Plugins, version.dll moved aside"
+}
+
+<# Undoes Enable-BenchObse (only what bench-obse.json lists) once no game runs; the plugin's logs are kept in
+   <runtime>\obse-logs\. Never throws: returns what it did. #>
+function Disable-BenchObse {
+    if (-not (Test-Path -LiteralPath $script:ObseMarker)) { return $null }
+    if (Get-Process $script:GameProcesses -ErrorAction SilentlyContinue) { return 'OBSE64 test bed left in place: the game is still running' }
+    try {
+        $done = Get-Content -LiteralPath $script:ObseMarker -Raw | ConvertFrom-Json
+        $keep = Join-Path $script:BenchRun ('obse-logs\{0:yyyyMMdd-HHmmss}' -f (Get-Date))
+        $plugins = Join-Path $script:GameWin64 'OBSE\Plugins'
+        # every file the game made there (logs, csvs, the GPU note): kept; the copies listed in the marker are removed below
+        foreach ($l in @(Get-ChildItem -LiteralPath $plugins -File -ErrorAction SilentlyContinue | Where-Object { @($done.created) -notcontains $_.FullName })) {
+            New-Item -ItemType Directory -Force $keep | Out-Null
+            Move-Item -LiteralPath $l.FullName -Destination $keep -Force
+        }
+        foreach ($f in @($done.created)) { if ($f -and (Test-Path -LiteralPath $f)) { Remove-Item -LiteralPath $f -Force } }
+        foreach ($d in @($done.dirs) | Sort-Object Length -Descending) {
+            if ($d -and (Test-Path -LiteralPath $d) -and -not (Get-ChildItem -LiteralPath $d -Force)) { Remove-Item -LiteralPath $d }
+        }
+        foreach ($m in @($done.moved)) {
+            if ($m -and (Test-Path -LiteralPath $m[0]) -and -not (Test-Path -LiteralPath $m[1])) { Move-Item -LiteralPath $m[0] -Destination $m[1] }
+        }
+        Remove-Item -LiteralPath $script:ObseMarker
+        "OBSE64 test bed taken out (version.dll back$(if (Test-Path -LiteralPath $keep) { "; plugin logs in $keep" }))"
+    } catch { "could not take the OBSE64 test bed out: $_ (see $($script:ObseMarker))" }
+}
+
+<# Starts the game through obse64_loader.exe from a process Windows' WMI service creates (no right to take the foreground),
+   detached (no console window) and hidden. The loader starts the exe suspended, injects OBSE64, resumes it and exits. #>
+function Start-ObseLaunch {
+    $loader = Join-Path $script:GameWin64 'obse64_loader.exe'
+    $startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0; CreateFlags = [uint32]8 }
+    $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+        CommandLine = "`"$loader`""; CurrentDirectory = $script:GameWin64; ProcessStartupInformation = $startup } -ErrorAction Stop
+    if ($r.ReturnValue -ne 0) { throw "obse64_loader.exe did not start through WMI (code $($r.ReturnValue))" }
 }
 
 <# Why Steam did not start the game, from its UI log (logs\webhelper_js.txt) since $Since; $null if nothing known.
@@ -452,6 +557,8 @@ using System; using System.Runtime.InteropServices;
 namespace OblvBench {
     public static class ProcessFreeze {
         [DllImport("ntdll.dll")] static extern int NtSuspendProcess(IntPtr h);
+        [DllImport("ntdll.dll")] static extern int NtResumeProcess(IntPtr h);
+        [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr h, int cls, byte[] buf, int len, out int ret);
         [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(int access, bool inherit, int pid);
         [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
         // freezes every thread of the process (PROCESS_SUSPEND_RESUME); true on success
@@ -459,6 +566,26 @@ namespace OblvBench {
             IntPtr h = OpenProcess(0x0800, false, pid);
             if (h == IntPtr.Zero) return false;
             try { return NtSuspendProcess(h) >= 0; } finally { CloseHandle(h); }
+        }
+        // lowers the suspend count of every thread by one (closefix 2026-11-18: a game frozen for the audio check and then
+        // hit by TerminateProcess stayed "termination pending" with a suspended thread until it was resumed); true on success.
+        // Harmless on a process that is not suspended.
+        public static bool Resume(int pid) {
+            IntPtr h = OpenProcess(0x0800, false, pid);
+            if (h == IntPtr.Zero) return false;
+            try { return NtResumeProcess(h) >= 0; } finally { CloseHandle(h); }
+        }
+        // true when the process is already being deleted (TerminateProcess/ExitProcess ran, it only has to finish):
+        // PROCESS_EXTENDED_BASIC_INFORMATION.Flags bit 2 (IsProcessDeleting). false if it cannot be asked.
+        public static bool IsDeleting(int pid) {
+            IntPtr h = OpenProcess(0x1000, false, pid);      // PROCESS_QUERY_LIMITED_INFORMATION
+            if (h == IntPtr.Zero) return false;
+            try {
+                byte[] b = new byte[64]; BitConverter.GetBytes((long)64).CopyTo(b, 0);   // Size (x64)
+                int ret;
+                if (NtQueryInformationProcess(h, 0, b, 64, out ret) < 0) return false;
+                return (BitConverter.ToUInt32(b, 56) & 4) != 0;
+            } finally { CloseHandle(h); }
         }
     }
 }
@@ -534,6 +661,39 @@ function Save-PreviousFixLog {
     $to
 }
 
+<# Resumes a game process that cannot end (closefix 2026-11-18): after a GPU timeout a game that the runner had frozen
+   (NtSuspendProcess) stayed "termination pending" with its last thread suspended, Stop-Process / taskkill could not finish
+   it and every later -Close froze it once more (suspend count 4) while it held 3.2 GB of VRAM and kept version.dll mapped.
+   One NtResumeProcess per freeze let it exit at once. Resumes up to $MaxTimes times, checking after each whether it is
+   gone. Harmless on a process that is not frozen. Returns @{ Times; Gone }. #>
+function Resume-StuckGame($p, [int]$MaxTimes = 8, [int]$WaitMs = 1500) {
+    $times = 0
+    $gone = $false
+    try { $gone = [bool]$p.HasExited } catch { $gone = $true }
+    while (-not $gone -and $times -lt $MaxTimes) {
+        [OblvBench.ProcessFreeze]::Resume($p.Id) | Out-Null
+        $times++
+        try { $gone = [bool]$p.WaitForExit($WaitMs) } catch { $gone = $true }
+    }
+    @{ Times = $times; Gone = $gone }
+}
+
+<# Ends the game process: Stop-Process, a short wait, and if it is still there (frozen, termination pending) it is resumed
+   up to 8 times so it can finish. Never leaves it frozen. Returns a note when the resume was needed, else $null. #>
+function Stop-GameProcess($p, [int]$WaitMs = 15000) {
+    Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+    try { if ($p.WaitForExit([math]::Min($WaitMs, 3000))) { return $null } } catch { return $null }
+    $r = Resume-StuckGame $p
+    $msg = "resumed a frozen game $($r.Times) time(s) so it could exit: $(if ($r.Gone) { 'gone' } else { 'still there' })"
+    if (-not $r.Gone) {
+        # one more kill, then the rest of the wait
+        Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+        try { if ($p.WaitForExit([math]::Max($WaitMs - 3000, 1000))) { $msg += ' (ended after a second kill)' } } catch {}
+    }
+    Write-Host $msg
+    $msg
+}
+
 <# Ends a game that does not answer (hung, crashed) without a sound: it is frozen first (no new audio), and only when its
    audio session's meter then reads silence for 200 ms is it un-muted (Windows would keep the mute for the next launch);
    otherwise it ends muted (the flag file stays: the next benchmark game's close or Repair-GameMute un-mutes). Waits for
@@ -544,6 +704,12 @@ function Stop-GameQuietly($p) {
     if ($w) { $notes.Add($w) }
     $p.Refresh()
     if ($p.HasExited) { $notes.Add('the game had ended by itself'); return $notes }
+    if ([OblvBench.ProcessFreeze]::IsDeleting($p.Id)) {     # already terminating (an earlier kill did not finish): freezing it again would only keep it from ending
+        $notes.Add('the game is already terminating (not frozen again)')
+        $r = Stop-GameProcess $p 20000
+        if ($r) { $notes.Add($r) }
+        return $notes
+    }
     $frozen = [OblvBench.ProcessFreeze]::Suspend($p.Id)
     $quiet = 0
     $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -559,13 +725,13 @@ function Stop-GameQuietly($p) {
         [OblvBench.GameAudio]::Stop()
         $notes.Add("ended the game muted ($(if ($frozen) { 'its audio did not read silence after freezing it' } else { 'could not freeze it' })); the next benchmark game un-mutes it")
     }
-    Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-    $p.WaitForExit(20000) | Out-Null
+    $r = Stop-GameProcess $p 20000
+    if ($r) { $notes.Add($r) }
     $notes
 }
 
 function Start-Game {
-    param([int]$TimeoutSec = 240, [switch]$Unobtrusive, [switch]$Audible, [string[]]$GameArgs = @(), [uint64]$CpuMask = 0)
+    param([int]$TimeoutSec = 240, [switch]$Unobtrusive, [switch]$Audible, [string[]]$GameArgs = @(), [uint64]$CpuMask = 0, [switch]$MuteShown)
     if (Get-Game) { throw 'The game is already running.' }
     # Steam refuses a launch while the previous instance (launcher stub, crash reporter) is still around
     $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -578,6 +744,7 @@ function Start-Game {
     if ($kept) { Write-Host "previous DLL log kept: $kept" }
     Enable-BenchUE4SS                      # only for this game: taken out again once it has closed
     if ($Unobtrusive) { Start-Unobtrusive -Audible:$Audible } else { Start-ShownHook }
+    if ($MuteShown -and -not $Unobtrusive -and -not $Audible) { [OblvBench.GameAudio]::Start([string[]]@($script:GameProcessName)) }   # -Visible -Muted (2026-11-19, worker onscreen): on screen but silent
     $launchedAt = Get-Date
     # for tools\Runner-Guard.ps1: if this process dies now, the game about to start is this runner's
     Set-BenchLaunch @{ runnerPid = $PID; launchAt = $launchedAt.ToString('o') }
@@ -647,8 +814,7 @@ function Stop-Game {
     if (-not $p.HasExited) { Send-Bench 'quit' -TimeoutMs 3000 -NoThrow | Out-Null }
     if (-not $p.WaitForExit($GraceSec * 1000)) {
         Write-Host 'Game did not quit by itself; closing it.'
-        Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-        $p.WaitForExit(15000) | Out-Null
+        Stop-GameProcess $p 15000 | Out-Null
     }
     # the launcher stub exits with the game; give it a moment so the next start is clean
     $sw = [Diagnostics.Stopwatch]::StartNew()

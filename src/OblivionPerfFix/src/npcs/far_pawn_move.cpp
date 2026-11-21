@@ -452,7 +452,7 @@ bool FarPawnMoveDiscover(const GameModule& game, uint32_t rootOffset, FarPawnMov
 bool InstallFarPawnMove(bool beforeGameCode, int mode, int hz, int horseMode, int minDistance, int maxStepMs)
 {
     if (g_installed) return true;
-    if (!beforeGameCode) { Log("[farmove] FarPawnMoveHalfRate: start-up only (version.dll route), not installed"); return false; }
+    if (!beforeGameCode) { Log("[farmove] FarPawnMoveHalfRate: start-up only (loaded late here), not installed"); return false; }
     NpcPacingInfoOut pi{};
     if (!NpcPacingInfo(&pi) || !pi.rootOffset || !pi.locationOffset) {
         Log("[farmove] FarPawnMoveHalfRate: needs NpcCreationPacing (the player's position), not installed");

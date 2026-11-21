@@ -554,7 +554,7 @@ bool PatchEntry(uint8_t* fn, uint8_t* stub, bool beforeGameCode)
     if ((reinterpret_cast<uintptr_t>(fn) & 7) == 0) {
         auto* q = reinterpret_cast<volatile LONG64*>(fn);
         DWORD old;
-        if (!VirtualProtect(fn, 8, PAGE_EXECUTE_READWRITE, &old)) return false;
+        if (!CodeSiteProtect(fn, 8, &old)) return false;
         const LONG64 before = *q;
         LONG64 after = before;
         memcpy(&after, insn, sizeof insn);
@@ -684,7 +684,7 @@ bool InstallPsoPrecompileFast(bool beforeGameCode)
     memcpy(tramp, fn, kEntryLen);
     const int64_t disp = reinterpret_cast<uint8_t*>(singleton) - (tramp + kSingletonCmp + 8);
     if (disp != static_cast<int32_t>(disp)) {
-        VirtualFree(region, 0, MEM_RELEASE);
+        FreeOwnCode(region);
         Log("[pso] trampoline out of reach of the singleton: fix not installed");
         return false;
     }

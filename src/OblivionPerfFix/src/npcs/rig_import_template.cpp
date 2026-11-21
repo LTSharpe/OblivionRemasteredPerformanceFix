@@ -691,7 +691,7 @@ bool InstallRigImportTemplate(bool beforeGameCode)
 {
     if (g_installed) return true;
     if (!beforeGameCode) {
-        Log("[rigtmpl] RigImportTemplate: only installed while the game starts (version.dll route), not installed");
+        Log("[rigtmpl] RigImportTemplate: only installed while the game starts (loaded late here), not installed");
         return false;
     }
     g_gameThread = GetCurrentThreadId();  // DllMain of the statically imported version.dll runs on the main (= game) thread

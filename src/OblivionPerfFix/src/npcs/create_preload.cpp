@@ -214,8 +214,9 @@ int WaitFor(uint64_t pkg)
     }
     return 2;
 }
-// LoadPackageAsync(package name of "Package.Object" or "Package") at the sync load's priority, no delegate
-void RequestPath(const wchar_t* s, int32_t len)
+// LoadPackageAsync(package name of "Package.Object" or "Package"), no delegate; priority: the sync load's (INT32_MAX) unless
+// told otherwise (CellObjectPreload asks below the game's own background loads)
+void RequestPath(const wchar_t* s, int32_t len, int32_t priority = 0x7FFFFFFF)
 {
     wchar_t buf[kPathChars];
     int32_t n = 0;
@@ -227,7 +228,7 @@ void RequestPath(const wchar_t* s, int32_t len)
     buf[n] = 0;
     FStr name{buf, n + 1, n + 1};
     uint64_t delegate[2] = {0, 0};  // unbound FLoadPackageAsyncDelegate (the callee destroys it: nothing to free)
-    g.loadAsync(&name, delegate, 0x7FFFFFFF, 0, -1);
+    g.loadAsync(&name, delegate, priority, 0, -1);
     g.requests.fetch_add(1, std::memory_order_relaxed);
 }
 // The soft path at sp as a string (the game's ToString), copied into buf; its length (0 = none).
@@ -355,6 +356,29 @@ int Predict(const uint8_t* holder, uint32_t form)
     return 1;
 }
 
+// The resident actor class of a base form (CreateAhead), null while the form asset or its class is not loaded.
+void* ClassOf(const uint8_t* holder, uint32_t form)
+{
+    const void* asset = CachedAsset(holder, form);
+    if (!asset) {
+        wchar_t path[kPathChars];
+        const int len = AssetPath(holder, form, path, kPathChars);
+        if (!len) return nullptr;
+        uint64_t pkg = 0;
+        asset = ResolveString(path, len, &pkg);
+        if (!asset) return nullptr;
+    }
+    const int off = ClassPathOffset(asset);
+    if (off < 0) return nullptr;
+    const uint8_t* sp = static_cast<const uint8_t*>(asset) + off;
+    __try {
+        if (!*reinterpret_cast<const uint64_t*>(sp)) return nullptr;
+        return g.resolve(sp);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
 uint64_t LookupHook(uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6, uint64_t a7, uint64_t a8)
 {
     const uint8_t* h = reinterpret_cast<const uint8_t*>(a1);
@@ -446,7 +470,7 @@ bool InstallCreatePreload(bool beforeGameCode)
 {
     if (g.base) return true;
     if (!beforeGameCode) {
-        Log("[createpreload] CreatePreload: start-up only (version.dll route), not installed");
+        Log("[createpreload] CreatePreload: start-up only (loaded late here), not installed");
         return false;
     }
     NpcPacingInfoOut pi{};
@@ -502,6 +526,112 @@ bool InstallCreatePreload(bool beforeGameCode)
 }
 
 void SetCreatePreload(int mode) { g.mode.store(mode ? 1 : 0, std::memory_order_relaxed); }
+bool CreatePreloadInstalled() { return g.base != nullptr; }  // CellObjectPreload's install check (fixmerge, rev-preload N1)
+
+// CreateAhead (create_ahead.cpp), game thread: the actor class a create of this base form will spawn (the form asset's class
+// path by Altar's rule, resolved with the game's ResolveObject), or null while the form asset or the class is not resident.
+// request: what is missing is asked for now (this file's own prediction and LoadPackageAsync requests).
+void* CreatePreloadClassFor(uint32_t form, bool request)
+{
+    if (!g.base) return nullptr;
+    const uint8_t* holder = g.holder.load(std::memory_order_relaxed);
+    if (g.mode.load(std::memory_order_relaxed) == 0 || !holder || g.holderChanged.load(std::memory_order_relaxed)) return nullptr;
+    if (request) Predict(holder, form);
+    return ClassOf(holder, form);
+}
+
+// CellObjectPreload (streaming/cell_preload.cpp, worker preload 2026-11-18), game thread: where a base form's two packages
+// (the form asset, then the actor class its create spawns, read by Altar's rule as Predict reads it) stand, and the missing
+// one requested now if ask allows it (bit 0 the form asset, bit 1 the class; the same LoadPackageAsync as Predict's, no
+// delegate, but at priority -1, below the game's own background loads (UE 5.3 default 0, level streaming's StreamingPriority
+// default 0): when the create's own load asks for the same package at INT32_MAX, the loader raises the in-flight package and
+// its imports to that (AsyncLoading2.cpp FindOrInsertPackage / UpdatePackagePriorityRecursive), so a create never waits
+// longer than stock. CreatePreload's wait table is not touched, so a create's own wait rules do not change). A form asset
+// whose package is in flight cannot be found from the game thread (StaticFindObjectFast skips async-loading objects), so it
+// reads as "not resident" until its package has completed: the caller asks for the form asset once and then only for the
+// class (fixmerge, review rev-preload S1). An object counts as loaded only without the four "still loading"
+// flags StaticLoadObject checks before it takes an object it found (UObjectBase flags +0x08; RF_NeedLoad | RF_NeedPostLoad |
+// RF_NeedPostLoadSubobjects | RF_WillBeLoaded = 0x08003400, pinned on the exe by CreatePreloadAheadDiscover): such an object
+// is in flight, so nothing is requested for it and its class path is not read yet.
+// Returns -1 not ready (CreatePreload not installed / off, no lookup seen yet), 0 nothing to load (no UE-side asset, no
+// class path), 1 the form asset is loading (requested now when *requested bit 0), 2 the class is loading (bit 1), 3 both
+// loaded.
+namespace {
+// UE 5.3 StaticLoadObjectInternal (exe+0x1123920 area, twice): mov eax,[rax+8]; test eax,08003400h; je
+constexpr char kLoadingTest[] = "48 85 C0 74 ?? 8B 40 08 A9 00 34 00 08 0F 84";
+constexpr size_t kObjFlags = 0x08;
+constexpr uint32_t kLoadingFlags = 0x08003400;
+bool StillLoading(const void* obj)
+{
+    __try {
+        return (*reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(obj) + kObjFlags) & kLoadingFlags) != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return true;
+    }
+}
+}  // namespace
+
+bool CreatePreloadAheadDiscover(const GameModule& game, const char** missing)
+{
+    *missing = nullptr;
+    const auto hits = FindAll(game.text, ParsePattern(kLoadingTest));
+    if (hits.empty() || hits.size() > 4) {
+        *missing = "StaticLoadObject's still-loading flag test";
+        return false;
+    }
+    return true;
+}
+
+constexpr int32_t kAheadPriority = -1;
+
+int CreatePreloadAheadStep(uint32_t form, uint32_t ask, uint32_t* requested)
+{
+    *requested = 0;
+    if (!g.base || g.mode.load(std::memory_order_relaxed) == 0) return -1;
+    const uint8_t* holder = g.holder.load(std::memory_order_relaxed);
+    if (!holder || g.holderChanged.load(std::memory_order_relaxed)) return -1;
+    const void* asset = CachedAsset(holder, form);
+    if (!asset) {
+        wchar_t path[kPathChars];
+        const int len = AssetPath(holder, form, path, kPathChars);
+        if (!len) return 0;  // no UE-side asset for this form
+        uint64_t pkg = 0;
+        asset = ResolveString(path, len, &pkg);
+        if (!asset) {
+            if (!pkg) return 0;
+            if (ask & 1) {
+                RequestPath(path, len, kAheadPriority);
+                *requested |= 1;
+            }
+            return 1;
+        }
+        if (StillLoading(asset)) return 1;  // in flight (ours or the game's): its class path is read once it is loaded
+    }
+    const int off = ClassPathOffset(asset);
+    if (off < 0) return 0;
+    const uint8_t* sp = static_cast<const uint8_t*>(asset) + off;
+    uint64_t pkg = 0;
+    if (NotResident(sp, &pkg)) {
+        if (ask & 2) {
+            wchar_t path[kPathChars];
+            const int len = SoftPathString(sp, path, kPathChars);
+            if (len) {
+                RequestPath(path, len, kAheadPriority);
+                *requested |= 2;
+            }
+        }
+        return 2;
+    }
+    if (!pkg) return 0;  // no class path (or unreadable)
+    const void* cls = nullptr;
+    __try {
+        cls = g.resolve(sp);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    return cls && StillLoading(cls) ? 2 : 3;
+}
+
 void SetCreatePreloadEarly(bool on)
 {
     if (g.early.exchange(on) != on && g.base)

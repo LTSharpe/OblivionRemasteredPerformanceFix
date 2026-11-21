@@ -517,6 +517,23 @@ static void Check(bool ok, const char* what)
     if (!ok) ++g_failures;
 }
 
+// PerceptionLosPrefetch's sites, captured before any test rewrites the mapped exe (the lab PerceptionIgnoreReuse test installs
+// into the same round and helper; our review of PR #55). The perclos block below checks these values.
+struct PerclosSites {
+    bool captured = false;
+    const char* why = "not captured";
+    uint32_t rr = 0, rc = 0, rh = 0, rf = 0, join = 0, ga = 0, gc = 0, eye = 0, lwi = 0;
+};
+static PerclosSites g_perclos;
+static void PerclosCapture(const GameModule& game)
+{
+    g_perclos.captured = true;
+    g_perclos.why = PerceptionLosTestDiscover(game, &g_perclos.rr, &g_perclos.rc, &g_perclos.rh, &g_perclos.rf);
+    g_perclos.join = PerceptionLosTestJoinSite(game);
+    PerceptionLosTestGatherSites(game, &g_perclos.ga, &g_perclos.gc);
+    PerceptionLosTestGuardSites(game, &g_perclos.eye, &g_perclos.lwi);
+}
+
 // A fix whose code was not found (e.g. on another game build) leaves its hooks unset. Its remaining checks call
 // through those hooks, so they are skipped with one FAIL line instead of crashing the self-test.
 static bool Installed(bool ok, const char* fix)
@@ -559,10 +576,13 @@ static uint64_t HashWords(uint64_t seed, const void* data, size_t bytes)
 #include "selftest_rigsetup.h"      // RigVmHashMemo / RigLogicMapCache: sites, memo and map replay with fakes
 #include "selftest_rigtmpl.h"       // RigImportTemplate: discovery, offsets, the RemoveElement guard, cap and table with fakes
 #include "selftest_farpawn.h"       // FarPawnMoveHalfRate / FarHorseMove: discovery, cadence, root motion, input mean, fakes
+#include "selftest_createahead.h"   // CreateAhead: sites, parameter / scale rules, build / adopt / drop rules with fakes
 #include "selftest_createpreload.h" // CreatePreload: sites, the form-asset map readers with a fake holder, per-command wait count
+#include "selftest_cellpreload.h"   // CellObjectPreload: sites, the cell walk and the request rules with a fake look-up and clock
 #include "selftest_impactpreload.h" // ImpactPreload: sites, the preload state machine with fakes
 #include "selftest_npcbodies.h"     // NpcBodiesOneLock: sites and the one-hold wrapper with a fake scene lock
 #include "selftest_rtscene.h"       // RtSceneBufferKeep: sites, patch and the stub's decisions
+#include "selftest_poolkeep.h"      // GpuPoolKeepMB: sites, the keep decision, the hook on fake allocators, the patch
 #include "selftest_rtbatch.h"       // RayTracingBuildBatch: sites, patch and the queue decision
 #include "selftest_nanite.h"        // NaniteInitialRootPages (lab: NaniteStreamProbe / Nanite*MinMB with a fake resize)
 #include "selftest_waterinfo.h"     // the water-info capture keys (lab: and WaterInfoProbe): sites and patches
@@ -577,7 +597,15 @@ static uint64_t HashWords(uint64_t seed, const void* data, size_t bytes)
 #include "selftest_clothdefer.h"     // ClothBuildDefer: sites, hooks and the defer rule (after ClothRegisterLite)
 #include "selftest_bodyspread.h"   // BodyRemovalSpread: sites on the mapped exe, the queue / drain / drop logic with fakes
 #include "selftest_epicport.h"     // StreamOutEndPlaySlice, ResetLoadersNoFlush: sites on the mapped exe, the hooks with fakes
+#include "selftest_barfinish.h"    // StartupBarFinish: the loops' step calls on the mapped exe, the hook in the game's loop with a fake step
+#include "selftest_gapfix.h"       // TopicSort (the game's own sort vs ours on the mapped exe) and PluginPrefetch (path, list parse)
+#include "selftest_gchold.h"       // GcPassAfterBusy: sites on the mapped exe, the hold with a fake engine frame by frame
+#include "selftest_gcprep.h"       // GcPrepAhead: sites on the mapped exe, the step with a fake pending list through GcPassAfterBusy's hook
+#include "selftest_gcmark.h"       // GcMarkPriority: sites on the mapped exe, refusals and the patch on fake code, the raise with fake thunks
 #include "selftest_streamgran.h"    // StreamRegisterGranularity: the cvar's int on the mapped exe, set / live / left alone
+#include "selftest_physcap.h"     // PhysicsSubstepCap: names in the mapped exe, find / write / live / left-alone rules on fake objects, Engine.ini lines
+#include "selftest_hooks.h"       // other mods' hooks (call-only look-ups, refused patch sites) and the load stage
+#include "selftest_navprio.h"      // NavQueryPriority: the name on the mapped exe, the set / live / left-alone rules with a fake console variable
 #include "selftest_indirectargs.h"  // IndirectArgBufferPool: the cvar's int on the mapped exe, start-up rules
 #include "selftest_filereads.h"     // ParallelFileReads: the reader on the mapped exe, the replacement against stand-ins and a real file
 #include "selftest_lumennarrow.h"   // LumenCardsNarrow: sites, refusal, stub, unwind, the decision with fakes (lab: the proof)
@@ -588,10 +616,13 @@ static uint64_t HashWords(uint64_t seed, const void* data, size_t bytes)
 #include "selftest_gpushot.h"         // GpuMenuShot: sites by pattern on the mapped exe, the shader arithmetic, the shader on this GPU
 #include "selftest_thumbleft.h"        // SaveThumbLeftoverFix: sites by pattern, the removal decision, the bound-entry search
 #include "selftest_repath.h"        // RepathParallel: discovery on the mapped exe, the key, the nav-edit counter, the link marker
+#include "selftest_installorder.h"  // start-up install order: keys whose Install* reads another fix's install state come after it
 #include "selftest_bufferfloor.h"   // InstanceBufferFloor: gate, the reserve (lab SceneBufferFloorMiB: sites, stub, hook, patches)
 #include "selftest_pairrace.h"      // PairReleaseOnce: discovery, the fix's writes and counting stubs (lab PairRaceProbe: a fake pool)
 #include "selftest_otframe.h"       // OtFrameTrim: discovery, install, the consumer and timer with fakes
 #include "selftest_loosemiss.h"     // LooseMissCache: discovery, install, the finder's checks with a fake _access
+#include "selftest_poweranim.h"     // PowerAttackAnimKeep: discovery, fakes, the hook, the game's release through the patch
+#include "selftest_flowonce.h"      // FlowOverlapsOnce: discovery, install, the hook with a fake adoption and UpdateOverlaps
 #include "selftest_animpar.h"      // AnimTeardownParallel's shapes and the helper queue with fakes
 #include "selftest_cellbuf.h"      // CellBufferPacedEvict's shapes, the clamp stub and the buffer LRU with and without the fix
 #include "selftest_rowpreload.h"   // RowPreload: sites (CellBufferPacedEvict's too) and the preload logic with fakes
@@ -1194,6 +1225,13 @@ int wmain(int argc, wchar_t** argv)
         Check(Config().drawBehindLoading == 3 && LoadConfig(ini).drawBehindLoading == 3, "DrawBehindLoadingScreen: 3 by default");
         put(ini, "[Fixes]\r\nDrawBehindLoadingScreen=0\r\n");
         Check(LoadConfig(ini).drawBehindLoading == 0, "DrawBehindLoadingScreen=0 is read");
+        Check(Config().navQueryPriority == 1 && LoadConfig(ini).navQueryPriority == 1, "NavQueryPriority: 1 by default and when missing (1.6.0)");
+        put(ini, "[Fixes]\r\nNavQueryPriority=0\r\n");
+        Check(LoadConfig(ini).navQueryPriority == 0, "NavQueryPriority=0 is read");
+        Check(Config().physicsSubstepCap == 1 && LoadConfig(ini).physicsSubstepCap == 1, "PhysicsSubstepCap: 1 by default and when missing (1.6.0)");
+        put(ini, "[Fixes]\r\nPhysicsSubstepCap=0\r\n");
+        Check(LoadConfig(ini).physicsSubstepCap == 0, "PhysicsSubstepCap=0 is read");
+        put(ini, "[Fixes]\r\nDrawBehindLoadingScreen=0\r\n");
         {
             char why[160] = "";
             const bool ok = DrawBehindLoadingSelfTest(why, sizeof why);
@@ -1587,9 +1625,12 @@ int wmain(int argc, wchar_t** argv)
 
     GameModule game;
     Check(InitGameModule(game, module), "game module sections found");
+    SetLoadStage(LoadStage::InDllMain);  // the self-test runs the fixes as version.dll's DllMain does (the default is Late)
     if (game.timeDateStamp == 0xF19077A4u) Check(NoteGameBuild(game), "game build: this exe is the Steam build NoteGameBuild knows");
+    PerclosCapture(game);  // PerceptionLosPrefetch's sites before any test rewrites the round or the helper (lab tests do)
     scantest::Begin();  // every search below is checked against the reference search
     scantest::RandomTests(game);
+    hooks_test::Run(game);  // other mods' hooks and the load stage (selftest_hooks.h); puts the mapped exe back
 
     // Runtime helpers: long-uptime clocks and affinity-limited helper counts.
     Check(QpcToMicroseconds(184467440737095ULL, 10000000) == 18446744073709ULL,
@@ -2749,6 +2790,407 @@ int wmain(int argc, wchar_t** argv)
         }
     }
 
+    // StuckEffectLookFix (game bug #48): the record / pass rules on fakes, then the exec functions on the mapped exe and the
+    // entry detour of SetOverlayMaterial's exec on the private copy.
+    {
+        const int logic = StuckEffectLookTestLogic();
+        if (logic) printf("  StuckEffectLookFix: check %d failed\n", logic);
+        Check(logic == 0, "StuckEffectLookFix: leftover on a quiver cleared (and its static-mesh flags), nothing while the effect shows, "
+                          "the sword's own look put back, a foreign base gives none, other setters and unseen changes left alone, "
+                          "a dismounted rider and a gone component, off and destroyed meshes untouched, the horse's look kept "
+                          "only while the rider is attached, an ended look skipped for a deeper one, a gone top component, "
+                          "history overflow, table full, the hook's off / off-game-thread / in-pass gates, the name and "
+                          "offset lookup (and a missing name: does nothing)");
+        StuckEffectLookInfo si{};
+        const bool found = FindStuckEffectLook(&si);
+        Check(found, "StuckEffectLookFix: SetOverlayMaterial / SetVisibleInRayTracing exec functions, FName, GUObjectArray found");
+        if (found && game.timeDateStamp == 0xF19077A4u) {
+            Check(si.exec - game.base == 0x3054490 && si.rtExec - game.base == 0x2D89C10,
+                  "StuckEffectLookFix: the exec functions at exe+0x3054490 / exe+0x2D89C10 (build 19115871)");
+            Check(si.overlayOffset == 0x5B0 && si.precacheSlot == 0x640, "StuckEffectLookFix: OverlayMaterial +0x5B0, PrecachePSOs slot +0x640");
+        }
+        if (Installed(found && InstallStuckEffectLook(true), "StuckEffectLookFix (stuck effect look)")) {
+            Check(si.exec[0] == 0xE9, "StuckEffectLookFix: SetOverlayMaterial's exec starts with the detour's jmp");
+            Check(InstallStuckEffectLook(true), "StuckEffectLookFix: a second install finds it in place");
+            SetStuckEffectLookFix(false);
+        }
+    }
+
+    // WorldSoundPositionFix (GitHub #52): the bank walk on a synthetic bank laid out like the game's (our own bytes: a bank
+    // header, a HIRC chunk with listed and unlisted objects), then the 8 exported Wwise bank loaders on the mapped exe and
+    // their entry detours on the private copy, and one hook call with a fake original (writable and read-only bank).
+    {
+        std::vector<uint8_t> hirc;
+        auto u8 = [&](uint8_t v) { hirc.push_back(v); };
+        auto u32 = [&](uint32_t v) {
+            for (int k = 0; k < 4; ++k) hirc.push_back(static_cast<uint8_t>(v >> (8 * k)));
+        };
+        size_t bitsAt[8] = {};
+        int nobj = 0;
+        uint32_t plugin = 0x00040001;  // a sound object's source plugin (type 2 = a source plugin with a parameter block)
+        uint32_t paramLen = 0;
+        // one HIRC object: type, size, id, [sound source], node base up to uBits3d, then `tail` filler bytes
+        auto object = [&](uint8_t type, uint32_t id, bool sound, int nfx, uint32_t parent, uint32_t att, uint8_t posBits, uint8_t bits3d,
+                          int tail) -> size_t {
+            u8(type);
+            const size_t sizeAt = hirc.size();
+            u32(0);
+            u32(id);
+            if (sound) {
+                u32(plugin);
+                u8(0);
+                u32(0x1234);
+                u32(100);
+                u8(0);
+                if ((plugin & 0xF) == 2) {
+                    u32(paramLen);
+                    for (uint32_t k = 0; k < paramLen; ++k) u8(0x55);
+                }
+            }
+            u8(nfx ? 1 : 0);
+            u8(static_cast<uint8_t>(nfx));
+            if (nfx) {
+                u8(0);
+                for (int k = 0; k < nfx; ++k) {
+                    u8(static_cast<uint8_t>(k));
+                    u32(0x29DCEA45);
+                    u8(0);
+                }
+            }
+            u8(0);  // metadata
+            u8(0);
+            u32(0);  // bus
+            u32(parent);
+            u8(0);  // priority bits
+            u8(2);  // props: volume, attenuation
+            u8(0x00);
+            u8(0x55);
+            u32(0xC0C00000);
+            u32(att);
+            u8(0);  // ranges
+            u8(posBits);
+            const size_t at = hirc.size();
+            u8(bits3d);
+            for (int k = 0; k < tail; ++k) u8(static_cast<uint8_t>(0xA0 + k));
+            const uint32_t osz = static_cast<uint32_t>(hirc.size() - sizeAt - 4);
+            memcpy(hirc.data() + sizeAt, &osz, 4);
+            ++nobj;
+            return at;
+        };
+        u32(0);                                                                                 // object count, set below
+        bitsAt[0] = object(5, 0x0BCA8316, false, 0, 0x0E0B72D9, 0x15942315, 0x03, 0x80, 40);  // NPC torch: 3D + attenuation
+        bitsAt[1] = object(5, 0x2BE59E41, false, 0, 0x1E32EB8D, 0x15942315, 0x03, 0x80, 40);  // the player's 1st-person torch: unlisted
+        bitsAt[2] = object(5, 0x121578BC, false, 1, 0x210871A2, 0x3B8BC7B9, 0x03, 0x88, 30);  // deer footsteps, with an effect slot
+        bitsAt[3] = object(2, 0x17C5C5E5, true, 0, 0x3DC3B884, 0x2922A303, 0x03, 0x08, 20);   // a trap sound object
+        bitsAt[4] = object(5, 0x39635892, false, 0, 0x11111111, 0x03FE78AC, 0x03, 0x08, 20);  // ogre: another parent -> differs
+        bitsAt[5] = object(5, 0x0330BC32, false, 0, 0x07F032AF, 0x3B8BC7B9, 0x03, 0x0A, 20);  // spider: already 3D -> left
+        bitsAt[6] = object(5, 0x0DD98FF7, false, 0, 0x38976342, 0x2922A303, 0x03, 0x08, 20);  // a trap id with the wrong type -> differs
+        const uint32_t count = static_cast<uint32_t>(nobj);
+        memcpy(hirc.data(), &count, 4);
+        auto bank = [&](uint32_t version) {
+            std::vector<uint8_t> b = {'B', 'K', 'H', 'D', 8, 0, 0, 0};
+            for (int k = 0; k < 4; ++k) b.push_back(static_cast<uint8_t>(version >> (8 * k)));
+            for (int k = 0; k < 4; ++k) b.push_back(static_cast<uint8_t>(0x5CD943EDu >> (8 * k)));
+            const uint32_t n = static_cast<uint32_t>(hirc.size());
+            b.insert(b.end(), {'H', 'I', 'R', 'C'});
+            for (int k = 0; k < 4; ++k) b.push_back(static_cast<uint8_t>(n >> (8 * k)));
+            b.insert(b.end(), hirc.begin(), hirc.end());
+            return b;
+        };
+        const size_t base = 16 + 8;  // BKHD chunk, HIRC header
+        std::vector<uint8_t> b = bank(150);
+        const std::vector<uint8_t> orig = b;
+        WorldSoundBankResult r{};
+        WorldSoundScanBank(b.data(), b.size(), &r, nullptr);
+        Check(r.toPatch == 3 && r.already == 1 && r.mismatch == 2 && b == orig,
+              "WorldSoundPositionFix: a read-only scan finds 3 containers to change, 1 already 3D, 2 that differ, and writes nothing");
+        WorldSoundScanBank(b.data(), b.size(), &r, b.data());
+        std::vector<uint8_t> want = orig;
+        want[base + bitsAt[0]] = 0x8A;
+        want[base + bitsAt[2]] = 0x8A;
+        want[base + bitsAt[3]] = 0x0A;
+        Check(r.patched == 3 && b == want,
+              "WorldSoundPositionFix: exactly the three bytes change (NPC torch 0x80 -> 0x8A, deer 0x88 -> 0x8A, trap 0x08 -> 0x0A); "
+              "the player's torch, the differing ogre and wrong-type trap and every other byte stay");
+        WorldSoundScanBank(b.data(), b.size(), &r, b.data());
+        Check(r.patched == 0 && r.already == 4 && b == want, "WorldSoundPositionFix: a second pass over the same bytes changes nothing");
+        std::vector<uint8_t> other = bank(145);
+        const std::vector<uint8_t> otherOrig = other;
+        WorldSoundScanBank(other.data(), other.size(), &r, other.data());
+        Check(r.otherVersion && r.patched == 0 && other == otherOrig, "WorldSoundPositionFix: another bank version is left unchanged");
+        bool cutOk = true;
+        for (size_t cut = 0; cut < orig.size(); cut += 3) {  // truncated banks (heap copies of exact size): only listed flag bytes change
+            std::vector<uint8_t> t(orig.begin(), orig.begin() + static_cast<std::ptrdiff_t>(cut));
+            WorldSoundScanBank(t.data(), t.size(), &r, t.data());
+            for (size_t k = 0; k < t.size(); ++k)
+                if (t[k] != orig[k] && k != base + bitsAt[0] && k != base + bitsAt[2] && k != base + bitsAt[3]) cutOk = false;
+        }
+        Check(cutOk, "WorldSoundPositionFix: truncated banks: no byte outside the listed containers' flag bytes changes");
+        // refusals (review gh52build S2): another AttenuationID, no override bit, a 3D position type (automation data would
+        // follow), a flags byte neither the shipped nor the new value, and an object whose size runs past the chunk; plus a
+        // listed sound object with a source plugin's parameter block (its byte is still found and changed)
+        hirc.clear();
+        nobj = 0;
+        u32(0);
+        size_t refusedAt[5] = {};
+        refusedAt[0] = object(5, 0x288241B8, false, 0, 0x037F1AC2, 0x37517387, 0x03, 0x88, 20);  // trap gears: other attenuation
+        refusedAt[1] = object(5, 0x0B3518D2, false, 0, 0x037F1AC2, 0x37517387, 0x02, 0x88, 20);  // hall spikes: no override bit
+        refusedAt[2] = object(5, 0x3BCE953C, false, 0, 0x037F1AC2, 0x37517387, 0x23, 0x88, 20);  // mine: 3D position type
+        refusedAt[3] = object(5, 0x2A329A40, false, 0, 0x037F1AC2, 0x2922A303, 0x03, 0x81, 20);  // root worm: 0x81
+        plugin = 0x00B80002;
+        paramLen = 7;
+        const size_t pluginAt = object(2, 0x1EF4C97C, true, 0, 0x1C57DBBD, 0x2922A303, 0x03, 0x08, 20);  // iron scrape: plugin block
+        plugin = 0x00040001;
+        u8(5);  // an object whose size field runs past the chunk: the walk stops there
+        u32(0xFFFFFFFFu);
+        u32(0x25B900EA);
+        u8(0x08);
+        ++nobj;
+        const uint32_t count2 = static_cast<uint32_t>(nobj);
+        memcpy(hirc.data(), &count2, 4);
+        std::vector<uint8_t> rb = bank(150);
+        const std::vector<uint8_t> rbOrig = rb;
+        WorldSoundScanBank(rb.data(), rb.size(), &r, rb.data());
+        std::vector<uint8_t> rbWant = rbOrig;
+        rbWant[base + pluginAt] = 0x0A;
+        Check(r.patched == 1 && r.mismatch == 4 && r.mismatchMask == ((1u << 5) | (1u << 6) | (1u << 9) | (1u << 10)) && rb == rbWant,
+              "WorldSoundPositionFix: refused (another attenuation, no override, a 3D position type, flags 0x81) and an object size "
+              "past the chunk leave every byte; a sound with a source-plugin parameter block is still changed (0x08 -> 0x0A)");
+        (void)refusedAt;
+        Check(kNumWorldSoundTargets == 15 && kWorldSoundTargets[0].id == 0x0BCA8316 && kWorldSoundTargets[0].newBits == 0x8A,
+              "WorldSoundPositionFix: 15 containers listed, the NPC torch first (0x80 -> 0x8A)");
+
+        if (Installed(InstallWorldSoundPosition(true), "WorldSoundPositionFix (sounds without direction)")) {
+            uint8_t* const* fns = nullptr;
+            int n = 0;
+            WorldSoundPositionInfo(&fns, &n);
+            bool jumps = n == 8;
+            for (int k = 0; k < n; ++k) jumps = jumps && fns[k][0] == 0xE9;
+            Check(jumps, "WorldSoundPositionFix: the 8 exported LoadBankMemoryView / Copy start with the detour's jmp");
+            if (game.timeDateStamp == 0xF19077A4u)
+                Check(fns[0] - game.base == 0x62AF210 && fns[4] - game.base == 0x62AED90,
+                      "WorldSoundPositionFix: LoadBankMemoryView / Copy (3 arguments) at exe+0x62AF210 / exe+0x62AED90 (build 19115871)");
+            Check(InstallWorldSoundPosition(true), "WorldSoundPositionFix: a second install finds it in place");
+            static int fakeCalls;
+            static const void* fakeData;
+            fakeCalls = 0;
+            LoadFn_t fake = [](uint64_t d, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t) -> uint64_t {
+                ++fakeCalls;
+                fakeData = reinterpret_cast<const void*>(d);
+                return 1;
+            };
+            std::vector<uint8_t> h = orig;
+            WorldSoundPositionTestCall(1, h.data(), static_cast<uint32_t>(h.size()), fake);
+            Check(fakeCalls == 1 && fakeData == h.data() && h == want, "WorldSoundPositionFix: the hook changes a writable bank, then loads it");
+            uint8_t* const ro = static_cast<uint8_t*>(VirtualAlloc(nullptr, orig.size(), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+            DWORD oldp = 0;
+            if (ro) {
+                memcpy(ro, orig.data(), orig.size());
+                VirtualProtect(ro, orig.size(), PAGE_READONLY, &oldp);
+                WorldSoundPositionTestCall(6, ro, static_cast<uint32_t>(orig.size()), fake);
+                Check(fakeCalls == 2 && memcmp(ro, orig.data(), orig.size()) == 0,
+                      "WorldSoundPositionFix: a read-only bank is loaded unchanged (no write, no fault)");
+                VirtualFree(ro, 0, MEM_RELEASE);
+            }
+            SetWorldSoundPositionFix(false);
+        }
+    }
+
+    // ArrowHitSoundFix (GitHub #52): an NPC's arrow hit's thud is posted once, on the arrow: the shooter's weapon's posts are
+    // left out when the hit's thud is already on the arrow, else moved to the arrow; the arrow's own post is not repeated after
+    // a moved one.
+    {
+        Check(ApplyArrowHitSoundFix(), "arrow hit sound fix installed");
+        ArrowHitSoundInfo ai{};
+        Check(ArrowHitSoundFixInfo(&ai), "arrow hit sound fix info");
+        if (Installed(ai.stub != nullptr, "ArrowHitSoundFix (NPC arrow hits heard at the shooter)")) {
+            if (game.timeDateStamp == 0xF19077A4u) {
+                Check(ai.bowCall == game.base + 0x485DB08 && ai.arrowCall == game.base + 0x4860CE6,
+                      "ArrowHitSoundFix: the handler's weapon post at exe+0x485DB08, the arrow's own post at exe+0x4860CE6 (build 19115871)");
+                Check(ai.post == game.base + 0x480DE20 && ai.constant == game.base + 0x9303E90 &&
+                          ai.setSwitches == game.base + 0x486F6B0,
+                      "ArrowHitSoundFix: both call the post helper exe+0x480DE20 (constant exe+0x9303E90) and the switch setter exe+0x486F6B0");
+                Check(ai.weakGet == game.base + 0x1126290 && ai.arrowClass == game.base + 0x4618F70 && ai.playerFlag == 0xB20 &&
+                          ai.compOffset == 0x790 && ai.ownerOffset == 0xA8,
+                      "ArrowHitSoundFix: FWeakObjectPtr::Get exe+0x1126290, the arrow class exe+0x4618F70, Player flag +0xB20, hit component +0x790, owner +0xA8");
+            }
+            Check(ai.bowCall[0] == 0xE8 && RipTarget(ai.bowCall, 1, 5) == ai.stub && ai.arrowCall[0] == 0xE8 &&
+                      RipTarget(ai.arrowCall, 1, 5) == ai.stub + 32,
+                  "ArrowHitSoundFix: both calls go to their stubs");
+            const uint8_t bowMov[6] = {0x49, 0x89, 0xF8, 0x49, 0x89, 0xD9}, arrowMov[6] = {0x49, 0x89, 0xE8, 0x49, 0x89, 0xF9};
+            Check(memcmp(ai.stub, bowMov, 6) == 0 && memcmp(ai.stub + 32, arrowMov, 6) == 0 &&
+                      *reinterpret_cast<void* const*>(ai.stub + 12) == ai.bowHook &&
+                      *reinterpret_cast<void* const*>(ai.stub + 44) == ai.arrowHook,
+                  "ArrowHitSoundFix: stubs hand over (record, attacker) / (component, shooter) and jump to the two hooks");
+            Check(ApplyArrowHitSoundFix(), "ArrowHitSoundFix: a second installation finds the fix in place");
+
+            // The hooks with fakes: objects (flags +0x08, class +0x10), classes (bases +0x30, depth +0x38), a weak pointer that
+            // holds the object, a post helper and a switch setter that count, a clock.
+            using PostFn = uint64_t (*)(void*, void*, void*, void*, uint64_t, uint64_t);
+            static int posts = 0, switches = 0, failNext = 0;
+            static void* lastActor = nullptr;
+            static void* swShooter = nullptr;
+            static void* swComp = nullptr;
+            static void* swActor = nullptr;
+            static bool argsOk = true;
+            static void* constant = nullptr;
+            static uint64_t clockMs = 5000;
+            alignas(8) static uint8_t arrowCls[0x40] = {}, arrowObjCls[0x40] = {}, otherCls[0x40] = {};
+            static const uint8_t* bases[2] = {};
+            struct Fakes {
+                static uint64_t Post(void*, void* actor, uint64_t one, void* c, uint64_t a5, uint64_t a6)
+                {
+                    ++posts;
+                    lastActor = actor;
+                    argsOk = argsOk && one == 1 && c == constant && a5 == 0 && a6 == 1;
+                    if (failNext) {
+                        --failNext;
+                        return 0;
+                    }
+                    return 7;
+                }
+                static void Switches(void* shooter, void* comp, uint64_t index, void* actor)
+                {
+                    ++switches;
+                    swShooter = shooter;
+                    swComp = comp;
+                    swActor = actor;
+                    argsOk = argsOk && index == 0;
+                }
+                static void* Weak(const void* p) { return *static_cast<void* const*>(p); }
+                static const uint8_t* Class() { return arrowCls; }
+                static uint64_t Clock() { return clockMs; }
+            };
+            constant = ai.constant;
+            bases[0] = otherCls + 0x30;
+            bases[1] = arrowCls + 0x30;
+            const int32_t one = 1, zero = 0;
+            memcpy(arrowCls + 0x38, &one, 4);
+            memcpy(arrowObjCls + 0x38, &one, 4);
+            const uint8_t* const* basesPtr = bases;
+            memcpy(arrowObjCls + 0x30, &basesPtr, 8);
+            memcpy(otherCls + 0x38, &zero, 4);
+            memcpy(otherCls + 0x30, &basesPtr, 8);  // depth 0: bases[0] is itself
+            struct Obj { alignas(8) uint8_t b[0xC00]; };
+            static Obj npc{}, player{}, wolf{}, bow{}, arrowA{}, arrowB{}, arrowC{}, deer{}, eventA{}, eventB{};
+            alignas(8) static uint8_t compDeer[0xB0] = {}, compWolf[0xB0] = {};
+            auto setClass = [](Obj& o, const uint8_t* cls) { memcpy(o.b + 0x10, &cls, 8); };
+            setClass(arrowA, arrowObjCls);
+            setClass(arrowB, arrowObjCls);
+            setClass(arrowC, arrowObjCls);
+            setClass(bow, otherCls);
+            setClass(deer, otherCls);
+            player.b[ai.playerFlag] = 1;
+            const void* d = &deer;
+            const void* w = &wolf;
+            memcpy(compDeer + 0xA8, &d, 8);
+            memcpy(compWolf + 0xA8, &w, 8);
+            const void* cd = compDeer;
+            memcpy(deer.b + ai.compOffset, &cd, 8);
+            alignas(8) static uint8_t rec[0x30] = {};
+            auto makeRec = [](const void* target, const void* arrow, uint8_t arrowFlag, uint8_t spellFlag) {
+                memset(rec, 0, sizeof rec);
+                memcpy(rec + 0x08, &target, 8);
+                rec[0x1C] = arrowFlag;
+                rec[0x1D] = spellFlag;
+                memcpy(rec + 0x20, &arrow, 8);
+            };
+            ArrowHitSoundFixTestSetup(reinterpret_cast<void*>(&Fakes::Post), reinterpret_cast<void*>(&Fakes::Switches),
+                                      reinterpret_cast<void*>(&Fakes::Weak), reinterpret_cast<void*>(&Fakes::Class), &Fakes::Clock);
+            SetArrowHitSoundFixEnabled(true);
+            const auto bowHook = reinterpret_cast<PostFn>(ai.bowHook);
+            const auto arrowHook = reinterpret_cast<PostFn>(ai.arrowHook);
+            ArrowHitSoundFixInfo(&ai);
+            const uint64_t s0 = ai.skipped, m0 = ai.moved, k0 = ai.kept, p0 = ai.player, a0 = ai.arrowSkipped;
+            // a: the Unreal side first (the arrow's own post), then the handler: the weapon's post left out, twice
+            makeRec(&deer, &arrowA, 1, 0);
+            Check(arrowHook(&eventA, &arrowA, compDeer, &npc, 0, 1) == 7 && posts == 1 && lastActor == &arrowA,
+                  "ArrowHitSoundFix: the arrow's own post is made unchanged");
+            clockMs += 6;
+            Check(bowHook(&eventA, &bow, rec, &npc, 0, 1) == 0 && posts == 1 && switches == 0,
+                  "ArrowHitSoundFix: the shooter's weapon's post 6 ms later is left out");
+            Check(bowHook(&eventA, &bow, rec, &npc, 0, 1) == 0 && posts == 1,
+                  "ArrowHitSoundFix: the other engine's handler call for the same hit: left out too");
+            // b: the handler first (the old engine's hit): the post moves to the arrow with the hit's switches; the arrow's own
+            // post that follows is not made again, nor the second handler call's
+            clockMs += 2000;
+            makeRec(&deer, &arrowB, 1, 0);
+            Check(bowHook(&eventA, &bow, rec, &npc, 0, 1) == 7 && posts == 2 && lastActor == &arrowB && switches == 1 &&
+                      swShooter == &npc && swComp == compDeer && swActor == &arrowB,
+                  "ArrowHitSoundFix: handler first: the hit's switches set on the arrow (as the arrow's own impact does), posted on the arrow");
+            Check(arrowHook(&eventA, &arrowB, compDeer, &npc, 0, 1) == 0 && posts == 2,
+                  "ArrowHitSoundFix: the arrow's own post after a moved one: not made again");
+            Check(bowHook(&eventA, &bow, rec, &npc, 0, 1) == 0 && posts == 2 && switches == 1,
+                  "ArrowHitSoundFix: the second handler call: left out");
+            // c: the moved post fails: the weapon's post is made (a hit is never silent)
+            clockMs += 2000;
+            makeRec(&deer, &arrowC, 1, 0);
+            failNext = 1;
+            Check(bowHook(&eventA, &bow, rec, &npc, 0, 1) == 7 && posts == 4 && lastActor == &bow && switches == 2,
+                  "ArrowHitSoundFix: the moved post gives no playing id: the game's post on the weapon");
+            // d: the player's shot, melee, a spell record: the game's post on the weapon
+            makeRec(&deer, &arrowA, 1, 0);
+            Check(bowHook(&eventA, &bow, rec, &player, 0, 1) == 7 && posts == 5 && lastActor == &bow,
+                  "ArrowHitSoundFix: the player's arrow: posted on the weapon (stock)");
+            makeRec(&deer, nullptr, 0, 0);
+            Check(bowHook(&eventA, &bow, rec, &npc, 0, 1) == 7 && posts == 6 && lastActor == &bow, "ArrowHitSoundFix: a melee hit: stock");
+            makeRec(&deer, &arrowA, 1, 1);
+            Check(bowHook(&eventA, &bow, rec, &npc, 0, 1) == 7 && posts == 7 && lastActor == &bow,
+                  "ArrowHitSoundFix: a record with the spell flag: stock");
+            // e: a dying arrow, no target: the game's post on the weapon
+            makeRec(&deer, &arrowA, 1, 0);
+            const uint32_t dying = 0x20000000;
+            memcpy(arrowA.b + 0x08, &dying, 4);
+            Check(bowHook(&eventA, &bow, rec, &npc, 0, 1) == 7 && posts == 8 && lastActor == &bow, "ArrowHitSoundFix: a dying arrow: stock");
+            memset(arrowA.b + 0x08, 0, 4);
+            makeRec(nullptr, &arrowA, 1, 0);
+            Check(bowHook(&eventA, &bow, rec, &npc, 0, 1) == 7 && posts == 9 && lastActor == &bow, "ArrowHitSoundFix: no target: stock");
+            // f: past the 1 s window, another hit character, event or shooter: the handler moves its post to the arrow
+            clockMs += 2000;
+            makeRec(&deer, &arrowA, 1, 0);
+            arrowHook(&eventA, &arrowA, compDeer, &npc, 0, 1);
+            clockMs += 1000;
+            Check(bowHook(&eventA, &bow, rec, &npc, 0, 1) == 7 && posts == 11 && lastActor == &arrowA,
+                  "ArrowHitSoundFix: 1 s after the arrow's post: a new thud, on the arrow");
+            clockMs += 2000;
+            arrowHook(&eventA, &arrowA, compWolf, &npc, 0, 1);
+            Check(bowHook(&eventA, &bow, rec, &npc, 0, 1) == 7 && posts == 13 && lastActor == &arrowA,
+                  "ArrowHitSoundFix: the arrow's post was on another character: the handler's moved to the arrow");
+            clockMs += 2000;
+            arrowHook(&eventB, &arrowA, compDeer, &npc, 0, 1);
+            Check(bowHook(&eventA, &bow, rec, &npc, 0, 1) == 7 && posts == 15, "ArrowHitSoundFix: another event: moved");
+            clockMs += 2000;
+            arrowHook(&eventA, &arrowA, compDeer, &wolf, 0, 1);
+            Check(bowHook(&eventA, &bow, rec, &npc, 0, 1) == 7 && posts == 17, "ArrowHitSoundFix: another shooter: moved");
+            // g: the arrow's post on a non-arrow actor: made unchanged, not remembered
+            clockMs += 2000;
+            Check(arrowHook(&eventA, &bow, compDeer, &npc, 0, 1) == 7 && posts == 18 && lastActor == &bow,
+                  "ArrowHitSoundFix: the arrow's post on a non-arrow: made unchanged");
+            Check(bowHook(&eventA, &bow, rec, &npc, 0, 1) == 7 && posts == 19 && lastActor == &arrowA,
+                  "ArrowHitSoundFix: ... and not taken as the hit's sound");
+            // h: switched off: both made as in the game; on again: what was posted while off is not remembered
+            clockMs += 2000;
+            SetArrowHitSoundFixEnabled(false);
+            Check(arrowHook(&eventA, &arrowA, compDeer, &npc, 0, 1) == 7 && bowHook(&eventA, &bow, rec, &npc, 0, 1) == 7 &&
+                      posts == 21 && lastActor == &bow,
+                  "ArrowHitSoundFix: switched off: both posts as in the game");
+            SetArrowHitSoundFixEnabled(true);
+            Check(bowHook(&eventA, &bow, rec, &npc, 0, 1) == 7 && posts == 22 && lastActor == &arrowA,
+                  "ArrowHitSoundFix: switched on again: the arrow post made while off is not remembered");
+            // i: the arrow's own posts are only left out after a moved one (the player's are never)
+            clockMs += 2000;
+            Check(arrowHook(&eventA, &arrowB, compDeer, &player, 0, 1) == 7 && arrowHook(&eventA, &arrowB, compDeer, &player, 0, 1) == 7 &&
+                      posts == 24,
+                  "ArrowHitSoundFix: arrow posts not after a moved one: all made");
+            Check(argsOk && switches == 8, "ArrowHitSoundFix: every post got r8 = 1, the game's constant and its two bytes back; 8 switch setups");
+            ArrowHitSoundFixInfo(&ai);
+            Check(ai.skipped - s0 == 3 && ai.moved - m0 == 7 && ai.kept - k0 == 3 && ai.player - p0 == 1 && ai.arrowSkipped - a0 == 1,
+                  "ArrowHitSoundFix: counted 3 left out, 7 moved, 3 left on the weapon, 1 player shot, 1 arrow post not repeated");
+            LogArrowHitSoundFixStats();
+            ArrowHitSoundFixTestSetup(nullptr, nullptr, nullptr, nullptr, nullptr);
+        }
+    }
+
     // AutosaveFollowsMenu: the level-up's and the scripts' autosaves are not made while all four of the menu's autosave
     // options are off.
     {
@@ -3062,8 +3504,22 @@ int wmain(int argc, wchar_t** argv)
     BodySpreadRun(game);
     // StreamOutEndPlaySlice / ResetLoadersNoFlush (selftest_epicport.h): discovery on the mapped exe (nothing patched), hooks with fakes.
     EpicPortRun(game);
+    // StartupBarFinish (selftest_barfinish.h): discovery on the mapped exe (nothing patched), the hook with a fake step.
+    BarFinishRun(game);
+    // TopicSort / PluginPrefetch (selftest_gapfix.h): the game's sort run from the mapped exe against ours; the prefetch's path and list rules.
+    GapFixRun(game);
+    // GcPassAfterBusy (selftest_gchold.h): discovery on the mapped exe (nothing patched), the hold with a fake engine.
+    GcHoldRun(game);
+    // GcPrepAhead (selftest_gcprep.h): discovery on the mapped exe (nothing patched; altered bytes refused), the step with fakes.
+    GcPrepRun(game);
+    // GcMarkPriority (selftest_gcmark.h): discovery on the mapped exe (nothing patched), fake code, the raise with fake thunks.
+    GcMarkRun(game);
     // StreamRegisterGranularity (selftest_streamgran.h): the cvar's bound int on the mapped exe and the set rules.
     StreamGranRun();
+    // NavQueryPriority (selftest_navprio.h): the cvar's name on the mapped exe and the set rules with a fake console variable.
+    NavPrioRun();
+    // PhysicsSubstepCap (selftest_physcap.h): fake object list, class, properties and FName constructor; Engine.ini lines.
+    PhysCapRun();
     // IndirectArgBufferPool (selftest_indirectargs.h): the cvar's int on the mapped exe and the start-up rules (put back to 0).
     IndirectArgsRun();
     // ParallelFileReads (selftest_filereads.h): the engine's reader, its slot, Pop and ServiceNotify on the mapped exe (nothing
@@ -3076,12 +3532,19 @@ int wmain(int argc, wchar_t** argv)
     lscan::Run(game);
     // RepathParallel (selftest_repath.h): discovery on the mapped exe (nothing installed), the key and hooks with fakes.
     RepathRun(game);
+    // Start-up install order (selftest_installorder.h): core/main.cpp's Init installs each dependent key after its prerequisite.
+    InstallOrderRun();
+
     // PairReleaseOnce / lab PairRaceProbe (selftest_pairrace.h): rewrites the two early releases (no later test reads them).
     PairRaceRun(game);
     // OtFrameTrim (selftest_otframe.h): rewrites the OT frame-start sleep's call and the node timer (no later test reads them).
     OtFrameTrimRun(game);
     // LooseMissCache (selftest_loosemiss.h): rewrites the file finder's two _access calls (no later test reads them).
     LooseMissRun(game);
+    // PowerAttackAnimKeep (selftest_poweranim.h): rewrites 8 bytes of the animation release (no later test reads them).
+    PowerAnimRun(game);
+    // FlowOverlapsOnce (selftest_flowonce.h): patches the adoption's entry and one call; then fakes (no later test reads them).
+    FlowOverlapsRun(game);
     // AnimTeardownParallel (lab prototype): dying NPC animation data's interpolators on helper threads (selftest_animpar.h).
     apar::Run(game);
     // CellBufferPacedEvict (lab prototype): spare cell buffer slots, overflow torn down one cell per OT frame (selftest_cellbuf.h); after
@@ -3790,6 +4253,348 @@ int wmain(int argc, wchar_t** argv)
                 *v = 100000.0f;
                 LogChaosMaxPayloadSizeLive();
             }
+        }
+        // PerceptionLosPrefetch: the perception round, its line-of-sight call site and the helper found and checked
+        // (discovery only; no writes); then the batch and the serve with a fake helper and fake pawns
+        {
+            if (!g_perclos.captured) PerclosCapture(game);
+            const uint32_t rr = g_perclos.rr, rc = g_perclos.rc, rh = g_perclos.rh, rf = g_perclos.rf;
+            const char* why = g_perclos.why;
+            if (why) printf("      perclos: %s\n", why);
+            Check(!why, "perclos: the perception round, its line-of-sight call site and the helper found and checked");
+            Check(rr == 0x485FAF4, "perclos: the perception round's list and settings calls at exe+0x485FAF4");
+            Check(rc == 0x485FCDC, "perclos: the line-of-sight call site at exe+0x485FCDC");
+            Check(rh == 0x485A170, "perclos: the line-of-sight helper at exe+0x485A170");
+            Check(rf == 0x485A900, "perclos: the field-of-view filter (its getter, acos call and end checked) at exe+0x485A900");
+
+            // fake class {chain at +0x30 -> [cls+0x30 at depth 1], depth +0x38 = 1}; pawns of 0x800 bytes: class +0x10,
+            // paired +0x7B8 (-> +0x120 non-zero), root +0x1A0 (-> location doubles at +0x280)
+            alignas(16) static uint8_t cls[0x100] = {}, other[0x100] = {}, paired[0x200] = {};
+            alignas(16) static uint8_t roots[6][0x300] = {};
+            alignas(16) static uint8_t pawns[6][0x800] = {};
+            static const uint8_t* chain[2];
+            chain[0] = nullptr;
+            chain[1] = cls + 0x30;
+            const void* chainPtr = chain;
+            memcpy(cls + 0x30, &chainPtr, 8);
+            const int depth = 1, otherDepth = 1;
+            memcpy(cls + 0x38, &depth, 4);
+            static const uint8_t* otherChain[2] = {nullptr, other + 0x30};
+            const void* otherChainPtr = otherChain;
+            memcpy(other + 0x30, &otherChainPtr, 8);
+            memcpy(other + 0x38, &otherDepth, 4);
+            const uint64_t one = 1;
+            memcpy(paired + 0x120, &one, 8);
+            // pawn 0 = the NPC at the origin; 1..3 in range (100, 200, 300 units); 4 far (5000); 5 of another class
+            const double xs[6] = {0, 100, 200, 300, 5000, 50};
+            for (int i = 0; i < 6; ++i) {
+                const uint8_t* c = i == 5 ? other : cls;
+                memcpy(pawns[i] + 0x10, &c, 8);
+                const uint8_t* pp = paired;
+                memcpy(pawns[i] + 0x7B8, &pp, 8);
+                const uint8_t* rp = roots[i];
+                memcpy(pawns[i] + 0x1A0, &rp, 8);
+                memcpy(roots[i] + 0x280, &xs[i], 8);
+            }
+            static uint8_t* listData[6];
+            for (int i = 0; i < 6; ++i) listData[i] = pawns[i];
+            alignas(16) static uint8_t list[16] = {};
+            const void* ld = listData;
+            const int ln = 6;
+            memcpy(list, &ld, 8);
+            memcpy(list + 8, &ln, 4);
+            // range: a = 10, b = 50, constant 1: (a*1*b) * (a*b) = 250000 = 500 units squared
+            alignas(16) static uint8_t settings[0x500] = {};
+            const float ra = 10.0f, rb = 50.0f;
+            memcpy(settings + 0x4E8, &ra, 4);
+            memcpy(settings + 0x4EC, &rb, 4);
+            static std::atomic<int> helperCalls{0};
+            static std::atomic<int> salt{0};
+            auto fakeHelper = [](uint8_t*, uint8_t* o, uint8_t* out, int tries, uint8_t flag) -> uint8_t {
+                helperCalls.fetch_add(1);
+                *out = static_cast<uint8_t>(((reinterpret_cast<uintptr_t>(o) >> 11) & 1) + static_cast<uint8_t>(salt.load()));
+                return static_cast<uint8_t>(tries == 3 && flag == 1);
+            };
+            auto fakeClass = []() -> const uint8_t* { return cls; };
+            void* fh = reinterpret_cast<void*>(static_cast<uint8_t (*)(uint8_t*, uint8_t*, uint8_t*, int, uint8_t)>(fakeHelper));
+            void* fc = reinterpret_cast<void*>(static_cast<const uint8_t* (*)()>(fakeClass));
+            uint64_t s0, v0, d0, f0, j0, s1, v1, d1, f1, j1;
+            // on, 2 helper threads: pawns 1..3 precomputed (the NPC itself, the far pawn and the other class are not)
+            PerceptionLosTestSetup(fh, fc, nullptr, 1.0f, 1, 2, 2);
+            PerceptionLosTestCounts(&s0, &v0, &d0, &f0, &j0);
+            helperCalls = 0;
+            PerceptionLosTestPrefetch(pawns[0], list, settings);
+            PerceptionLosTestCounts(&s1, &v1, &d1, &f1, &j1);
+            Check(j1 == j0 + 3 && helperCalls == 3, "perclos on: the three pawns in range of the NPC's class are precomputed");
+            // the game's loop asks pawns 2, 1, 3 (any order) then the far pawn: three served, the far one runs the helper
+            bool same = true;
+            for (int k : {2, 1, 3}) {
+                uint8_t out = 3, ref = 3;
+                const uint8_t r = PerceptionLosTestCall(pawns[0], pawns[k], &out, 3, 1);
+                const uint8_t rref = fakeHelper(pawns[0], pawns[k], &ref, 3, 1);
+                same = same && r == rref && out == ref;
+            }
+            uint8_t outFar = 3;
+            PerceptionLosTestCall(pawns[0], pawns[4], &outFar, 3, 1);
+            PerceptionLosTestCounts(&s1, &v1, &d1, &f1, &j1);
+            Check(same && s1 == s0 + 3 && f1 == f0 + 1 && helperCalls == 3 + 3 + 1,
+                  "perclos on: precomputed answers served bit for bit, a pawn not precomputed runs the game's helper");
+            // a second ask of the same pawn, other arguments, another NPC: the game's helper
+            uint8_t o2 = 3, o3 = 3, o4 = 3, o5 = 2;
+            PerceptionLosTestCall(pawns[0], pawns[1], &o2, 3, 1);
+            PerceptionLosTestCall(pawns[0], pawns[2], &o3, 2, 1);
+            PerceptionLosTestCall(pawns[1], pawns[3], &o4, 3, 1);
+            PerceptionLosTestCall(pawns[0], pawns[3], &o5, 3, 1);
+            PerceptionLosTestCounts(&s1, &v1, &d1, &f1, &j1);
+            Check(s1 == s0 + 3 && f1 == f0 + 5, "perclos on: a repeat, other tries, another NPC or another result byte run the game's helper");
+            // too few pawns in range for a batch: nothing precomputed, every call runs the helper
+            PerceptionLosTestSetup(fh, fc, nullptr, 1.0f, 1, 4, 2);
+            PerceptionLosTestPrefetch(pawns[0], list, settings);
+            uint8_t o6 = 3;
+            PerceptionLosTestCall(pawns[0], pawns[1], &o6, 3, 1);
+            uint64_t j2, s2, f2;
+            PerceptionLosTestCounts(&s2, nullptr, nullptr, &f2, &j2);
+            Check(j2 == j1 && s2 == s1 && f2 == f1 + 1, "perclos: below PerceptionLosPrefetchMin no batch, the game's helper runs");
+            // our review of PR #55: the lightweight-instance guard. A subsystem listing a manager leaves the round to the game
+            // (nothing precomputed, the call runs the helper); an empty list or no subsystem batches as before.
+            {
+                const uint32_t eyeRva = g_perclos.eye, lwiRva = g_perclos.lwi;
+                Check(eyeRva == 0x4858700, "perclos guard: the NPC eye point (vtable +0xA98) at exe+0x4858700");
+                Check(lwiRva == 0x925FD50, "perclos guard: the lightweight-instance subsystem's static at exe+0x925FD50 (getter, fetch "
+                                           "and manager lookup checked)");
+                alignas(16) static uint8_t fakeSub[0x20] = {};
+                static uint8_t* fakeStatic = nullptr;
+                fakeStatic = fakeSub;
+                const int32_t managers = 1;
+                memcpy(fakeSub + 8, &managers, 4);
+                PerceptionLosTestSetup(fh, fc, nullptr, 1.0f, 1, 2, 2);
+                PerceptionLosTestSetLwi(&fakeStatic);
+                const uint64_t lw0 = PerceptionLosTestLwiRounds();
+                uint64_t ja, sa, fa, jb, sb, fb;
+                PerceptionLosTestCounts(&sa, nullptr, nullptr, &fa, &ja);
+                PerceptionLosTestPrefetch(pawns[0], list, settings);
+                uint8_t og = 3;
+                PerceptionLosTestCall(pawns[0], pawns[1], &og, 3, 1);
+                PerceptionLosTestCounts(&sb, nullptr, nullptr, &fb, &jb);
+                Check(jb == ja && sb == sa && fb == fa + 1 && PerceptionLosTestLwiRounds() == lw0 + 1,
+                      "perclos guard: with a lightweight-instance manager listed the round runs as in the game");
+                const int32_t none = 0;
+                memcpy(fakeSub + 8, &none, 4);
+                PerceptionLosTestPrefetch(pawns[0], list, settings);
+                PerceptionLosTestCounts(&sb, nullptr, nullptr, &fb, &jb);
+                fakeStatic = nullptr;
+                PerceptionLosTestPrefetch(pawns[0], list, settings);  // no subsystem yet: batched
+                uint64_t jc;
+                PerceptionLosTestCounts(nullptr, nullptr, nullptr, nullptr, &jc);
+                Check(jb == ja + 3 && jc == jb + 3 && PerceptionLosTestLwiRounds() == lw0 + 1,
+                      "perclos guard: with no manager (or no subsystem yet) the round is batched");
+                PerceptionLosTestSetLwi(nullptr);
+                // the eye-point check: an NPC whose vtable +0xA98 is not the checked eye point runs its round as in the game
+                {
+                    alignas(16) static uint8_t eyeVt[0xB00] = {};
+                    static uint8_t okEye = 1, otherEye = 2;  // distinct objects (not foldable constants)
+                    const void* pe = &otherEye;
+                    memcpy(eyeVt + 0xA98, &pe, 8);
+                    const void* vtp = eyeVt;
+                    uint8_t savedVt[8];
+                    memcpy(savedVt, pawns[0], 8);
+                    memcpy(pawns[0], &vtp, 8);
+                    PerceptionLosTestSetEye(&okEye);
+                    const uint64_t oe0 = PerceptionLosTestOtherEyeRounds();
+                    uint64_t je0, fe0, je1, fe1, se0, se1;
+                    PerceptionLosTestCounts(&se0, nullptr, nullptr, &fe0, &je0);
+                    PerceptionLosTestPrefetch(pawns[0], list, settings);
+                    uint8_t oeye = 3;
+                    PerceptionLosTestCall(pawns[0], pawns[1], &oeye, 3, 1);
+                    PerceptionLosTestCounts(&se1, nullptr, nullptr, &fe1, &je1);
+                    Check(je1 == je0 && se1 == se0 && fe1 == fe0 + 1 && PerceptionLosTestOtherEyeRounds() == oe0 + 1,
+                          "perclos eye check: an NPC with another eye point (vtable +0xA98) runs its round as in the game");
+                    pe = &okEye;
+                    memcpy(eyeVt + 0xA98, &pe, 8);
+                    PerceptionLosTestPrefetch(pawns[0], list, settings);
+                    PerceptionLosTestCounts(nullptr, nullptr, nullptr, nullptr, &je1);
+                    Check(je1 == je0 + 3 && PerceptionLosTestOtherEyeRounds() == oe0 + 1,
+                          "perclos eye check: the checked eye point is batched");
+                    PerceptionLosTestSetEye(nullptr);
+                    memcpy(pawns[0], savedVt, 8);
+                }
+                // leave the open batch closed (the prefetches above used the non-overlapped path)
+                PerceptionLosTestPrefetch(nullptr, nullptr, nullptr);
+                PerceptionLosTestCounts(&s2, nullptr, nullptr, &f2, &j2);
+            }
+            // verify: the game's helper runs, its answer is kept and compared (the salt makes pawn 2 differ)
+            PerceptionLosTestSetup(fh, fc, nullptr, 1.0f, 2, 2, 2);
+            PerceptionLosTestPrefetch(pawns[0], list, settings);
+            salt = 0;
+            uint8_t ov1 = 3;
+            const uint8_t rv1 = PerceptionLosTestCall(pawns[0], pawns[1], &ov1, 3, 1);
+            salt = 4;
+            uint8_t ov2 = 3;
+            PerceptionLosTestCall(pawns[0], pawns[2], &ov2, 3, 1);
+            salt = 0;
+            uint64_t s3, v3, d3;
+            PerceptionLosTestCounts(&s3, &v3, &d3, nullptr, nullptr);
+            Check(rv1 == 1 && s3 == s2 && v3 == v1 + 2 && d3 == d1 + 1 && ov2 >= 4,
+                  "perclos verify: the game's helper runs, its answer is kept, a different answer is counted");
+            // off: nothing precomputed, every call runs the helper
+            PerceptionLosTestSetup(fh, fc, nullptr, 1.0f, 0, 2, 2);
+            uint64_t j4;
+            PerceptionLosTestCounts(nullptr, nullptr, nullptr, nullptr, &j4);
+            PerceptionLosTestPrefetch(pawns[0], list, settings);
+            uint8_t o7 = 3;
+            PerceptionLosTestCall(pawns[0], pawns[1], &o7, 3, 1);
+            uint64_t s5, j5;
+            PerceptionLosTestCounts(&s5, nullptr, nullptr, nullptr, &j5);
+            Check(j5 == j4 && s5 == s3, "perclos off: nothing precomputed or served");
+            // the field-of-view filter: when the NPC's vtable slot +0xA90 holds it, a pawn out of view (here pawn 2) is not
+            // precomputed, and the loop's helper call for it (if any) runs the game's helper; another filter: all precomputed
+            alignas(16) static uint8_t fakeVt[0xB00] = {};
+            auto fakeFov = [](uint8_t*, uint8_t* o) -> uint8_t { return o != pawns[2]; };
+            void* ff = reinterpret_cast<void*>(static_cast<uint8_t (*)(uint8_t*, uint8_t*)>(fakeFov));
+            memcpy(fakeVt + 0xA90, &ff, 8);
+            const uint8_t* fvt = fakeVt;
+            memcpy(pawns[0], &fvt, 8);
+            PerceptionLosTestSetup(fh, fc, ff, 1.0f, 1, 2, 2);
+            uint64_t j6, j7, s6, s7, f6, f7;
+            PerceptionLosTestCounts(&s6, nullptr, nullptr, &f6, &j6);
+            helperCalls = 0;
+            PerceptionLosTestPrefetch(pawns[0], list, settings);
+            uint8_t o8 = 3, o9 = 3;
+            PerceptionLosTestCall(pawns[0], pawns[1], &o8, 3, 1);
+            PerceptionLosTestCall(pawns[0], pawns[2], &o9, 3, 1);
+            PerceptionLosTestCounts(&s7, nullptr, nullptr, &f7, &j7);
+            Check(j7 == j6 + 2 && s7 == s6 + 1 && f7 == f6 + 1 && helperCalls == 3,
+                  "perclos field of view: a pawn out of view is not precomputed (its call runs the game's helper)");
+            static uint8_t otherFilter = 0;
+            PerceptionLosTestSetup(fh, fc, &otherFilter, 1.0f, 1, 2, 2);
+            PerceptionLosTestCounts(nullptr, nullptr, nullptr, nullptr, &j6);
+            PerceptionLosTestPrefetch(pawns[0], list, settings);
+            PerceptionLosTestCounts(nullptr, nullptr, nullptr, nullptr, &j7);
+            uint64_t f8, f9;
+            PerceptionLosTestCounts(nullptr, nullptr, nullptr, &f8, nullptr);
+            uint8_t o10 = 3;
+            PerceptionLosTestCall(pawns[0], pawns[1], &o10, 3, 1);
+            PerceptionLosTestCounts(nullptr, nullptr, nullptr, &f9, nullptr);
+            Check(j7 == j6 && f9 == f8 + 1,
+                  "perclos field of view: a round with another filter is not precomputed (its calls run the game's helper)");
+            memset(pawns[0], 0, 8);
+            // the overlap: the batch is dispatched, the loop's calls wait only for their own answer, the round-end join closes it
+            Check(g_perclos.join == 0x485FDF0, "perclos: the round-end join's call site (the loop's exit) at exe+0x485FDF0");
+            PerceptionLosTestSetup(fh, fc, nullptr, 1.0f, 1, 2, 2);
+            PerceptionLosTestSetOverlap(true);
+            uint64_t s10, s11, j10, j11;
+            PerceptionLosTestCounts(&s10, nullptr, nullptr, nullptr, &j10);
+            PerceptionLosTestPrefetch(pawns[0], list, settings);
+            bool sameOv = true;
+            for (int k : {1, 2, 3}) {
+                uint8_t out = 3, ref = 3;
+                const uint8_t r = PerceptionLosTestCall(pawns[0], pawns[k], &out, 3, 1);
+                const uint8_t rref = fakeHelper(pawns[0], pawns[k], &ref, 3, 1);
+                sameOv = sameOv && r == rref && out == ref;
+            }
+            const bool open1 = PerceptionLosTestJoin(), open2 = PerceptionLosTestJoin();
+            PerceptionLosTestCounts(&s11, nullptr, nullptr, nullptr, &j11);
+            Check(sameOv && open1 && !open2 && s11 == s10 + 3 && j11 == j10 + 3,
+                  "perclos overlap: answers served bit for bit while the batch runs, the round-end join closes it once");
+            // a round whose join never came: the next round's start closes the open batch first
+            PerceptionLosTestPrefetch(pawns[0], list, settings);
+            PerceptionLosTestPrefetch(pawns[0], list, settings);
+            const bool open3 = PerceptionLosTestJoin(), open4 = PerceptionLosTestJoin();
+            Check(open3 && !open4, "perclos overlap: no batch outlives the next round's start");
+            // the ignore-list cache: the helper's two NPC gathers (exe+0x485A260 attached, exe+0x485A2AF child) get a copy of
+            // the lists gathered once at the round's start; the other pawn's gathers and any gather after the join run the
+            // game's function; verify (mode 2) runs it and compares
+            {
+                uint32_t ga = 0, gc = 0;
+                ga = g_perclos.ga;
+                gc = g_perclos.gc;
+                Check(ga == 0x485A260 && gc == 0x485A2AF, "perclos cache: the helper's NPC gathers at exe+0x485A260 and exe+0x485A2AF");
+                struct Arr { void** data; int32_t num, max; };
+                static int attCalls = 0, childCalls = 0;
+                auto fakeMalloc = [](size_t n, uint32_t) -> void* { return malloc(n); };
+                auto put = [](Arr* out, std::initializer_list<void*> items) {
+                    const int n = out->num + static_cast<int>(items.size());
+                    out->data = static_cast<void**>(realloc(out->data, static_cast<size_t>(n) * sizeof(void*)));
+                    for (void* it : items) out->data[out->num++] = it;
+                    out->max = n;
+                };
+                static void (*s_put)(Arr*, std::initializer_list<void*>) = nullptr;
+                s_put = put;
+                auto fakeAtt = [](uint8_t* a, void* o, uint8_t) {
+                    ++attCalls;
+                    s_put(static_cast<Arr*>(o), {a + 1, a + 2});
+                };
+                auto fakeChild = [](uint8_t* a, void* o, uint8_t, uint8_t) {
+                    ++childCalls;
+                    static_cast<Arr*>(o)->num = 0;
+                    s_put(static_cast<Arr*>(o), {a + 3});
+                };
+                void* fa = reinterpret_cast<void*>(static_cast<void (*)(uint8_t*, void*, uint8_t)>(fakeAtt));
+                void* fch = reinterpret_cast<void*>(static_cast<void (*)(uint8_t*, void*, uint8_t, uint8_t)>(fakeChild));
+                void* fm = reinterpret_cast<void*>(static_cast<void* (*)(size_t, uint32_t)>(fakeMalloc));
+                PerceptionLosTestSetCache(fa, fch, fm, true);
+                PerceptionLosTestSetup(fh, fc, nullptr, 1.0f, 1, 2, 2);
+                uint64_t cs0, cv0, cd0, cs1, cv1, cd1;
+                PerceptionLosTestCacheCounts(&cs0, &cv0, &cd0);
+                attCalls = childCalls = 0;
+                PerceptionLosTestPrefetch(pawns[0], list, settings);
+                const bool built = attCalls == 1 && childCalls == 1;
+                Arr a1{}, c1{}, a2{}, a3{};
+                PerceptionLosTestGather(pawns[0], &a1, false);
+                PerceptionLosTestGather(pawns[0], &c1, true);
+                PerceptionLosTestGather(pawns[1], &a2, false);
+                PerceptionLosTestCacheCounts(&cs1, &cv1, &cd1);
+                Check(built && attCalls == 2 && childCalls == 1 && cs1 == cs0 + 2 && a1.num == 2 && a1.data[0] == pawns[0] + 1 &&
+                          a1.data[1] == pawns[0] + 2 && c1.num == 1 && c1.data[0] == pawns[0] + 3 && a2.num == 2 && a2.data[0] == pawns[1] + 1,
+                      "perclos cache: the NPC's gathers are copies of the round's lists, the other pawn's run the game's function");
+                PerceptionLosTestJoin();
+                PerceptionLosTestGather(pawns[0], &a3, false);
+                Check(attCalls == 3 && a3.num == 2, "perclos cache: after the round's join the NPC's gather runs the game's function");
+                // verify: the game's function runs and is compared (same lists: no difference)
+                PerceptionLosTestSetup(fh, fc, nullptr, 1.0f, 2, 2, 2);
+                PerceptionLosTestPrefetch(pawns[0], list, settings);
+                Arr a4{};
+                PerceptionLosTestGather(pawns[0], &a4, false);
+                uint64_t cs2, cv2, cd2;
+                PerceptionLosTestCacheCounts(&cs2, &cv2, &cd2);
+                PerceptionLosTestJoin();
+                Check(attCalls == 5 && cv2 == cv1 + 1 && cd2 == cd1 && cs2 == cs1 && a4.num == 2,
+                      "perclos cache verify: the game's gather runs and matches the round's copy");
+                for (Arr* x : {&a1, &c1, &a2, &a3, &a4}) free(x->data);
+                PerceptionLosTestSetCache(nullptr, nullptr, nullptr, false);
+            }
+            // cross-round (experimental): NPCs 0 and 1 run a round each frame, 60 ms apart; in the third frame NPC 0's round
+            // also precomputes NPC 1 (expected in that frame), whose round then serves from that batch; the next frame starts anew
+            {
+                static uint64_t fr = 1;
+                auto frameFn = []() -> uint64_t { return fr; };
+                PerceptionLosTestSetup(fh, fc, nullptr, 1.0f, 1, 1, 2);
+                PerceptionLosTestSetCross(true, static_cast<uint64_t (*)()>(frameFn));
+                uint64_t cn0, cr0, cs0x, cn1, cr1, cs1x, cn2, cr2, cs2x;
+                PerceptionLosTestCrossCounts(&cn0, &cr0, &cs0x);
+                for (fr = 1; fr <= 2; ++fr) {
+                    PerceptionLosTestPrefetch(pawns[0], list, settings);
+                    PerceptionLosTestPrefetch(pawns[1], list, settings);
+                    Sleep(60);
+                }
+                PerceptionLosTestCrossCounts(&cn1, &cr1, &cs1x);
+                fr = 3;
+                PerceptionLosTestPrefetch(pawns[0], list, settings);
+                PerceptionLosTestPrefetch(pawns[1], list, settings);
+                uint8_t ox = 3, rx = 3;
+                const uint8_t r = PerceptionLosTestCall(pawns[1], pawns[2], &ox, 3, 1);
+                const uint8_t rr2 = fakeHelper(pawns[1], pawns[2], &rx, 3, 1);
+                PerceptionLosTestCrossCounts(&cn2, &cr2, &cs2x);
+                Check(cn2 >= cn1 + 1 && cr2 == cr1 + 1 && cs2x == cs1x + 1 && r == rr2 && ox == rx,
+                      "perclos cross-round: an NPC expected later in the frame is precomputed and its round served from that batch");
+                fr = 4;
+                PerceptionLosTestPrefetch(pawns[1], list, settings);
+                uint64_t cn3, cr3, cs3x;
+                PerceptionLosTestCrossCounts(&cn3, &cr3, &cs3x);
+                Check(cr3 == cr2, "perclos cross-round: a new frame does not take an older frame's batch");
+                PerceptionLosTestSetCross(false, nullptr);
+            }
+            PerceptionLosTestSetOverlap(false);
         }
         // RigTraceReuse (public since 1.2.3, corral2): the sphere-trace rig unit and UControlRig::Execute found once by pattern
         // (discovery only; no writes); the lab's second world-trace unit (RigTraceReuse2)
@@ -5555,6 +6360,7 @@ int wmain(int argc, wchar_t** argv)
             alignas(16) static uint8_t shComp[0x200], shActor[0x800], shOther[0x200];
             static uint64_t shNow;
             static int shTick, shHeldFrom, shHeldUntil, shEnd = 20;
+            shEnd = 20;  // set at run time: the static initialiser was seen as 0 on the first spawns of the lab build (check 3 then ran with end 0)
             auto putF = [](uint8_t* p, uint32_t off, float v) { memcpy(p + off, &v, 4); };
             auto putI = [](uint8_t* p, uint32_t off, int32_t v) { memcpy(p + off, &v, 4); };
             auto putP = [](uint8_t* p, uint32_t off, const void* v) { memcpy(p + off, &v, 8); };
@@ -6051,7 +6857,7 @@ int wmain(int argc, wchar_t** argv)
             const char* why = AllocatorTrimSelfTest();
             const char* const whyPregrow = CmdPregrowSelfTest();
             Check(whyPregrow == nullptr, whyPregrow ? whyPregrow : "CmdMemPregrow: pool handling (fake pool: each wrapper back once, engine running, failures, stops, quit, cap) and gates");
-            Check(why == nullptr, why ? why : "allocators: give-back safe against an obtain between the passes; off after an exception stays off");
+            Check(why == nullptr, why ? why : "allocators: give-back safe against an obtain between the passes; off after an exception stays off; copy floor kept outside the over-budget mode");
         }
     }
 
@@ -6432,9 +7238,12 @@ int wmain(int argc, wchar_t** argv)
     rtm::RigTmplSelfTest(game);     // RigImportTemplate
     fpm::FarPawnSelfTest(game);     // FarPawnMoveHalfRate / FarHorseMove
     cpl::CreatePreloadSelfTest(game);  // CreatePreload
+    cop::CellObjectPreloadSelfTest(game);  // CellObjectPreload
+    cah::CreateAheadSelfTest(game);    // CreateAhead
     ipl::ImpactPreloadSelfTest(game);  // ImpactPreload
     nbl::NpcBodiesSelfTest(game);   // NpcBodiesOneLock
     rts::RtSceneSelfTest(game);     // RtSceneBufferKeep
+    pkp::PoolKeepSelfTest(game);    // GpuPoolKeepMB
     BufferFloorRun(game);           // InstanceBufferFloor / lab SceneBufferFloorMiB (after GpuSceneKeepCapacity's and RtSceneBufferKeep's tests)
     nsb::NaniteSelfTest(game);      // NaniteInitialRootPages (lab: NaniteStreamProbe / Nanite*MinMB)
     wtr::WaterInfoSelfTest(game);   // WaterCaptureFsrSkip / NoRhiFlush / NoOcclusionWait / FastMeshScan (lab: WaterInfoProbe)
@@ -7375,6 +8184,8 @@ int wmain(int argc, wchar_t** argv)
         }
     }
     rtb::RtBatchSelfTest(game);     // RayTracingBuildBatch (last: it patches a call other searches might read)
+    // obseparity review S2: no fix's search or install met a [hook] case on the clean exe (only the hook test's own)
+    Check(ForeignHooksMet() == hooks_test::g_hooksAfterRun, "hooks: zero [hook] lines from the other fixes' searches and writes the self-test runs, on the clean exe");
     scantest::Report();
     LogFlush();
     printf("\n--- selftest.log ---\n");

@@ -973,7 +973,7 @@ bool Discover(const GameModule& game, Sites* s)
     s->free = CallTarget(game, iconsThunk, kIconsThunkFree);
     if (!s->loop || !MatchesAt(s->loop, ParsePattern(kLoopBytes)) || !MatchesAt(s->loop + kLoopFilterAt, ParsePattern(kLoopFilter)))
         return miss("UpdateOrCreateMapIcons");
-    if (!s->free || !MatchesAt(s->free, ParsePattern(kFreeBytes))) return miss("FMemory::Free");
+    if (!s->free || !MatchesAtCallable(s->free, ParsePattern(kFreeBytes), "FMemory::Free")) return miss("FMemory::Free");
     // the size passes
     s->size = CallTarget(game, ThunkIn(map, "UpdateIconsSizeSmoothly"), kSizeThunkCall);
     if (!s->size || !MatchesAt(s->size, ParsePattern(kSizeBytes)) || !MatchesAt(s->size + kSizeMapAt, ParsePattern(kSizeMap)) ||
@@ -1009,7 +1009,7 @@ bool Discover(const GameModule& game, Sites* s)
     }
     s->pe = FindProcessEvent();
     if (!s->pe) return miss("ProcessEvent");
-    const auto fn = FindAll(game.text, ParsePattern(kFNameCtor));
+    const auto fn = FindAllCallable(game.text, ParsePattern(kFNameCtor), "FName's TCHAR constructor");
     if (fn.size() != 1) return miss("FName's constructor");
     s->fname = fn[0];
     return true;
@@ -1123,7 +1123,7 @@ bool g_offForGood = false;  // installed but switched off (a write failed or Pro
 bool InstallMapPopupSpread(bool beforeGameCode, int mode, bool pacingHooked)
 {
     if (!mode) { Log("[mapspread] MapPopupSpread off in OblivionPerfFix.ini (takes a restart to switch on)"); return false; }
-    if (!beforeGameCode) { Log("[mapspread] MapPopupSpread: start-up only (version.dll), not installed"); return false; }
+    if (!beforeGameCode) { Log("[mapspread] MapPopupSpread: start-up only (loaded late here), not installed"); return false; }
     if (!pacingHooked) { Log("[mapspread] MapPopupSpread: NpcCreationPacing's frame hooks are not installed: not installed"); return false; }
     Sites s;
     if (!Discover(Game(), &s)) {

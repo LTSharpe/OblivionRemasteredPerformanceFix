@@ -431,6 +431,7 @@ struct State {
     bool inMainRun = false;  // inside our RunSession(-1)
     bool inFrame = false;    // between our pre-tick run and the post-tick end
     bool deferredNow = false;
+    bool aheadDeferred = false;  // CreateAhead: a command was deferred since the last frame end
     bool lastCreateFar = false;  // a distant create command ran earlier in this OT frame
     int depth = 0;           // inside a unit
     bool unitDistant = false;  // the running unit's actor may wait (what a delegate completing inside it inherits)
@@ -2185,6 +2186,7 @@ uint64_t Defer(uint8_t* sess, int type)
     reinterpret_cast<SemFn>((*reinterpret_cast<void***>(sem))[2])(sem);  // FSemaphore::Unlock
     sess[kSessRun] = 0;
     g.deferredNow = true;
+    g.aheadDeferred = true;
     s.deferred[type].fetch_add(1, std::memory_order_relaxed);
     return 0;
 }
@@ -2226,7 +2228,11 @@ uint64_t CreateExecHook(void* cmd)
     g.lastCreateFar = distant;
     if (OverBudget(kCreate)) g.frameFlags |= distant ? 2 : 4;
     uint64_t r = 0;
+    // CreateAhead (create_ahead.cpp): the command's reference and base form ids for the spawner's SpawnActor call (no-op
+    // unless installed)
+    CreateAheadCreateBegin(*reinterpret_cast<const uint32_t*>(c + 0x78), *reinterpret_cast<const uint32_t*>(c + 0x70));
     const uint64_t us = TimeUnit(kCreate, distant, nullptr, 0, [&] { r = g.origCreate(cmd); });
+    CreateAheadCreateEnd();
     Account(kCreate, us);
     return r;
 }
@@ -2295,15 +2301,159 @@ uint64_t FrameBudget()
 
 // Times the frame-rate cap's sleep (game thread, once per frame, before the world ticks).
 
+// CapSleepSkip (worker repathdefer 2026-11-19; lever 7 of the stutterfree plan; S-041, S-045, S-062): the frame-rate
+// cap's wait before a frame the game is known to make long is shortened by up to CapSleepSkipMaxMs. A present gap is the cap's
+// wait before a frame + the frame's game-thread work + the render thread's lag growth (stutterfree, 14 of 14 marks): a 14 ms
+// garbage-collection pass after 8.4 ms of waiting made a 32 ms gap at Mortal Camp, a cell-removal frame after 4.9 ms a 37 ms
+// one. Known at this point (the end of the frame before, in MaxTickRateHook, before the engine's wait): GcPassAfterBusy's
+// reading of the GC timer (the pass runs in the coming frame when the timer, plus the time this frame already took, is over
+// the interval and nothing the engine tests or our hold uses stops it: GcPassAfterBusyNextUnits bit 1) and a cell's
+// RemoveFromWorld step in the frame that just ended (StreamOutEndPlaySlice's note: the removal goes on in the coming frame,
+// bit 2). How: the engine's one GetMaxTickRate call inside UpdateTimeAndHandleMaxTickRate (a 6-byte `call [rax+slot]`)
+// becomes `call [rip+slot]` into CapRateHook, which calls the same virtual and, for this one call only, returns the rate of
+// a period shorter by the cut: the engine's WaitTime = 1/rate - DeltaRealTime is then shorter by the cut (0 below 0).
+// Identical simulation (user 2026-11-19: "Ok if identical"): right after the engine's function returns, FApp::DeltaTime
+// (written there as CurrentTime - LastRealTime, read by nothing in between) gets back the wait that was cut (the engine's
+// own WaitTime minus the one it waited), so the frame is simulated with the delta of a frame that waited as the game does;
+// the engine's LastRealTime is the frame's real start, so the next frame's delta is its real length, as in the game. Only
+// the moment the frame starts (and is shown) moves; the sleep's own overshoot stays, as in the game, nondeterministic. No
+// added latency (the frame's input is read earlier). At most one shortened wait in kCapSkipEvery frames; never in menus,
+// loading screens, or uncapped.
+constexpr uint64_t kCapSkipEvery = 4;
+constexpr size_t kCapCallAt = 0x1E;   // kMaxTickCalls: the second `call [rax+disp32]` (GetMaxTickRate)
+uint8_t* g_capCallSite = nullptr;
+std::atomic<int> g_capSkipBits{0};    // live: 1 GC pass due, 2 cell removal going on (0 off)
+std::atomic<int> g_capSkipMaxUs{8000};
+std::atomic<int> g_capSkipAddBack{1};  // lab CapSleepSkipAddBack (public: always 1): 1 the cut goes back into the delta, 0 not
+bool g_capSkipInstalled = false;
+double g_capSkipCutS = 0;             // game thread: > 0 for the next GetMaxTickRate call inside the cap's function only
+double g_capDeltaAddS = 0;            // game thread: the wait that call cut (the engine's WaitTime minus the shortened one)
+uint64_t g_capSkipLastFrame = 0;
+bool g_capSkipCheck = false;          // the frame running now started early: its length is recorded at the next wait
+int g_capSkipWhy = 0;
+double g_capSkipCutUs = 0;
+int (*g_capUnitsFn)(uint64_t) = &GcPassAfterBusyNextUnits;
+bool (*g_capMenuFn)(int32_t*, int32_t*) = &ReadMenuFreeze;
+// skips / long20 / short20 by reason ([0] GC pass, [1] cell removal; review C3); noWait: cut frames that took a whole cap
+// period or more (the next frame does not wait); caseB: of those, the frame waited >= 1 ms for the render thread (FFrameEndSync,
+// HitchLedger's sync column): the head start was partly absorbed and the next step is up to that much (at most the cut) longer
+// than the game's (review C1), caseBUs = sum of min(sync wait, cut); syncUnknown: noWait frames while the ledger did not record;
+// notGiven: cuts not given back to the delta (lab CapSleepSkipAddBack=0).
+struct CapSkipStats {
+    std::atomic<uint64_t> skips[2]{}, cutUs{}, long20[2]{}, short20[2]{}, maxAfterUs{}, calls{}, addedUs{}, noDelta{}, noWait{}, caseB{},
+        caseBUs{}, syncUnknown{}, notGiven{};
+} cs;
+int g_capSkipLines = 0;
+double g_capLabAdded = 0, g_capLabDelta = 0;  // lab line: the last cut frame's restored part and its delta time
+
+// UpdateTimeAndHandleMaxTickRate's GetMaxTickRate call (game thread; the patched call site).
+float CapRateHook(void* engine, float delta, bool allowSmoothing)
+{
+    void* const* const vt = *static_cast<void* const* const*>(engine);
+    const float rate = reinterpret_cast<GetMaxTickRateFn>(vt[g.getMaxTickRateSlot / 8])(engine, delta, allowSmoothing);
+    const double cut = g_capSkipCutS;
+    g_capSkipCutS = 0;
+    if (cut <= 0 || !(rate > 1.0f && rate < 1000.0f)) return rate;
+    cs.calls.fetch_add(1, std::memory_order_relaxed);
+    const double period = 1.0 / static_cast<double>(rate) - cut;
+    const float shorter = period > 1e-4 ? static_cast<float>(1.0 / period) : 0.0f;
+    // the engine's WaitTime = max(1/MaxTickRate - DeltaRealTime, 0) (float), with its rate and with ours
+    const double d = static_cast<double>(delta);
+    const double stockWait = std::max(1.0 / static_cast<double>(rate) - d, 0.0);
+    const double ourWait = shorter > 0.0f ? std::max(1.0 / static_cast<double>(shorter) - d, 0.0) : 0.0;
+    g_capDeltaAddS = stockWait - ourWait;
+    return shorter;
+}
+
+// After the engine's function (game thread): the cut wait goes back into FApp::DeltaTime (`dt`), so the frame's simulated
+// delta is the one of a frame that waited. Returns the seconds added (0: nothing was cut).
+double CapSkipRestoreDelta(double* dt)
+{
+    const double add = g_capDeltaAddS;
+    g_capDeltaAddS = 0;
+    if (add <= 0) return 0;
+    if (g_capSkipAddBack.load(std::memory_order_relaxed) == 0) {  // lab CapSleepSkipAddBack=0: the frame keeps its real, shorter step
+        cs.notGiven.fetch_add(1, std::memory_order_relaxed);
+        return 0;
+    }
+    if (!dt) {  // no FApp::DeltaTime known: the cut frame keeps its shorter delta (counted; the install requires it)
+        cs.noDelta.fetch_add(1, std::memory_order_relaxed);
+        return 0;
+    }
+    *dt += add;
+    cs.addedUs.fetch_add(static_cast<uint64_t>(add * 1e6), std::memory_order_relaxed);
+    return add;
+}
+
+// MaxTickRateHook's entry, game thread: is the coming frame known to carry a unit? Then the next wait is shortened.
+void CapSkipDecide(uint64_t entryUs)
+{
+    if (g_capSkipCheck) {  // the frame that just ended started early: how long it took (its work, entry to the last wait's end)
+        g_capSkipCheck = false;
+        const uint64_t work = g.lastPaceEnd && entryUs > g.lastPaceEnd ? entryUs - g.lastPaceEnd : 0;
+        const int r = g_capSkipWhy & 1 ? 0 : 1;
+        (work >= 20000 ? cs.long20[r] : cs.short20[r]).fetch_add(1, std::memory_order_relaxed);
+        AtomicMax(cs.maxAfterUs, work);
+        // review C1 (case B): a cut frame as long as the period or longer is not followed by a wait, so the next frame's delta is
+        // the cut frame's real length; if the frame waited for the render thread, part of its head start was absorbed there
+        const uint64_t sync = LedgerSyncUsNow();
+        const bool noWait = g.capPeriodUs > 0 && static_cast<double>(work) >= g.capPeriodUs;
+        bool caseB = false;
+        if (noWait) {
+            cs.noWait.fetch_add(1, std::memory_order_relaxed);
+            if (sync == ~0ull) cs.syncUnknown.fetch_add(1, std::memory_order_relaxed);
+            else if (sync >= 1000) {
+                caseB = true;
+                cs.caseB.fetch_add(1, std::memory_order_relaxed);
+                cs.caseBUs.fetch_add(static_cast<uint64_t>(std::min(static_cast<double>(sync), g_capSkipCutUs)), std::memory_order_relaxed);
+            }
+        }
+    }
+    const int bits = g_capSkipBits.load(std::memory_order_relaxed);
+    if (!bits || !g_capSkipInstalled || g.capPeriodUs <= 0 || !g.lastPaceEnd || entryUs <= g.lastPaceEnd) return;
+    if (g_capSkipLastFrame && g.frame < g_capSkipLastFrame + kCapSkipEvery) return;
+    const double elapsed = static_cast<double>(entryUs - g.lastPaceEnd);
+    const double wait = g.capPeriodUs - elapsed;
+    if (wait < 1000.0) return;  // nothing worth shortening
+    const uint8_t* const tes = g.tes ? *g.tes : nullptr;
+    if (!tes || tes[kTesTravelPending]) return;
+    int32_t named = 0, mode = 0;
+    if (!g_capMenuFn || !g_capMenuFn(&named, &mode) || named != 0 || mode != 0) return;
+    // review C6: the coming frame's delta is at least the cap period with the add-back (a waited frame's), at least the period
+    // minus the cut without it (lab CapSleepSkipAddBack=0); 0.2 ms below either, so the prediction stays on the safe side
+    const double maxCut = static_cast<double>(g_capSkipMaxUs.load(std::memory_order_relaxed));
+    const double stepUs = g_capSkipAddBack.load(std::memory_order_relaxed) ? g.capPeriodUs : g.capPeriodUs - std::min(wait, maxCut);
+    const uint64_t predictUs = static_cast<uint64_t>(std::max(elapsed, stepUs - 200.0));
+    const int units = g_capUnitsFn ? g_capUnitsFn(predictUs) & bits : 0;
+    if (!units) return;
+    const double cut = std::min(wait, maxCut);
+    g_capSkipCutS = cut / 1e6;
+    g_capSkipCutUs = cut;
+    g_capSkipWhy = units;
+    g_capSkipLastFrame = g.frame;
+    g_capSkipCheck = true;
+    cs.skips[units & 1 ? 0 : 1].fetch_add(1, std::memory_order_relaxed);
+    cs.cutUs.fetch_add(static_cast<uint64_t>(cut), std::memory_order_relaxed);
+}
+
 void MaxTickRateHook(void* engine)
 {
     LedgerSleepBegin();  // HitchLedger: the cap's sleep starts (no-op unless recording, game thread only)
     const uint64_t t0 = NowUs();
+    if (g_capSkipInstalled && OnGameThread()) CapSkipDecide(t0);  // CapSleepSkip: the wait below may be shortened (one call)
     g.origMaxTick(engine);
+    g_capSkipCutS = 0;  // used by the engine's GetMaxTickRate call or not: never carried to another call
+    if (g_capDeltaAddS > 0) {  // CapSleepSkip: the cut frame's delta as the game's
+        double* const dt = GcPassAfterBusyDeltaTime();
+        g_capLabAdded = CapSkipRestoreDelta(dt);
+        g_capLabDelta = dt ? *dt : 0;
+    }
     const uint64_t t1 = NowUs();
     if (!OnGameThread()) return;
     HdrMenuFrameEnd();   // HdrMenuRows / HudAspectRow / DlssRayReconstruction (no-op unless installed)
     HdrGammaFrameEnd();  // HdrGamma22 (no-op unless installed; writes only while on)
+    StuckEffectLookFrameEnd();  // StuckEffectLookFix: leftover status-effect looks (no-op unless installed)
+    CmdMemPregrowFrame();  // CmdMemPregrow: its pass waits for the first loading screen (reads the freeze state only while it waits)
     {
         LedgerPacing lp;
         lp.unitCumUs = g.unitCumUs;
@@ -2321,6 +2471,13 @@ void MaxTickRateHook(void* engine)
     ImpactPreloadFrame();  // ImpactPreload (loading/impact_preload.cpp): no-op unless installed and on
     RowPreloadGtFrame();   // RowPreload (streaming/row_preload.cpp): the menu / loading freeze for the OT (no-op unless installed)
     const uint64_t sleep = t1 - t0, period = g.lastPaceEnd ? t1 - g.lastPaceEnd : 0;
+    {  // CreateAhead (create_ahead.cpp): one SpawnActor half after a frame with slack, while nothing is held (no-op unless on)
+        const uint8_t* const tesNow = g.tes ? *g.tes : nullptr;
+        CreateAheadFrame(sleep, g.count != 0 || g.aheadDeferred, tesNow && tesNow[kTesTravelPending]);
+        g.aheadDeferred = false;
+        // CellObjectPreload (streaming/cell_preload.cpp): the files of objects in cells loaded ahead (no-op unless on)
+        CellObjectPreloadFrame(tesNow && tesNow[kTesTravelPending]);
+    }
     GateFrameEdge(t0);  // PacingBaseGate: the frame's rest after the post-actor tick, its prediction check
     g.lastPeriodUs = period > g.unitUs ? period - g.unitUs : 0;  // PacingHairActor fade rate: the frame without our units
     g.lastPaceEnd = t1;
@@ -2567,6 +2724,9 @@ ExecFn const kExecuteHooks[kNumDelegates] = {&ExecuteHook<kAppearance>, &Execute
 
 }  // namespace
 
+// CmdMemPregrow self-test: MaxTickRateHook must call CmdMemPregrowFrame (its code is searched for the call).
+const void* NpcPacingMaxTickHookCode() { return reinterpret_cast<const void*>(&MaxTickRateHook); }
+
 
 bool FindNpcPacing()
 {
@@ -2579,6 +2739,7 @@ bool FindNpcPacing()
         g.numMaxTickSlots = FindSlots(game, paces[0], g.maxTickSlots, 4);
         uint8_t* calls = FindNear(paces[0], 0x400, kMaxTickCalls);
         if (calls) g.getMaxTickRateSlot = Disp32(calls + kMaxTickRateSlot);
+        g_capCallSite = calls ? calls + kCapCallAt : nullptr;  // CapSleepSkip
         if (g.numMaxTickSlots < 1 || g.numMaxTickSlots > 4 || !calls || g.getMaxTickRateSlot % 8 || g.getMaxTickRateSlot > 0x2000)
             g.numMaxTickSlots = 0;
         else g.origMaxTick = reinterpret_cast<MaxTickRateFn>(paces[0]);
@@ -3139,6 +3300,7 @@ bool NpcPacingPlayerPos(double* x, double* y, double* z)
     return true;
 }
 
+
 // The last position the game thread saw (any thread; for the GPU crash report: the values may be a frame old or mixed).
 bool NpcPacingLastPlayerPos(double* x, double* y, double* z)
 {
@@ -3238,6 +3400,16 @@ void NpcPacingTestGameValue(float (*value)(const void* actor)) { g.testGameValue
 float NpcPacingTestGatePeriodS() { return GatePeriodS(); }
 
 uint64_t NpcPacingFrame() { return g.frame; }  // RigTraceReuse's stats line
+// GcPassAfterBusy (memory/gc_pass_after_busy.cpp), game thread: the frame's own time so far (since the frame-rate cap's
+// sleep point) and the time of the character steps run in this frame so far; false until the first frame edge
+bool NpcPacingFrameState(uint64_t* elapsedUs, uint64_t* unitUs)
+{
+    if (!g.installed || !g.lastPaceEnd) return false;
+    const uint64_t now = NowUs();
+    *elapsedUs = now > g.lastPaceEnd ? now - g.lastPaceEnd : 0;
+    *unitUs = g.unitUs;
+    return true;
+}
 
 NpcPacingTestState NpcPacingTestRead()
 {
@@ -3252,5 +3424,185 @@ NpcPacingTestState NpcPacingTestRead()
     return t;
 }
 
+
+// ---- CapSleepSkip ----
+// Start-up only (a 6-byte code patch of the engine's GetMaxTickRate call inside UpdateTimeAndHandleMaxTickRate); needs
+// NpcCreationPacing's cap hook (MaxTickRateHook decides) and GcPassAfterBusy's readings (its predictor).
+bool InstallCapSleepSkip(bool beforeGameCode, int key)
+{
+    if (!key) { Log("[capskip] CapSleepSkip off in OblivionPerfFix.ini (takes a restart to switch on)"); return false; }
+    if (!beforeGameCode) { Log("[capskip] CapSleepSkip: only installed when the game starts (version.dll route), not installed"); return false; }
+    if (!g.installed || !g.origMaxTick || !g_capCallSite) {
+        Log("[capskip] CapSleepSkip needs NpcCreationPacing's frame-rate cap hook: not installed");
+        return false;
+    }
+    if (!GcPassAfterBusyDeltaTime()) {
+        Log("[capskip] CapSleepSkip needs GcPassAfterBusy's readings (the GC timer, FApp::DeltaTime): not installed");
+        return false;
+    }
+    uint8_t* const site = g_capCallSite;
+    if (site[0] != 0xFF || site[1] != 0x90 || Disp32(site + 2) != g.getMaxTickRateSlot) {
+        Log("[capskip] CapSleepSkip: the engine's GetMaxTickRate call does not match: not installed");
+        return false;
+    }
+    uint8_t* const mem = AllocNearGame(16);
+    if (!mem) { Log("[capskip] CapSleepSkip: no memory near the game's code: not installed"); return false; }
+    void* const hook = reinterpret_cast<void*>(&CapRateHook);
+    memcpy(mem, &hook, sizeof hook);
+    DWORD old;
+    VirtualProtect(mem, 16, PAGE_READONLY, &old);
+    const int64_t d = mem - (site + 6);
+    if (d != static_cast<int32_t>(d)) { Log("[capskip] CapSleepSkip: slot out of reach: not installed"); return false; }
+    uint8_t insn[6] = {0xFF, 0x15};
+    const int32_t rel = static_cast<int32_t>(d);
+    memcpy(insn + 2, &rel, 4);
+    if (!WriteCode(site, std::span<const uint8_t>(insn, 6))) { Log("[capskip] CapSleepSkip: could not patch the call: not installed"); return false; }
+    g_capSkipInstalled = true;
+    const GameModule& game = Game();
+    Log("[capskip] CapSleepSkip installed: GetMaxTickRate call exe+0x%X (vtable +0x%X) goes through our hook; live",
+        static_cast<unsigned>(site - game.base), g.getMaxTickRateSlot);
+    return true;
+}
+
+// Monitor thread, every second (live once installed): bits 1 GC pass, 2 cell removal; the most the wait is shortened (ms).
+void SetCapSleepSkip(int bits, int maxMs, int addBack)
+{
+    if (!g_capSkipInstalled) return;
+    const int b = bits < 0 ? 0 : bits & 3;
+    const int us = (maxMs < 1 ? 1 : maxMs > 16 ? 16 : maxMs) * 1000;
+    (void)addBack;
+    const int ab = 1;  // public: the cut always goes back into the delta
+    if (b != g_capSkipBits.load() || us != g_capSkipMaxUs.load() || ab != g_capSkipAddBack.load()) {
+        Log("[capskip] CapSleepSkip %d -> %d, at most %d ms%s", g_capSkipBits.load(), b, us / 1000,
+            ab ? "" : " (lab CapSleepSkipAddBack=0: the cut is not given back to the frame's delta)");
+        g_capSkipBits = b;
+        g_capSkipMaxUs = us;
+        g_capSkipAddBack = ab;
+    }
+}
+
+void LogCapSleepSkipStats()
+{
+    if (!g_capSkipInstalled) return;
+    const uint64_t gc = cs.skips[0].exchange(0), rem = cs.skips[1].exchange(0);
+    if (!gc && !rem) return;
+    const uint64_t cut = cs.cutUs.exchange(0), lg = cs.long20[0].exchange(0), sg = cs.short20[0].exchange(0), lr = cs.long20[1].exchange(0),
+                   sr = cs.short20[1].exchange(0), mx = cs.maxAfterUs.exchange(0), calls = cs.calls.exchange(0), added = cs.addedUs.exchange(0),
+                   noDelta = cs.noDelta.exchange(0), nw = cs.noWait.exchange(0), cb = cs.caseB.exchange(0), cbUs = cs.caseBUs.exchange(0),
+                   su = cs.syncUnknown.exchange(0), ng = cs.notGiven.exchange(0);
+    using U = unsigned long long;
+    Log("[capskip] stats: the cap's wait shortened before %llu frames (GC pass due %llu: then >= 20 ms %llu, less %llu; cell removal %llu: "
+        ">= 20 ms %llu, less %llu; longest %.1f ms), %.1f ms in all, %llu reached the engine's wait; %.1f ms given back to the frames' "
+        "delta time (the game clock's lead on the real clock grew by that)%s%s; no wait after the cut frame %llu, of which it waited "
+        "for the render thread %llu (%.1f ms: the next frame's step that much longer than the game's), not known %llu",
+        static_cast<U>(gc + rem), static_cast<U>(gc), static_cast<U>(lg), static_cast<U>(sg), static_cast<U>(rem), static_cast<U>(lr),
+        static_cast<U>(sr), mx / 1000.0, cut / 1000.0, static_cast<U>(calls), added / 1000.0, noDelta ? ", SOME NOT" : "",
+        ng ? " (lab CapSleepSkipAddBack=0: not given back)" : "", static_cast<U>(nw), static_cast<U>(cb), cbUs / 1000.0, static_cast<U>(su));
+}
+
+// Self-tests. Site: the GetMaxTickRate call CapSleepSkip patches is `call [rax+slot]` with NpcCreationPacing's slot.
+bool CapSleepSkipTestSite(const GameModule& game)
+{
+    const auto paces = FindAll(game.text, ParsePattern(kMaxTickRate));
+    uint8_t* const calls = paces.size() == 1 ? FindNear(paces[0], 0x400, kMaxTickCalls) : nullptr;
+    if (!calls) return false;
+    const uint8_t* const site = calls + kCapCallAt;
+    const uint32_t slot = Disp32(calls + kMaxTickRateSlot);
+    return site[0] == 0xFF && site[1] == 0x90 && Disp32(site + 2) == slot && slot > 0 && slot % 8 == 0;
+}
+
+namespace {
+float g_fakeRate = 60.0f;
+float FakeGetMaxTickRate(void*, float, bool) { return g_fakeRate; }
+int g_fakeUnits = 0;
+uint64_t g_fakeUnitsArg = 0;
+int FakeUnits(uint64_t us) { g_fakeUnitsArg = us; return g_fakeUnits; }
+bool FakeMenu(int32_t* n, int32_t* m) { *n = 0; *m = 0; return true; }
+}  // namespace
+
+// The rate hook and the decision on fakes. `which`: 0 no cut: the rate passes through; 1 a cut of 8 ms on 60 fps: the rate of a
+// 8.67 ms period, once (the next call passes through); 2 a cut longer than the period: 0 (no wait); 3 decision: a GC pass due
+// after 8 ms of work at 60 fps: cut 8 ms (the bound) and counted; 4 the next frame (within kCapSkipEvery): no cut; 5 nothing
+// due: no cut; 6 a frame that already took 16 ms: no cut. 1 = as expected.
+int CapSleepSkipTest(int which)
+{
+    static void* fakeVt[0x400 / 8] = {};
+    void* engine[1] = {fakeVt};
+    const uint32_t savedSlot = g.getMaxTickRateSlot;
+    if (!g.getMaxTickRateSlot) g.getMaxTickRateSlot = 0x310;
+    fakeVt[g.getMaxTickRateSlot / 8] = reinterpret_cast<void*>(&FakeGetMaxTickRate);
+    g_fakeRate = 60.0f;
+    bool ok = false;
+    if (which == 7) {  // lab CapSleepSkipAddBack=0: the cut wait is not given back, counted
+        const int savedAb = g_capSkipAddBack.load();
+        g_capSkipAddBack = 0;
+        g_capSkipCutS = 0.008;
+        g_capDeltaAddS = 0;
+        const float r = CapRateHook(engine, 0.008f, true);
+        const uint64_t ng0 = cs.notGiven.load();
+        double dt = 0.0087;
+        const double back = CapSkipRestoreDelta(&dt);
+        ok = r < 120.0f && r > 110.0f && back == 0 && dt == 0.0087 && g_capDeltaAddS == 0 && cs.notGiven.load() == ng0 + 1;
+        g_capSkipAddBack = savedAb;
+    } else if (which <= 2) {
+        g_capSkipCutS = which == 0 ? 0 : which == 1 ? 0.008 : 0.02;
+        g_capDeltaAddS = 0;
+        const float r = CapRateHook(engine, 0.008f, true);  // 8 ms of the frame gone: the game would wait 8.67 ms
+        const double add = g_capDeltaAddS;
+        const float r2 = CapRateHook(engine, 0.008f, true);
+        // the delta given back after the engine's call: the cut part of the wait (8 ms; the whole 8.67 ms wait when cut to 0)
+        double dt = 0.0087;  // what the engine wrote for the shortened frame (DeltaRealTime + its shorter wait)
+        const double back = CapSkipRestoreDelta(&dt);
+        if (which == 0) ok = r == 60.0f && add == 0 && back == 0 && dt == 0.0087;
+        else if (which == 1)
+            ok = std::fabs(r - static_cast<float>(1.0 / (1.0 / 60.0 - 0.008))) < 0.01f && r2 == 60.0f && std::fabs(add - 0.008) < 2e-5 &&
+                 std::fabs(dt - (0.0087 + add)) < 1e-12 && g_capDeltaAddS == 0;
+        else ok = r == 0.0f && r2 == 60.0f && std::fabs(add - (1.0 / 60.0 - static_cast<double>(0.008f))) < 2e-6 && std::fabs(back - add) < 1e-12;
+    } else {
+        const bool savedInst = g_capSkipInstalled;
+        const int savedBits = g_capSkipBits.load(), savedMax = g_capSkipMaxUs.load();
+        const double savedCap = g.capPeriodUs;
+        const uint64_t savedEnd = g.lastPaceEnd, savedFrame = g.frame, savedLast = g_capSkipLastFrame;
+        const auto savedUnits = g_capUnitsFn;
+        const auto savedMenu = g_capMenuFn;
+        uint8_t** const savedTes = g.tes;
+        static uint8_t tes[0x200] = {};
+        static uint8_t* tesPtr = tes;
+        g.tes = &tesPtr;
+        g_capSkipInstalled = true;
+        g_capSkipBits = 3;
+        g_capSkipMaxUs = 8000;
+        g.capPeriodUs = 16667;
+        g_capUnitsFn = &FakeUnits;
+        g_capMenuFn = &FakeMenu;
+        g_fakeUnits = which == 5 ? 0 : 1;
+        g.frame = 1000;
+        g_capSkipLastFrame = which == 4 ? 998 : 0;
+        g.lastPaceEnd = 50000;
+        g_capSkipCutS = 0;
+        g_capSkipCheck = false;
+        const uint64_t gc0 = cs.skips[0].load();
+        CapSkipDecide(50000 + (which == 6 ? 16000 : 8000));
+        // 3: 8 ms of work; the predictor is asked with the cap period less 0.2 ms (the coming frame's delta with the add-back)
+        if (which == 3)
+            ok = std::fabs(g_capSkipCutS - 0.008) < 1e-9 && cs.skips[0].load() == gc0 + 1 && g_capSkipLastFrame == 1000 &&
+                 g_fakeUnitsArg == 16467;
+        else ok = g_capSkipCutS == 0 && cs.skips[0].load() == gc0;
+        g_capSkipCutS = 0;
+        g_capSkipCheck = false;
+        g.tes = savedTes;
+        g_capUnitsFn = savedUnits;
+        g_capMenuFn = savedMenu;
+        g.capPeriodUs = savedCap;
+        g.lastPaceEnd = savedEnd;
+        g.frame = savedFrame;
+        g_capSkipLastFrame = savedLast;
+        g_capSkipBits = savedBits;
+        g_capSkipMaxUs = savedMax;
+        g_capSkipInstalled = savedInst;
+    }
+    g.getMaxTickRateSlot = savedSlot;
+    return ok ? 1 : 0;
+}
 
 }  // namespace opf

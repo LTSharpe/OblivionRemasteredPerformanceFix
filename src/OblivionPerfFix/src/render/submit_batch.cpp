@@ -372,7 +372,7 @@ bool InstallRdgSubmitBatching(bool rhiMayBeRunning)
     }
 
     // Trampoline: the original prologue, then jmp [rip+0] back to the rest of SubmitPayloads.
-    auto* tramp = static_cast<uint8_t*>(VirtualAlloc(nullptr, 64, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    auto* tramp = static_cast<uint8_t*>(RegisterOwnCode(VirtualAlloc(nullptr, 64, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)));
     if (!tramp) return false;
     memcpy(tramp, g.submitPayloads, kPrologueSize);
     const uint8_t jmpAbs[6] = {0xFF, 0x25, 0, 0, 0, 0};

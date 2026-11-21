@@ -469,7 +469,11 @@ bool ApplyFrameGenPacingTuning(bool beforeGameCode, int mode)
 {
     g_mode = mode;
     if (g_library || g_cookie) return true;
-    if (!beforeGameCode || GetModuleHandleW(kLibrary)) {
+    if (!beforeGameCode) {  // boottriage P2: this case said "already loaded" even when the library was not loaded yet
+        Log("[fgpace] FrameGenPacingTuning not installed: it is set up only at the game's start (loaded late here)");
+        return false;
+    }
+    if (GetModuleHandleW(kLibrary)) {
         Log("[fgpace] AMD's FidelityFX library is already loaded: FrameGenPacingTuning needs the game's start (version.dll)");
         return false;
     }

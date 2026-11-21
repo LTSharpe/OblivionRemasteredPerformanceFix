@@ -270,6 +270,45 @@ static void GpuShotRun(const GameModule& game)
         }
         Check(bad == 0, "GpuMenuShot: the shader's arithmetic (CPU twin) equals fix 40 + fix 10 on random pictures");
     }
+    // gh54 (issue #54): the setups the takeover is not made on.
+    {
+        const bool vendors = GpuMenuShotSetupRule(0x8086, nullptr) != nullptr && GpuMenuShotSetupRule(0x1002, nullptr) == nullptr &&
+                             GpuMenuShotSetupRule(0x10DE, nullptr) == nullptr && GpuMenuShotSetupRule(0, nullptr) == nullptr &&
+                             GpuMenuShotSetupRule(0x1002, "OptiScaler") != nullptr && GpuMenuShotSetupRule(0x10DE, "x") != nullptr;
+        Check(vendors, "GpuMenuShot setup gate: Intel GPU or a detected layer -> the game's way; AMD / NVIDIA without a layer -> takeover");
+        const auto L = [](const wchar_t* n, bool sys) { return GpuMenuShotLayerRule(n, sys); };
+        const bool named = L(L"OptiScaler.dll", false) && L(L"OptiScaler.asi", false) && L(L"optiscaler.dll", true) &&
+                           L(L"dlss-enabler.dll", false) && L(L"dlssg_to_fsr3_amd_is_better.dll", false) &&
+                           L(L"OptiScaler.dll", false) != kGpuMenuShotLayerScan;
+        const bool proxies = L(L"dxgi.dll", false) && L(L"DXGI.DLL", false) && L(L"d3d12.dll", false) && L(L"d3d11.dll", false) &&
+                             L(L"dxgi.dll", true) == nullptr && L(L"d3d12.dll", true) == nullptr &&
+                             L(L"dxgi.dll", false) != kGpuMenuShotLayerScan;
+        const bool scans = L(L"winmm.dll", false) == kGpuMenuShotLayerScan && L(L"version.dll", false) == kGpuMenuShotLayerScan &&
+                           L(L"nvngx.dll", false) == kGpuMenuShotLayerScan && L(L"something.asi", false) == kGpuMenuShotLayerScan &&
+                           L(L"winmm.dll", true) == nullptr && L(L"nvngx.dll", true) == nullptr &&
+                           L(L"dbghelp.dll", false) == kGpuMenuShotLayerScan && L(L"dbghelp.dll", true) == nullptr;
+        // The game's own DLLs and UE4SS's proxy are not layers.
+        const bool gameDlls = !L(L"dwmapi.dll", false) && !L(L"sl.interposer.dll", false) &&
+                          !L(L"sl.dlss_g.dll", false) && !L(L"nvngx_dlssg.dll", false) && !L(L"amd_fidelityfx_dx12.dll", false) &&
+                          !L(L"amd_fidelityfx_framegeneration_dx12.dll", false) && !L(L"libxess.dll", false) &&
+                          !L(L"D3D12Core.dll", false) && !L(L"UE4SS.dll", false) && !L(L"OblivionRemastered-Win64-Shipping.exe", false);
+        Check(named && proxies && scans && gameDlls,
+              "GpuMenuShot setup gate: OptiScaler / DLSS Enabler / DLSS-G replacements by name, DXGI/D3D proxies outside the system "
+              "folder, other proxy names searched; the game's own DLLs and UE4SS's dwmapi.dll are not layers");
+    }
+    {
+        // The image search used for proxy-named DLLs: the self-test's own image holds its KERNEL32 import name; kernel32.dll
+        // does not hold OptiScaler's name.
+        const auto* const self = reinterpret_cast<const uint8_t*>(GetModuleHandleW(nullptr));
+        const auto* const k32 = reinterpret_cast<const uint8_t*>(GetModuleHandleW(L"kernel32.dll"));
+        const auto imageSize = [](const uint8_t* b) {
+            const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(b);
+            return static_cast<size_t>(reinterpret_cast<const IMAGE_NT_HEADERS64*>(b + dos->e_lfanew)->OptionalHeader.SizeOfImage);
+        };
+        const bool found = self && GpuMenuShotImageHolds(self, imageSize(self), "KERNEL32");
+        const bool absent = k32 && !GpuMenuShotImageHolds(k32, imageSize(k32), "OptiScaler");
+        Check(found && absent, "GpuMenuShot setup gate: a module image search finds a text it holds and not one it lacks");
+    }
     Check(GpuMenuShotShaderSize() > 64 && GpuMenuShotShaderBlob(nullptr) != nullptr, "GpuMenuShot: the compute shader is compiled in");
     const int gpu = gpushot_test::GpuRun(lut);
     if (gpu < 0) printf("  (GpuMenuShot: no D3D12 device here: the GPU shader check skipped)\n");

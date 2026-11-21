@@ -718,6 +718,8 @@ void UpdateRelief(const Sample& s, const Config& cfg)
     g_ramClearSeconds = ramClear ? g_ramClearSeconds + 1 : 0;
     g_commitPressureSeconds = commitShort ? g_commitPressureSeconds + 1 : 0;
     g_commitClearSeconds = commitClear ? g_commitClearSeconds + 1 : 0;
+    // OsPageCacheAsyncRelease: this sample alone (no 3-second rule), at twice the thresholds: its queue releases at once
+    OsPageCacheMemoryLow(s.ramTotal && (s.ramFree < 2 * ramLimit || commitRoom < 2 * commitLimit));
 
     g_vramRelief.AllowTranslateStage(cfg.vramReliefPauseTranslate);
     // The video-memory stages are off by default (VramRelief=1 brings them back): in three real over-budget

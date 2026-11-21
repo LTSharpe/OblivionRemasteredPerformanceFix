@@ -165,6 +165,8 @@ bool RouteBatch(uint8_t* level, int gran)
 bool StreamOutEndPlaySliceHook(void* levelArg, int32_t n)
 {
     uint8_t* const level = static_cast<uint8_t*>(levelArg);
+    GcPassAfterBusyNoteStream(1);  // GcPassAfterBusy: a cell is being removed from the world this frame (no-op unless installed)
+    if (WaterCrossingWatching()) WaterCrossingNoteStream();  // WaterInfoAfterCrossing: the same signal
     const int gran = g_gran.load(std::memory_order_relaxed);
     const bool blocking = n == INT32_MAX || n <= 0;
     if (g_ph.level) {
@@ -251,7 +253,7 @@ bool InstallStreamOutEndPlaySlice(bool beforeGameCode, int key)
         return false;
     }
     if (!beforeGameCode) {
-        Log("[endplayslice] StreamOutEndPlaySlice: only installed when the game starts (version.dll route), not installed");
+        Log("[endplayslice] StreamOutEndPlaySlice: only installed when the game starts (loaded late here), not installed");
         return false;
     }
     const GameModule& game = Game();

@@ -194,7 +194,7 @@ bool RedirectRel32(uint8_t* site, uint8_t* stub, bool beforeGameCode)
     if (lo + 3 < qword + 8) {
         auto* q = reinterpret_cast<volatile LONG64*>(qword);
         DWORD old;
-        if (!VirtualProtect(reinterpret_cast<void*>(qword), 8, PAGE_EXECUTE_READWRITE, &old)) return false;
+        if (!CodeSiteProtect(reinterpret_cast<void*>(qword), 8, &old)) return false;
         const LONG64 before = *q;
         LONG64 after = before;
         memcpy(reinterpret_cast<uint8_t*>(&after) + (lo - qword), insn + 1, 4);
@@ -318,7 +318,7 @@ bool ApplyHdrMenuBackground(bool beforeGameCode)
     FlushInstructionCache(GetCurrentProcess(), stub, 14);
     const int64_t rel = stub - (call + 5);
     if (rel != static_cast<int32_t>(rel)) {
-        VirtualFree(region, 0, MEM_RELEASE);
+        FreeOwnCode(region);
         Log("[hdrbg] call stub out of reach: HdrMenuBackground not installed");
         return false;
     }
@@ -332,7 +332,7 @@ bool ApplyHdrMenuBackground(bool beforeGameCode)
     bool ok = false;
     if (lo + 3 < qword + 8) {
         auto* q = reinterpret_cast<volatile LONG64*>(qword);
-        if (VirtualProtect(reinterpret_cast<void*>(qword), 8, PAGE_EXECUTE_READWRITE, &old)) {
+        if (CodeSiteProtect(reinterpret_cast<void*>(qword), 8, &old)) {
             const LONG64 before = *q;
             LONG64 after = before;
             memcpy(reinterpret_cast<uint8_t*>(&after) + (lo - qword), insn + 1, 4);
@@ -346,7 +346,7 @@ bool ApplyHdrMenuBackground(bool beforeGameCode)
         Log("[hdrbg] the call cannot be switched atomically while the game runs: HdrMenuBackground not installed");
     }
     if (!ok) {
-        VirtualFree(region, 0, MEM_RELEASE);
+        FreeOwnCode(region);
         g_original = nullptr;
         g_manager = nullptr;
         Log("[hdrbg] writing the call at exe+0x%llX failed: HdrMenuBackground not installed",
@@ -495,7 +495,7 @@ bool ApplyHdrSaveThumbnail(bool beforeGameCode)
     g_copy = reinterpret_cast<CopyFn>(target);
     if (!g_manager) g_manager = manager;
     if (!RedirectRel32(call, region, beforeGameCode)) {
-        VirtualFree(region, 0, MEM_RELEASE);
+        FreeOwnCode(region);
         g_copy = nullptr;
         Log("[hdrthumb] writing the call at exe+0x%llX failed: HdrSaveThumbnail not installed",
             static_cast<unsigned long long>(call - game.base));

@@ -293,12 +293,12 @@ uint8_t* AllocNearImage(size_t size)
         const uintptr_t regionEnd = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
         if (mbi.State == MEM_FREE && a + size <= regionEnd)
             if (void* p = VirtualAlloc(reinterpret_cast<void*>(a), size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE))
-                return static_cast<uint8_t*>(p);
+                return static_cast<uint8_t*>(RegisterOwnCode(p));
         a = (regionEnd + gran - 1) & ~(gran - 1);
     }
     for (uintptr_t a = (base & ~(gran - 1)) - gran; a > gran && end - a < kReach; a -= gran)
         if (void* p = VirtualAlloc(reinterpret_cast<void*>(a), size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE))
-            return static_cast<uint8_t*>(p);
+            return static_cast<uint8_t*>(RegisterOwnCode(p));
     return nullptr;
 }
 
@@ -321,7 +321,7 @@ bool PatchEntry(uint8_t* fn, uint8_t* stub, bool beforeGameCode)
     if ((reinterpret_cast<uintptr_t>(fn) & 7) == 0) {
         auto* q = reinterpret_cast<volatile LONG64*>(fn);
         DWORD old;
-        if (!VirtualProtect(fn, 8, PAGE_EXECUTE_READWRITE, &old)) return false;
+        if (!CodeSiteProtect(fn, 8, &old)) return false;
         const LONG64 before = *q;
         LONG64 after = before;
         memcpy(&after, insn, sizeof insn);

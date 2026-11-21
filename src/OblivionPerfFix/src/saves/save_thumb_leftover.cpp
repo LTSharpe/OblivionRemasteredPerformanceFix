@@ -232,7 +232,7 @@ const char* SaveThumbLeftoverDiscover(const GameModule& game, SaveThumbLeftoverS
 bool InstallSaveThumbLeftoverFix(bool beforeGameCode)
 {
     if (g_installed) return true;
-    if (!beforeGameCode) { Log("[thumbleft] can only be installed at start-up (version.dll), not installed"); return false; }
+    if (!beforeGameCode) { Log("[thumbleft] can only be installed at start-up (loaded late here), not installed"); return false; }
     const GameModule& game = Game();
     SaveThumbLeftoverSites s{};
     if (const char* why = SaveThumbLeftoverDiscover(game, &s)) {

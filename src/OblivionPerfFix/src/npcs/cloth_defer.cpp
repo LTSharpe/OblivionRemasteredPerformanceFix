@@ -368,7 +368,7 @@ bool Fail(const char* why)
 bool InstallClothBuildDefer(bool beforeGameCode)
 {
     if (g_installed) return true;
-    if (!beforeGameCode) return Fail("only installed when the game starts (version.dll route; not on the OBSE64 route)");
+    if (!beforeGameCode) return Fail("only installed when the game starts (loaded late here)");
     LARGE_INTEGER f;
     QueryPerformanceFrequency(&f);
     g_freq = static_cast<uint64_t>(f.QuadPart);
@@ -433,7 +433,7 @@ bool InstallClothBuildDefer(bool beforeGameCode)
         if (written >= 3) WritePointer(g_unregSlot, slotBefore);
         if (written >= 2) WriteCode(g_enabledThunk, enabledBefore);
         if (written >= 1) WriteCode(g_suspendedCall, suspBefore);
-        VirtualFree(g_region, 0, MEM_RELEASE);
+        FreeOwnCode(g_region);
         g_region = nullptr;
         return Fail(why);
     };

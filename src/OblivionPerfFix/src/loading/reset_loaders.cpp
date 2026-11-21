@@ -175,7 +175,7 @@ bool InstallResetLoadersNoFlush(bool beforeGameCode, bool key)
         return false;
     }
     if (!beforeGameCode) {
-        Log("[resetloaders] ResetLoadersNoFlush: only installed when the game starts (version.dll route), not installed");
+        Log("[resetloaders] ResetLoadersNoFlush: only installed when the game starts (loaded late here), not installed");
         return false;
     }
     const GameModule& game = Game();
@@ -190,7 +190,7 @@ bool InstallResetLoadersNoFlush(bool beforeGameCode, bool key)
     if (!region) { Log("[resetloaders] ResetLoadersNoFlush not installed: no memory near the game's code"); return false; }
     const int64_t rel = region - (f.reset + 5);
     if (rel != static_cast<int32_t>(rel)) {
-        VirtualFree(region, 0, MEM_RELEASE);
+        FreeOwnCode(region);
         Log("[resetloaders] ResetLoadersNoFlush not installed: out of reach");
         return false;
     }
@@ -205,7 +205,7 @@ bool InstallResetLoadersNoFlush(bool beforeGameCode, bool key)
     memcpy(tramp + kPrologue + sizeof jmpAbs, &back, sizeof back);
     DWORD old;
     if (!VirtualProtect(region, 64, PAGE_EXECUTE_READ, &old)) {
-        VirtualFree(region, 0, MEM_RELEASE);
+        FreeOwnCode(region);
         Log("[resetloaders] ResetLoadersNoFlush not installed: could not make the trampoline executable");
         return false;
     }
@@ -222,7 +222,7 @@ bool InstallResetLoadersNoFlush(bool beforeGameCode, bool key)
     if (!WriteCode(f.reset, bytes)) {
         g_game = nullptr;
         g_tramp = nullptr;
-        VirtualFree(region, 0, MEM_RELEASE);
+        FreeOwnCode(region);
         Log("[resetloaders] ResetLoadersNoFlush not installed: could not patch the function");
         return false;
     }

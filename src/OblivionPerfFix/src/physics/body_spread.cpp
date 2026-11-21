@@ -1324,7 +1324,7 @@ bool InstallBodyRemovalSpread(bool beforeGameCode, int key, int perFrame, int ma
     (void)iniPath;
     const bool install = key != 0;
     if (!install) { Log("[bodyspread] BodyRemovalSpread off in OblivionPerfFix.ini (takes a restart to switch on)"); return false; }
-    if (!beforeGameCode) { Log("[bodyspread] BodyRemovalSpread: start-up only (version.dll), not installed"); return false; }
+    if (!beforeGameCode) { Log("[bodyspread] BodyRemovalSpread: start-up only (loaded late here), not installed"); return false; }
     if (!frameHooks) {
         Log("[bodyspread] BodyRemovalSpread: needs NpcCreationPacing's frame hooks (NpcCreationPacing=1 at start-up), not installed");
         return false;

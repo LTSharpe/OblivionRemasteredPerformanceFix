@@ -362,7 +362,7 @@ bool FindFrameGenCameraSite()
 bool ApplyFrameGenCameraInfo(bool beforeGameCode)
 {
     if (g_stub) return true;
-    if (!beforeGameCode) return Fail("can only be installed at start-up (version.dll)");
+    if (!beforeGameCode) return Fail("can only be installed at start-up (loaded late here)");
     if (!FindFrameGenCameraSite()) return false;
     const uint8_t expected[kStoreLen] = {0x48, 0x89, 0x85};
     if (memcmp(g_site, expected, 3) != 0) return Fail("the site was changed by something else");

@@ -1339,7 +1339,7 @@ bool InstallClothRegisterSkip(bool beforeGameCode)
 {
     if (g_installed) return true;
     if (!FindClothRegisterSkip()) return false;
-    if (!beforeGameCode) return Fail("only installed while the game starts (version.dll): the class's native functions are bound then");
+    if (!beforeGameCode) return Fail("only installed while the game starts (loaded late here): the class's native functions are bound then");
     g_recreate = reinterpret_cast<RecreateFn>(g.recreate);
     g_execRecreate = reinterpret_cast<ExecFn>(*g.execRecreateSlot);
     g_execSuspended = reinterpret_cast<ExecFn>(*g.execSuspendedSlot);

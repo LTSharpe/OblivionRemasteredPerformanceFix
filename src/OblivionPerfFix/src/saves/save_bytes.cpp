@@ -170,6 +170,7 @@ void ArraySerializeHook(void* self, void* slot, void* value, const void* default
 
 bool SaveToMemoryHook(void* saveGame, void* outBytes)
 {
+    CreateAheadDropAll(0);  // CreateAhead: no actor built ahead is held while a save is made (game thread only; no-op unless on)
     ++t_depth;
     const uint64_t t0 = Ticks();
     const bool ok = g_saveToMemory(saveGame, outBytes);

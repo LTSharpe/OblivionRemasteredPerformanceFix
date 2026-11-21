@@ -412,7 +412,7 @@ bool InstallNavLinkFast(bool beforeGameCode, int mode)
             slot = nullptr;
         }
     }
-    if (!beforeGameCode) return Fail("can only be installed at start-up (version.dll)");
+    if (!beforeGameCode) return Fail("can only be installed at start-up (loaded late here)");
     uint8_t* const region = AllocNearGame(64);
     if (!region) return Fail("no free memory near the game's code");
     uint8_t* const findStub = Stub(region, reinterpret_cast<void*>(&FindHook));

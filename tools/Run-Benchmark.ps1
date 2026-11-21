@@ -74,6 +74,7 @@ param(
     [switch]$Force,                                      # ignore the "game in use" check; may restart a game the benchmark did not start
     [switch]$Visible,                                    # let Steam and the game come to the front as usual (default: the game window stays off-screen, never takes the focus, no taskbar button; Steam's launch dialog is hidden)
     [switch]$Audible,                                    # keep the game's sound (default: muted in the volume mixer during runs; un-muted before the benchmark closes it)
+    [double]$LogoHold = 0,                               # lab (2026-11-16, bootstutter): the logo videos / title screen play on their own for this many seconds after the game process started, before the runner's first 'menu' step skips them (0 = skip at once, as always)
     [switch]$Watch,                                      # to watch a run: -Visible -Audible and, unless -Profile is given, profile "own" (your settings as they are)
     [switch]$Record,                                     # promo: record each flight scene with OBS (tools\Obs.ps1, docs\promo-video.md) into <run>\video\: from the hover in black to after the fade-out
     [switch]$Pin,                                        # the same conditions in every run: weather (scene -> scenario default -> Clear) held with the weather override, hour (-> 12), timescale (-> 1); a scene opts out with "keep". On by default since 2026-10-20 (user); a scenario's "pin": false turns it off (docs\benchmark.md "Identical runs")
@@ -723,6 +724,10 @@ function Start-BenchGame([string]$why) {
     $state = Get-SessionState $game
     $state.fingerprint = Get-LaunchFingerprint; $state.launchedAt = (Get-Date).ToString('s'); $state.runs = 0
     Save-SessionState $state
+    if ($LogoHold -gt 0) {
+        $lh = $null; try { $lh = $game.StartTime } catch { }
+        if ($lh) { $left = $LogoHold - ((Get-Date) - $lh).TotalSeconds; if ($left -gt 0) { Step "-LogoHold: the start-up videos play on their own for $([int]$left) s more"; Start-Sleep -Milliseconds ([int]($left * 1000)) } }
+    }
     Step 'waiting for the main menu (skipping the start-up videos and the title screen)'
     Wait-MainMenu
     Write-WatchNotes

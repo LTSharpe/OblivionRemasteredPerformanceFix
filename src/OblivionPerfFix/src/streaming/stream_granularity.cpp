@@ -240,7 +240,17 @@ void BudgetApply(int key, bool loading)
 uint64_t AddHook(uint64_t world, uint64_t level, uint64_t xform, uint64_t a4, uint64_t a5, uint64_t a6, uint64_t a7, uint64_t a8)
 {
     StreamGranBeforeAdd((a4 & 0xFF) != 0);
-    return g_add(world, level, xform, a4, a5, a6, a7, a8);
+    GcPrepAheadNoteAdd(reinterpret_cast<const void*>(level));  // GcPrepAhead's "wanted again" counter (no-op unless it prepared levels)
+    const bool gc = GcPassAfterBusyWatching(), water = WaterCrossingWatching();
+    if (!gc && !water) return g_add(world, level, xform, a4, a5, a6, a7, a8);
+    // GcPassAfterBusy / WaterInfoAfterCrossing: a cell is being added to the world when this call did work (its own time)
+    LARGE_INTEGER t0, t1;
+    QueryPerformanceCounter(&t0);
+    const uint64_t r = g_add(world, level, xform, a4, a5, a6, a7, a8);
+    QueryPerformanceCounter(&t1);
+    if (gc) GcPassAfterBusyNoteAdd(t1.QuadPart - t0.QuadPart);
+    if (water) WaterCrossingNoteAdd(t1.QuadPart - t0.QuadPart);
+    return r;
 }
 
 }  // namespace
@@ -309,7 +319,7 @@ uint8_t* FindAddToWorld(bool checkPrologue)
 bool InstallStreamRegisterGranularity(bool beforeGameCode, const uint8_t* probeAdd)
 {
     g_installTried = true;
-    if (!beforeGameCode) { Log("[streamgran] StreamRegisterGranularity: start-up only (version.dll), not installed"); return false; }
+    if (!beforeGameCode) { Log("[streamgran] StreamRegisterGranularity: start-up only (loaded late here), not installed"); return false; }
     uint8_t* const fn = FindAddToWorld(probeAdd == nullptr);
     if (!fn) return false;
     if (probeAdd) {
@@ -350,10 +360,26 @@ bool InstallStreamRegisterGranularity(bool beforeGameCode, const uint8_t* probeA
     return true;
 }
 
+// Game thread: Altar's loading mode (its loading budget in s.LevelStreamingActorsUpdateTimeLimit, as StreamGranBeforeAdd reads
+// it): 1 on, 0 off, -1 unknown (no AddToWorld hook of ours, or the console variable not found yet / given up). WaterInfoAfterCrossing.
+// It never looks the variable up itself (that would spend FindCvars' tries every frame): it reads what the AddToWorld hook found.
+int StreamLoadingModeNow()
+{
+    if (!g_active || !g_limit) return -1;
+    __try {
+        return CvarFloat(g_limit) >= kLoadingLimitMs ? 1 : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
 // Game thread, at every UWorld::AddToWorld call (before the call reads the variable).
 void StreamGranBeforeAdd(bool considerTimeLimit)
 {
-    if (!g_active || !considerTimeLimit) return;  // without the time limit the call registers everything (granularity 0)
+    if (!g_active) return;
+    NavQueryPriorityOnGameThread();  // NavQueryPriority (npcs/nav_query_priority.cpp): two loads per call once settled
+    PhysicsSubstepCapOnGameThread(); // PhysicsSubstepCap (physics/physics_substep_cap.cpp): two loads per call once settled
+    if (!considerTimeLimit) return;  // without the time limit the call registers everything (granularity 0)
     const int key = g_key.load(std::memory_order_relaxed);
     const int budgetKey = g_budgetKey.load(std::memory_order_relaxed);
     const bool granWork = !(key == 0 && g_written == 0);  // off and nothing of ours in place
@@ -412,6 +438,9 @@ void StreamGranBeforeAdd(bool considerTimeLimit)
         g_active = false;
     }
 }
+
+// NavQueryPriority (npcs/nav_query_priority.cpp): is the AddToWorld hook in place (monitor thread; for its log line)
+bool StreamGranHookActive() { return g_active; }
 
 // Monitor thread, once per second: the key (live); applied by the game thread at the next AddToWorld call.
 void SetStreamRegisterGranularity(int value)

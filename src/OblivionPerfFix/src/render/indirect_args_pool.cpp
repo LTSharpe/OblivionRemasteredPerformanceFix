@@ -209,7 +209,11 @@ void SetIndirectArgBufferPool(int key, bool beforeGameCode)
     if (!FindIndirectArgBufferPool()) return;
     volatile uint64_t* const vt = g_vtableSlot;
     volatile uint64_t* const tg = g_targetSlot;
-    if (*vt != 0 || *tg != 0) {
+    // Before WinMain (OBSE64 route) the exe's static set-up has already registered the variable: the RHI still reads the int
+    // at every allocation and starts later (PreInit), so writing the int has the same effect; only the console's copy of the
+    // value keeps the 0 it was registered with (as NaniteInitialRootPages / PsoCompileThreadPool there). Obseaudit class B.
+    const bool registered = *vt != 0 || *tg != 0;
+    if (registered && CurrentLoadStage() != LoadStage::BeforeWinMain) {
         Log("[indirectargs] d3d12.AllowPoolAllocateIndirectArgBuffers is already registered (loaded late): not applied");
         return;
     }
@@ -221,7 +225,9 @@ void SetIndirectArgBufferPool(int key, bool beforeGameCode)
     *v = 1;
     g_applied = true;
     Log("[indirectargs] indirect argument buffers from the engine's D3D12 buffer pool (d3d12.AllowPoolAllocateIndirectArgBuffers 1, "
-        "Epic's default since UE 5.5; set before the engine registers it; start-up only)");
+        "Epic's default since UE 5.5; %s; start-up only)",
+        registered ? "set before WinMain, after the engine registered it (the console still shows 0)"
+                   : "set before the engine registers it");
 }
 
 // Once a second (monitor thread): later ini changes are only logged; a value set by the player's Engine.ini is reported once.

@@ -168,7 +168,7 @@ bool SetNaniteInitialRootPages(int pages, bool beforeGameCode)
     *var = v;  // .data, writable; one aligned 4-byte store
     Log("[nanite] NaniteInitialRootPages: r.Nanite.Streaming.NumInitialRootPages 2048 -> %d%s (ClusterPageData starts %d MiB bigger, "
         "its growth steps below that are not taken; an Engine.ini value still wins)",
-        v, beforeGameCode ? "" : " on the OBSE64 route, before the engine starts", (v - 2048) / 32);
+        v, beforeGameCode ? "" : " (loaded late: the engine may already have read it)", (v - 2048) / 32);
     return true;
 }
 

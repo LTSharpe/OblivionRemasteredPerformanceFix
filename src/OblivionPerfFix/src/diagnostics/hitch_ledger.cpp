@@ -464,7 +464,7 @@ bool InstallHitchLedger(bool beforeGameCode, const wchar_t* dir, bool pacingInst
     g_pacing = pacingInstalled;
     if (dir) g_path = std::wstring(dir) + L"\\OblivionPerfFix-ledger.csv";
     if (!beforeGameCode) {
-        Log("[ledger] HitchLedger: can only be installed at start-up (version.dll), not installed");
+        Log("[ledger] HitchLedger: can only be installed at start-up (loaded late here), not installed");
         return false;
     }
     const GameModule& game = Game();
@@ -628,6 +628,10 @@ void LedgerFadeToGame(uint64_t us)
 }
 
 uint64_t LedgerClockUs() { return g_installed ? Us() : 0; }
+
+// CapSleepSkip's case-B counter (game thread, at the cap hook's entry, before LedgerFrameEnd): the frame-end sync wait of the frame
+// that just ended; ~0 when the ledger does not record or the sync call is not hooked.
+uint64_t LedgerSyncUsNow() { return g_installed && st.sync && g_on.load(std::memory_order_relaxed) && OnGt() ? f.syncUs : ~0ull; }
 
 
 bool LedgerIsGameThread() { return g_installed && OnGt(); }

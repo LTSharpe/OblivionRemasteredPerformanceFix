@@ -12,4 +12,6 @@ constexpr uint32_t kWaterZoneResolution = 0x2B0;     // FIntPoint RenderTargetRe
 constexpr uint32_t kWaterZoneRebuildFlag = 0x300;    // bool bNeedsWaterInfoRebuild
 constexpr uint32_t kWaterZoneHeightExtents = 0x304;  // FVector2f WaterHeightExtents (right after the flag)
 constexpr uint32_t kWaterZoneGroundZMin = 0x30C;     // float GroundZMin
+constexpr uint32_t kWaterZoneLocalTessellation = 0x2E0;  // bool bEnableLocalOnlyTessellation (WaterInfoAfterCrossing reads it
+                                                         // only after finding it in GetDynamicWaterMeshCenter's code)
 }  // namespace opf

@@ -13,7 +13,12 @@
 //   The settings object's bUseHDRDisplayOutput and HDRDisplayOutputNits, r.HDR.EnableHDROutput, the output device and
 //   its MaxLuminance follow.
 // - r.HDR.UI.Luminance is the brightness of menus, subtitles and the HUD in HDR (nits; the game's 300).
-// - r.HDR.Display.MinLuminanceLog10 is the black floor (log10 nits; -4 = 0.0001 nits, the engine's darkest).
+// - r.HDR.Display.MinLuminanceLog10 is the black floor (log10 nits; -4 = 0.0001 nits); the row offers -8..-1. The
+//   engine stops moving the curve's scene-side start once the floor reaches -4, but the curve's output end keeps falling
+//   with the floor, and the curve's low part runs from that end to the mid point. So a floor below -4 darkens the
+//   shadows over a wide band while mid-grey and everything brighter stay as they were (the curve set-up of
+//   Epic's UE 5.3, RenderCore; computed from it at mid-tone 15 and peak 1000: 4 stops below mid-grey -6 gives 54 % and
+//   -8 29 % of -4's output, 6 stops below 17 % and 3 %). From about -6 the deepest shadows end up black.
 // - r.HDR.Display.MidLuminance is the scene's mid-grey in nits (15): the overall scene brightness in HDR.
 // - The game's Brightness option changes nothing with HDR on (picture difference within the no-change controls).
 //
@@ -677,7 +682,7 @@ uint8_t* FindNativeByName(const char* name, const char* shape)
     int pairs = 0;
     for (const Section* sec : {&game.rdata, &game.data}) {
         for (const uint8_t* q = sec->begin; q + 16 <= sec->end; q += 8) {
-            if (At<const uint8_t*>(q, 0) != str || !game.text.Contains(Ptr(q, 8)) || !MatchesAt(Ptr(q, 8), pattern)) continue;
+            if (At<const uint8_t*>(q, 0) != str || !game.text.Contains(Ptr(q, 8)) || !MatchesAtCallable(Ptr(q, 8), pattern, name)) continue;
             fn = Ptr(q, 8);
             ++pairs;
         }
@@ -856,21 +861,9 @@ void FinishSync()
 // counting the terminator and then the characters (ASCII here): the console variable's name, then its value.
 std::string ReadSettingsSave()
 {
-    using GetFolderFn = HRESULT(WINAPI*)(const GUID&, DWORD, HANDLE, PWSTR*);
-    using FreeFn = void(WINAPI*)(void*);
-    // The game's folder is not FOLDERID_Documents (often redirected, e.g. to OneDrive) but its UserSettingsDir, the local
-    // AppData folder (exe+0xF5FA20 in build 19115871: SHGetKnownFolderPath(FOLDERID_LocalAppData)), followed by
-    // "../../Documents/My Games/Oblivion Remastered/" (exe+0x6E3A7E0, used at exe+0xF143D2). Review fix, mishu-b 2026-10-31.
-    static const GUID kLocalAppData = {0xF1B32785, 0x6FBA, 0x4FCF, {0x9D, 0x55, 0x7B, 0x8E, 0x7F, 0x15, 0x70, 0x91}};  // FOLDERID_LocalAppData
-    HMODULE shell = LoadLibraryW(L"shell32.dll");
-    HMODULE ole = LoadLibraryW(L"ole32.dll");
-    const auto getFolder = shell ? reinterpret_cast<GetFolderFn>(GetProcAddress(shell, "SHGetKnownFolderPath")) : nullptr;
-    const auto taskFree = ole ? reinterpret_cast<FreeFn>(GetProcAddress(ole, "CoTaskMemFree")) : nullptr;
-    std::wstring path;
-    PWSTR docs = nullptr;
-    if (getFolder && taskFree && SUCCEEDED(getFolder(kLocalAppData, 0, nullptr, &docs)) && docs)
-        path = std::wstring(docs) + L"\\..\\..\\Documents\\My Games\\Oblivion Remastered\\Saved\\SaveGames\\Save_Settings.sav";
-    if (docs && taskFree) taskFree(docs);
+    // The game's own folder (GameUserFolder below; review fix, mishu-b 2026-10-31)
+    std::wstring path = GameUserFolder();
+    if (!path.empty()) path += L"Saved\\SaveGames\\Save_Settings.sav";
     std::string data;
     if (path.empty()) return data;
     s.savePath = path;
@@ -998,7 +991,7 @@ void Patch(uint8_t* table, uint8_t* catTable, uint8_t* gus)
     if (nits < 400 || nits > 4000) nits = 1000;
     const bool savedPaper = Saved(save, "r.HDR.UI.Luminance", &d) && d >= 80 && d <= 400;
     if (savedPaper) paper = static_cast<float>(d);
-    if (Saved(save, "r.HDR.Display.MinLuminanceLog10", &d) && d >= -4 && d <= -1) black = static_cast<float>(static_cast<int>(d - 0.5));
+    if (Saved(save, "r.HDR.Display.MinLuminanceLog10", &d)) HdrBlackFloorFromSaved(d, &black);
     if (Saved(save, "r.HDR.Display.MidLuminance", &d) && d >= 5 && d <= 50) mid = static_cast<float>(d);
 
     // the five rows, each a full copy of a game row, then given its own contents
@@ -1025,8 +1018,10 @@ void Patch(uint8_t* table, uint8_t* catTable, uint8_t* gus)
          L"Altar.GraphicsOptions.HDRWhitePoint", static_cast<float>(nits), kPeakDefault, 400.f, 4000.f, 50.f, 100.f, 0, false},
         {L"Paper White", L"Adjusts the brightness of menus, subtitles and the HUD in nits.", L"r.HDR.UI.Luminance", paper,
          kPaperDefault, 80.f, 400.f, 10.f, 20.f, 0, false},
-        {L"Black Floor", L"Sets the darkest black. -4 is recommended for OLED, -2 for LED/LCD.", L"r.HDR.Display.MinLuminanceLog10",
-         black, kBlackDefault, -4.f, -1.f, 1.f, 1.f, 0, true},  // whole steps: the slider label rounds (-3.5 showed as -3)
+        {L"Black Floor",
+         L"Sets the darkest black. -4 is recommended for OLED, -2 for LED/LCD. From about -6 the darkest shadows turn fully black.",
+         L"r.HDR.Display.MinLuminanceLog10", black, kBlackDefault, kHdrBlackFloorMin, kHdrBlackFloorMax, 1.f, 1.f, 0,
+         true},  // whole steps: the slider label rounds (-3.5 showed as -3)
         {L"Mid-Tone", L"Adjusts the overall brightness of the scene in nits.", L"r.HDR.Display.MidLuminance", mid, kMidDefault, 5.f,
          50.f, 1.f, 5.f, 0, false},
     };
@@ -1276,7 +1271,7 @@ bool ApplyRrLock(bool beforeGameCode)
         const uintptr_t lo = reinterpret_cast<uintptr_t>(call) + 1, qword = lo & ~uintptr_t{7};
         if (lo + 3 < qword + 8) {
             auto* q = reinterpret_cast<volatile LONG64*>(qword);
-            if (VirtualProtect(reinterpret_cast<void*>(qword), 8, PAGE_EXECUTE_READWRITE, &old)) {
+            if (CodeSiteProtect(reinterpret_cast<void*>(qword), 8, &old)) {
                 const LONG64 before = *q;
                 LONG64 after = before;
                 memcpy(reinterpret_cast<uint8_t*>(&after) + (lo - qword), insn + 1, 4);
@@ -1289,7 +1284,7 @@ bool ApplyRrLock(bool beforeGameCode)
         }
     }
     if (!ok) {
-        VirtualFree(region, 0, MEM_RELEASE);
+        FreeOwnCode(region);
         Log("[rrrow] the lock's call at exe+0x%llX could not be switched%s: the row is not greyed with the other DLSS rows",
             static_cast<unsigned long long>(call - game.base), beforeGameCode ? "" : " while the game runs");
         return false;
@@ -1728,11 +1723,58 @@ float HudPadding(float w, float hgt, float scale, float aspect)
     return pad > 0.f ? pad : 0.f;
 }
 
+// A saved Black Floor (log10 nits) taken only within the row's range, kHdrBlackFloorMin..kHdrBlackFloorMax, and rounded
+// to the nearest whole step (the row's steps; the value is negative, so truncating d - 0.5 rounds to nearest); false
+// (and *out unchanged) outside it.
+bool HdrBlackFloorFromSaved(double d, float* out)
+{
+    if (!(d >= kHdrBlackFloorMin && d <= kHdrBlackFloorMax)) return false;
+    *out = static_cast<float>(static_cast<int>(d - 0.5));
+    return true;
+}
+
+// The game's own user folder, "...\Documents\My Games\Oblivion Remastered" with a closing backslash, or empty. It is not
+// FOLDERID_Documents (often redirected, e.g. to OneDrive) but the game's UserSettingsDir, the local AppData folder
+// (exe+0xF5FA20 in build 19115871: SHGetKnownFolderPath(FOLDERID_LocalAppData)), followed by
+// "../../Documents/My Games/Oblivion Remastered/" (exe+0x6E3A7E0, used at exe+0xF143D2). Shared by HdrMenuRows (the saved
+// options) and PhysicsSubstepCap (the player's Engine.ini), so both read the files the game reads.
+std::wstring GameUserFolder()
+{
+    using GetFolderFn = HRESULT(WINAPI*)(const GUID&, DWORD, HANDLE, PWSTR*);
+    using FreeFn = void(WINAPI*)(void*);
+    static const GUID kLocalAppData = {0xF1B32785, 0x6FBA, 0x4FCF, {0x9D, 0x55, 0x7B, 0x8E, 0x7F, 0x15, 0x70, 0x91}};  // FOLDERID_LocalAppData
+    HMODULE shell = LoadLibraryW(L"shell32.dll");
+    HMODULE ole = LoadLibraryW(L"ole32.dll");
+    const auto getFolder = shell ? reinterpret_cast<GetFolderFn>(GetProcAddress(shell, "SHGetKnownFolderPath")) : nullptr;
+    const auto taskFree = ole ? reinterpret_cast<FreeFn>(GetProcAddress(ole, "CoTaskMemFree")) : nullptr;
+    std::wstring path;
+    PWSTR docs = nullptr;
+    if (getFolder && taskFree && SUCCEEDED(getFolder(kLocalAppData, 0, nullptr, &docs)) && docs)
+        path = std::wstring(docs) + L"\\..\\..\\Documents\\My Games\\Oblivion Remastered\\";
+    if (docs && taskFree) taskFree(docs);
+    return path;
+}
+
+// FName::FName(const TCHAR*, EFindName) by its pattern (one match), or null (StuckEffectLookFix's name look-ups).
+uint8_t* FindFNameCtor()
+{
+    static uint8_t* const found = [] {
+        const auto ctors = FindAllCallable(Game().text, ParsePattern(kFNameCtor), "FName's TCHAR constructor");
+        return ctors.size() == 1 ? ctors[0] : nullptr;
+    }();
+    return found;
+}
+
 // UObject::ProcessEvent by its prologue (one match), or null.
 uint8_t* FindProcessEvent()
 {
-    const auto pe = FindAll(Game().text, ParsePattern(kProcessEvent));
-    return pe.size() == 1 ? pe[0] : nullptr;
+    // found once and kept (the exe does not change; the lab's FlowOverlapsState detours inside ProcessEvent afterwards,
+    // which a later search would no longer match)
+    static uint8_t* const found = [] {
+        const auto pe = FindAllCallable(Game().text, ParsePattern(kProcessEvent), "UObject::ProcessEvent");
+        return pe.size() == 1 ? pe[0] : nullptr;
+    }();
+    return found;
 }
 
 bool FindHdrMenu(HdrMenuInfoOut* out)
@@ -1749,14 +1791,14 @@ bool FindHdrMenu(HdrMenuInfoOut* out)
             impl = fn;
         }
         if (!impl) return Fail("Conv_StringToText's exec function not found");
-        if (!game.text.Contains(impl) || !MatchesAt(impl, ParsePattern(kFromString))) return Fail("FText::FromString differs");
-        const auto ctors = FindAll(game.text, ParsePattern(kFNameCtor));
+        if (!game.text.Contains(impl) || !MatchesAtCallable(impl, ParsePattern(kFromString), "FText::FromString")) return Fail("FText::FromString differs");
+        const auto ctors = FindAllCallable(game.text, ParsePattern(kFNameCtor), "FName's TCHAR constructor");
         if (ctors.size() != 1) {
             Log("[hdrmenu] FName's TCHAR constructor: %zu matches", ctors.size());
             return Fail("FName's constructor not found");
         }
-        const auto mallocs = FindAll(game.text, ParsePattern(kMalloc));
-        const auto frees = FindAll(game.text, ParsePattern(kFree));
+        const auto mallocs = FindAllCallable(game.text, ParsePattern(kMalloc), "FMemory::Malloc", kMallocG1);
+        const auto frees = FindAllCallable(game.text, ParsePattern(kFree), "FMemory::Free", kFreeG1);
         if (mallocs.empty() || frees.empty()) return Fail("FMemory::Malloc / Free not found");
         uint8_t* const gm = RipTarget(mallocs[0] + kMallocG1, 3, 7);
         for (uint8_t* m : mallocs)
@@ -1773,7 +1815,7 @@ bool FindHdrMenu(HdrMenuInfoOut* out)
         uint8_t* const exec = FindNativeByName("AddOrUpdateSettingsToSave", kAddOrUpdateExec);
         if (!exec) return Fail("AddOrUpdateSettingsToSave's exec function not found");
         uint8_t* const addOrUpdate = RipTarget(exec + kAddOrUpdateCall, 1, 5);
-        if (!game.text.Contains(addOrUpdate) || !MatchesAt(addOrUpdate, ParsePattern(kAddOrUpdate)) ||
+        if (!game.text.Contains(addOrUpdate) || !MatchesAtCallable(addOrUpdate, ParsePattern(kAddOrUpdate), "AddOrUpdateSettingsToSave", kAddOrUpdateMap) ||
             At<uint32_t>(addOrUpdate, kAddOrUpdateMap) != 0x1C8)
             return Fail("AddOrUpdateSettingsToSave differs (SavedSettings at +0x1C8 expected)");
         const auto writers = FindAll(game.text, ParsePattern(kSaveWriter));

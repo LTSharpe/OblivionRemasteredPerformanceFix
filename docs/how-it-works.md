@@ -220,7 +220,7 @@ switch on a stand-in value (on, off, a player's own value).
 
 **What we did.** The DLL marks the time the render thread spends inside the water-info redraw. Inside it, and only there: FSR's copy step is left out (`WaterCaptureFsrSkip`), the driver-thread catch-up is left out as the engine already does for every render after a frame's first (`WaterCaptureNoRhiFlush`), and the wait for the visibility tests is left out (`WaterCaptureNoOcclusionWait`; the main view still waits on the latest one, as before). The mesh search (`WaterCaptureFastMeshScan`) uses the scene's compact list of object ids, which the engine keeps in the same order as its object list, and hands the matching objects to the game's own code, which switches them on exactly as before; if the two lists ever do not line up, the game's own search runs.
 
-**Why the image can't change.** The FSR copy is never read for these renders, and the main view copies its own scene over the whole texture before FSR reads it. The catch-up and the visibility wait only make the render thread wait; no drawing depends on them, and the main render still does both. The mesh search finds the same meshes in the same order. The water pictures were compared bit for bit: with and without the keys, every zone's picture had the same raw values. Each key can be switched on and off while the game runs; on the OBSE64 route they stay off (they are installed while the game starts).
+**Why the image can't change.** The FSR copy is never read for these renders, and the main view copies its own scene over the whole texture before FSR reads it. The catch-up and the visibility wait only make the render thread wait; no drawing depends on them, and the main render still does both. The mesh search finds the same meshes in the same order. The water pictures were compared bit for bit: with and without the keys, every zone's picture had the same raw values. Each key can be switched on and off while the game runs.
 
 **Measured (2026-10-22, the Imperial City showcase flight at the test PC's own play settings: 4K, FSR Performance, frame generation, 60 fps cap; one held game, keys switched live):** with `WaterCaptureFsrSkip` and `WaterCaptureNoRhiFlush` (four flights, alternating): the time over 16.7 ms of the frames that waited for the render thread 889 / 588 -> 411 / 368 ms per flight, frames of 33 ms or more 67 / 37 -> 37 / 28, all frames' time over 16.7 ms 3,731 / 2,958 -> 2,886 / 2,558 ms. `WaterCaptureNoOcclusionWait` on top (five flights): the render thread's time per water redraw 7.5 -> 5.1 ms (1.2 -> 0.8 s per flight), render-thread-bound time over 16.7 ms 318 -> 223 ms; the frame totals moved within the run-to-run noise. `WaterCaptureFastMeshScan` saves a little more render-thread time per redraw, too little to show in frame times.
 
@@ -267,6 +267,35 @@ made, so it is the picture the game draws for those inputs; the redraw's other r
 gameplay). What changes is when: a lake's picture can follow a change of the ground around it up to 4 frames or a
 quarter of a second later. The gain we measured was small (lab: a scripted cut of the `showcase` flight, not in the public benchmark: 28 % less
 render-thread excess from water, peaks unchanged); it is on by the maintainer's choice. `WaterInfoSpread=0` turns it off (live).
+
+### One water redraw per cell crossing (`WaterInfoAfterCrossing`, equivalent)
+
+**The problem.** A cell crossing marks the same water zone several times: once when the cells behind you are removed,
+and again each time a cell ahead finishes being added, a few frames to about a third of a second apart. The game redraws
+the zone's water picture for each mark (above), and the first redraw falls into the frame that is already busy removing
+cells. In the engine (Unreal Engine 5.3's Water plugin, and unchanged in 5.4 to 5.7) a mark only sets a "redraw me" flag
+that the zone checks every frame; nothing waits for a crossing to finish.
+
+**What we did.** With `WaterInfoAfterCrossing` set to a time in milliseconds (500 by default since 1.6.0), a zone that asks for a
+redraw while cells are still being added or removed waits, keeping the game's own mark, until no cell has been added or
+removed for 150 ms, or until that time has passed since its first request. Then it goes through `WaterInfoSpread` as
+usual (one zone per frame). The marks of one crossing so become one redraw per zone, made in the calm frames after the
+crossing. The crossing is seen by the fix's own hooks in the game's cell removal (`StreamOutEndPlaySlice`) and cell
+add (`StreamRegisterGranularity` or `StreamInBudget`); without the add hook (from either key) nothing waits. Nothing
+waits while the game is in its loading mode (behind a door's or a fast travel's loading screen, where the world keeps
+ticking) or when that mode cannot be read, and every redraw still waiting goes during the first second after the loading
+mode ends. Water zones whose mesh follows the camera (local-only tessellation) never wait: their redraws
+come from the camera moving, not from cells; the place of that setting in the zone is checked in the game's code, else
+nothing waits. What `WaterInfoSpread` never makes wait (a zone's first picture, a zone near you, an unknown position, a
+forced redraw, the second after a pause in the game's ticking) does not wait here either.
+
+**Why it is equivalent, not identical.** The redraw that is made gathers the water and ground of that moment, so it is
+the picture the game draws for the crossing's final state; only the in-between pictures, which the game showed for a few
+frames each, are left out. The water picture and its heights are read only by the water's materials, not by the game's
+swimming or physics. What changes is when: water next to ground that was just added or removed can show its new shore up
+to the set time (plus up to 4 frames) later; such cells are at the edge of the loaded area. Our look check (a pinned
+camera, eight sequences, 500 against 0) found no difference above noise; doors and fast travel were not part of it.
+`WaterInfoAfterCrossing=0` is the game's behaviour; switchable live.
 
 ### Lumen's instance table sent only where it changed (`LumenCardsNarrow`)
 
@@ -325,7 +354,7 @@ stood matched it as closely as two key-off runs match each other (mean differenc
 while it differed from the two earlier key-on runs. We found no difference attributable to the fix, and none was
 noticed in play. We do not claim identical pictures. The self-test runs the game's own check code on test data
 against the fix. Lumen at Low global illumination does not run this check at all, so the fix does nothing there.
-`LumenScanCull=0` turns it off (live; installed at start-up; not on the OBSE64 route). A game update that changes this
+`LumenScanCull=0` turns it off (live; installed at start-up). A game update that changes this
 part of the engine switches it off by itself, with a line in the log.
 
 ### New objects' ray-tracing structures built together (`RayTracingBuildBatch`)
@@ -338,7 +367,7 @@ part of the engine switches it off by itself, with a line in the log.
 
 **What we did.** The engine already has a way to build many structures at once: its geometry manager can queue build requests and build all queued ones together at the start of the frame's scene render. The game never uses it for these objects: it builds at once whenever no per-frame build budget is set, and setting one makes the graphics card hang in this game. The DLL sends just these requests (new objects' first builds, from the render thread between frames, for objects that are never updated in place) down the queue path, and the scene render builds the whole queue in one batch before it does anything else. Everything else (characters' refits, builds during a render, builds from other threads) is built at once, as before. During a loading screen, when no frame is drawn, the queue is built whenever it reaches 64 MiB of build memory, so it never holds a whole area's worth at once.
 
-**Why the image can't change.** The same structures are built from the same data with the same settings, in the same frame, before the frame's ray-traced scene is gathered: no part of the frame can see an object without its structure. Only their place in the graphics card's work moves, from one by one before the frame to one batch at its start. An object removed while its request waits takes the request with it (the engine's own clean-up). Frozen screenshots with the switch on and off match within the run-to-run variation. Installed when the game starts (not on the OBSE64 route), then live.
+**Why the image can't change.** The same structures are built from the same data with the same settings, in the same frame, before the frame's ray-traced scene is gathered: no part of the frame can see an object without its structure. Only their place in the graphics card's work moves, from one by one before the frame to one batch at its start. An object removed while its request waits takes the request with it (the engine's own clean-up). Frozen screenshots with the switch on and off match within the run-to-run variation. Installed when the game starts, then live.
 
 **Measured (2026-10-25, the Imperial City flight, 4K, DLSS Performance, ray tracing on, RTX 4090; a fresh game per run, off and on in turn, three rounds):** the two frames that waited for the builds, graphics card busy: at 97.6 s 37.1 / 45.1 / 31.9 -> 18.8 / 20.0 / 21.0 ms, at 41.2 s 52.1 / 67.3 / 62.6 -> 22.1 / 20.4 / 23.9 ms. Frames of 33 ms or more on the flight 158 -> 133.
 
@@ -374,8 +403,9 @@ everywhere (live). Pull request #35 by Mishu117.
 **The problem.** In HDR the game looks washed out next to its own SDR picture. The contributor measured it (pull request
 #36): the HDR picture copies the SDR picture as Windows decodes SDR content, with the sRGB curve. A normal SDR monitor decodes with gamma 2.2, which makes
 the darks deeper. So next to SDR on a monitor, the HDR darks sit about 1.7 to 2.7 times higher compared with the
-mid-tones. No game setting changes that shape: not Mid-Tone, Black Floor, the output device, the film-curve settings
-or a colour-grading LUT (the game's HDR path does not use the last two).
+mid-tones. No game setting changes that shape: not Mid-Tone, Black Floor from -4 to -1, the output device, the
+film-curve settings or a colour-grading LUT (the game's HDR path does not use the last two). A Black Floor below -4
+does change the shape of the lower part (deeper shadows); the fit below still applies there.
 
 **What we did.** The HDR tone curve is a small table of 20 numbers that the game computes when an HDR setting changes:
 the curve's black floor, mid point and peak, and two smooth pieces of 5 numbers each. Every pass that draws with the
@@ -411,7 +441,7 @@ These three are new in 1.2.3. They came from one spot: the horse corral at Brind
 
 **Why the game can't change.** With nothing to drive, the skipped update only takes and releases the lock, fills a temporary copy that is thrown away and runs a loop zero times: nothing in the game's state changes. The animation-step case, which would change something, is left to the game.
 
-**Measured** (1.2.3 candidate, together with `RigTraceReuse`; 4K, FSR Performance, frame generation, 60 fps cap, Ryzen 7 5800X + RX 9070 XT; scenario `playlog-spots`, scene `brindle-corral-hold`, switched live in one game, off/on/on/off twice): the main thread's work per frame at the corral 10.6 -> 9.2 ms, and the time over the 16.7 ms frame budget 87 % lower (0.29 -> 0.04 ms per frame). With OBSE64 it is not available (the log says so).
+**Measured** (1.2.3 candidate, together with `RigTraceReuse`; 4K, FSR Performance, frame generation, 60 fps cap, Ryzen 7 5800X + RX 9070 XT; scenario `playlog-spots`, scene `brindle-corral-hold`, switched live in one game, off/on/on/off twice): the main thread's work per frame at the corral 10.6 -> 9.2 ms, and the time over the 16.7 ms frame budget 87 % lower (0.29 -> 0.04 ms per frame).
 
 <a id="rigtracereuse"></a>
 
@@ -427,7 +457,7 @@ These three are new in 1.2.3. They came from one spot: the horse corral at Brind
 
 **Why the game can't change.** The repeat asks the same physics world the same question on the same thread microseconds later. Its answer could only differ if another thread moved something in between, and when exactly the game's main thread moves bodies relative to the helpers' tests is left to chance in the game itself; the reused answer is one the game could have given. We checked it with a mode that runs every repeat anyway and compares: 0 differences in 2.6 million repeats, standing among the horses, riding through them, and with wolves and a troll fighting by them. `RigTraceReuse=2` runs that check (results in the log).
 
-**Measured.** See `PhysAnimNoEmptyLock` above (both together). On their own in a small-window test at the corral: the main thread's pre-physics work -0.5 ms per frame, the main thread's waits for the physics lock 0.6-0.9 -> about 0.1 ms per frame. With OBSE64 it is not available (the log says so).
+**Measured.** See `PhysAnimNoEmptyLock` above (both together). On their own in a small-window test at the corral: the main thread's pre-physics work -0.5 ms per frame, the main thread's waits for the physics lock 0.6-0.9 -> about 0.1 ms per frame.
 
 <a id="chaosmaxpayloadsize"></a>
 
@@ -444,6 +474,20 @@ These three are new in 1.2.3. They came from one spot: the horse corral at Brind
 **Why the game can't change.** The list and the tree run the same test on the same shapes, and the tree only skips shapes that cannot touch the check. So every check finds the same objects, and a sweep or a sight line the same nearest one. Only the order in which shapes are looked at changes: before, the big shapes always came first. That order could only matter for an exact tie, a sight line starting inside two shapes at once; in our scenes the share of such stops on the columns stayed the same (0.28 % vs 0.29 % of sight-line tests), and ties among other shapes already depend on the tree's shape, which the game varies as areas load. Nothing drawn uses these trees.
 
 **Measured** (1.2.3 candidate; 4K, FSR Performance, frame generation, 60 fps cap, Ryzen 7 5800X + RX 9070 XT; on/off/on over three game starts): the main thread's tick work per frame at the Skingrad forest spot (`skingrad-spots`, scene `sk-d`) 9.7 -> 8.5 ms and in Vilverin's flight slice (`ic-spots`, scene `ic-vilverin-pass`) 8.8 -> 7.6 ms; the time over the 16.7 ms frame budget 50 % and 32 % lower. Shapes tested per check 385 -> 14. No added hitch at doors (loading builds the trees). Works on both routes, also with OBSE64.
+
+<a id="physicssubstepcap"></a>
+
+### One physics step for frames of up to 30 ms (`PhysicsSubstepCap`, not bit for bit)
+
+**The problem.** The engine moves loose objects, corpses and ragdolls in physics steps. This game's settings allow at most 20 ms per step (the engine's physics settings `MaxSubstepDeltaTime` 0.02, `MaxSubsteps` 6), so every frame that takes longer than 20 ms is simulated as two steps, one after the other, and the game's main thread waits for both before the frame can finish: about 2 ms more in such a frame. With riders, creatures or a fight around, a frame just over 20 ms then makes the next frame slow too, and slow frames come in runs. On our 4K test rides along the east road (public scenario `east-road`), three quarters of the long physics waits in its slow stretches were these second steps.
+
+*Analogy:* a courier who must stop at a checkpoint every 20 km: a trip of 21 km costs a second stop, and the delay makes the next trip longer too.
+
+**What we did.** The DLL sets the two settings to 0.03 and 4, the same as the two lines `MaxSubstepDeltaTime=0.03` and `MaxSubsteps=4` under `[/Script/Engine.PhysicsSettings]` in Engine.ini: one step for a frame of up to 30 ms, two for up to 60 ms, and the longest stretch one frame simulates stays 120 ms (4 x 30 ms, as the game's 6 x 20 ms), so a very long frame is clamped exactly as before. The settings have no console variable; they live in the engine's physics settings object, which the engine reads every frame (credit for the settings and their rule: Epic Games, Unreal Engine 5.3; unchanged in 5.4-5.7). The DLL finds that object and its two values by name in the engine's own type information and writes them on the main thread, between two frames, when the first area loads. It writes only while the object still holds the game's values (substepping on, 0.02, 6): a `MaxSubstepDeltaTime` or `MaxSubsteps` line of your own in Engine.ini wins, and the log says so. Switching the key off puts the game's values back if they are still ours.
+
+**What changes (not bit for bit).** Frames of up to 20 ms, nearly every frame at a 60 fps cap, are simulated exactly as before. In a frame of 20-30 ms a falling object, a corpse or a ragdoll is moved in one step of the frame's length instead of two half steps (in a frame of 40-60 ms in two steps instead of three): the same motion, integrated in coarser steps. Steps of this length are the engine's own norm (without substepping its default is one step of up to 1/30 s). Walking and riding are not affected (characters and horses move with their own movement code); characters' physically simulated parts (ragdolls, physical hit reactions) are stepped like loose objects.
+
+**Measured** (4K, FSR Performance, frame generation, Ryzen 7 5800X + RX 9070 XT; two rides each, order A B B A, a first measurement taken with steps of up to 33 ms): on the east road past riders and creatures, frames over 28 ms 25 and 29 in the stock rides, 11 and 14 with the longer step; frames of the main thread over 25 ms 30 and 39 -> 6 and 11. On our Imperial City flight we could measure no difference either way. Default off until the next release. Switching it on live works when its hook was installed at start-up (this key, `StreamRegisterGranularity` or `StreamInBudget` on; the last two are on by default).
 
 ## Travelling: memory and threads
 
@@ -548,6 +592,17 @@ time slow frames cost. `InstanceBufferFloor=0` turns it off (at start-up).
 
 **Why the image can't change.** The engine builds the list into the start of whatever block it is given, and everything that reads it uses the list's own offsets, so it is the same list; only the spare room behind it differs. The cost is video memory: at most the largest size this session already needed. **What it does not fix:** on a loading screen the engine drops the block altogether, so the first growth after a door or a fast travel still happens (in one step instead of several). Each change of the block's size is written to the log.
 
+
+### Empty texture and buffer memory blocks are kept for the next burst (`GpuPoolKeepMB`)
+
+**The problem.** The engine places streamed textures and new buffers in big blocks of video memory (64 MB for textures, 32 MB for buffers). Twenty frames (a third of a second) after a block goes empty, the engine destroys it, and at the next burst it makes a new one. Riding through the world that happens every few seconds: in one of our Imperial City flights about 70 blocks were made in two minutes of riding while the game's video memory use stayed flat, so almost all of them were the same memory made again. Making one waits for Windows to create the memory and make it resident, with the block list's lock held: 1-9 ms on the render thread in a frame, and once 17 ms on a texture streaming thread while the render thread waited behind that lock (a stutter at a bridge). Destroying one holds the same lock at the end of a frame. This is the engine's behaviour (also without the mod); the 20 frames are fixed in its code, up to the newest Unreal Engine.
+
+*Analogy:* returning the moving boxes the moment they are empty, then ordering new ones for the next move.
+
+**What we did.** At that 20-frame clean-up, empty blocks are kept, the most recently used first, up to `GpuPoolKeepMB` MB for all block lists together; the next burst puts its textures and buffers into them instead of new blocks. Only the block lists the engine keeps tidy (the big texture blocks and the video-memory buffer blocks) keep blocks: there a new texture goes into the fullest block with room, so a kept empty block is used only where the engine would have made a new one. The engine's tidying, which empties a part-used block into fuller ones block by block, is told to move on past a kept block, just as it moves past a block the engine has destroyed. Above the budget, when Windows runs short of memory (MemoryRelief), or when the game's video memory plus the budget would pass what Windows gives the game, blocks are given back one per list per frame, never more at once than the engine itself would, and never earlier than it would. The upload memory blocks are left to `UploadMemoryKeep`. Epic's newer engine (the `ue5-main` branch, after 5.7) goes at the same wait from the other side, by making a spare block ahead of time on a background thread; this key does not do that.
+
+**Why the image can't change.** An empty block holds nothing. A texture or buffer placed into a kept block instead of a new one has the same contents and is used the same way; only where it sits in video memory differs. The cost is video memory: at most `GpuPoolKeepMB` of empty blocks (the suggested 384 MB; in our rides the empty blocks wanted 128-576 MB at once, over 384 in 0-20 % of the checks), plus, while they are given back one at a time, blocks the engine would have released together. 0 = as the game.
+
 ---
 
 <a id="indirectargbufferpool"></a>
@@ -573,7 +628,7 @@ indirect-argument ones from 188 / 102 to 0 on the Imperial City flight and from 
 teleports), which ran clean; 7 views compared equal and video memory stayed within 0.1 GB. The gain is small: less
 memory-creation work on the render thread; it removed no drop you would see by itself. The self-test finds the setting in
 the game file (its name, how it is registered, its one use) and checks the start-up rules on it.
-On by default; `IndirectArgBufferPool=0` switches it off (start-up only; not with OBSE64).
+On by default; `IndirectArgBufferPool=0` switches it off (start-up only).
 
 ---
 
@@ -711,6 +766,32 @@ frame rate or thread times there. At 4K with the test PC's own play settings (60
 growth were again shorter (cisa 16-19 vs 19-23 ms, growth 10-13 vs 13-21 ms) but the frame counts stayed within noise.
 Memory: the game's private bytes and working set rose by about the cap (0-60 MB) or less.
 
+<a id="ospagecacheasyncrelease"></a>
+
+### Large blocks handed back to Windows from a background thread (`OsPageCacheAsyncRelease`)
+
+**The problem.** The blocks `OsPageCache` does not keep (those over its keep size, and the oldest ones it lets go when
+it is full) are handed back to Windows by the thread that freed them, and for large blocks that call takes Windows
+noticeable time. After a garbage collection pass the game destroys the objects it found unused a few milliseconds per
+frame on the main thread, and their destructors free large arrays: in the slowest frames of our test plays and rides more than
+a third of the main thread's samples in that clean-up were inside this call (in one 27 ms frame on the road to Bravil
+these calls added up to several milliseconds).
+
+**What we did.** With the key on, such a block goes into a queue instead, and one background thread hands the queued
+blocks back with the same call, in the order they came. At most 4,096 blocks or 64 MB wait at a time; a block that does
+not fit, or that finds the queue busy for more than a few microseconds, is handed back at once, as the game does, and
+so is every block while Windows has less than twice `MemoryRelief`'s limits of RAM or commit free (checked every
+second). The whole queue is handed back at once when the memory manager's request to Windows fails (then the request is
+retried), while Windows is
+short of RAM or commit (`MemoryRelief`), and when this key or `OsPageCache` is switched off. The thread runs at normal
+priority, because Windows holds a lock of the game's address space during the call that the game's own threads need too.
+
+**Why the game can't change.** The game has finished with a block before it hands it back, and its memory manager has
+already taken it out of its own counts. Until the thread's call, Windows keeps the range reserved, so it cannot give the
+same addresses to anything else, and nothing reads or writes it. What can differ is when the memory leaves the game's
+committed memory and working set (by at most 64 MB, for as long as the thread takes to get to them), and that a new block gets
+different addresses than it might have got; which addresses Windows hands out already varies from run to run.
+
 <a id="navmeshbuildnobusywait"></a>
 
 ### Navigation tiles built only by free threads (`NavmeshBuildNoBusyWait`)
@@ -800,7 +881,38 @@ is more upload work in the frames that stream (see the measurements).
 
 **What we did.** For each tile the DLL notes once per chunk which sides its border edges face and which of its polygons lie on each side. A pair that cannot make a link (no border edge facing the other tile, or no polygon of the other tile facing back) is left out. For the other pairs, the game's own search runs once for each polygon on the shared border instead of over the whole tile, and the links it makes are numbered exactly as the game numbers them.
 
-**Why the game can't change.** The game's own code makes every link, in the same order and with the same values, so the navigation map is the same and characters walk the same paths. The left-out pairs are exactly the ones where the game's search finds nothing. The maintainers' test build compared every search with the game's own one, byte for byte, in the game on long rides (no difference); the self-test does the same on random tiles. It changes nothing you see. On the OBSE64 route it stays off (it is installed while the game starts).
+**Why the game can't change.** The game's own code makes every link, in the same order and with the same values, so the navigation map is the same and characters walk the same paths. The left-out pairs are exactly the ones where the game's search finds nothing. The maintainers' test build compared every search with the game's own one, byte for byte, in the game on long rides (no difference); the self-test does the same on random tiles. It changes nothing you see.
+
+<a id="navquerypriority"></a>
+
+### The path-search task no longer queues behind ray-tracing builds (`NavQueryPriority`, equivalent)
+
+**The problem.** Every frame the engine's navigation system hands the characters' queued path searches to one task and,
+later in the same frame, the game waits for that task to finish before it moves anything the searches read. Epic's
+setting for that task (`TaskGraph.TaskPriorities.NavTriggerAsyncQueries`, default `bnn`) makes it a background task: it
+may only run on the engine's background worker threads (11 of them on our 16-thread PC). While the world is busy those threads are all inside
+ray-tracing pipeline builds, which the graphics driver runs one at a time and which take 20-200 ms each. The path search
+(1-10 ms of work) waits in line behind them with idle normal worker threads beside it, and the game waits with it: on
+our test flights along the public `showcase` route over the Imperial City waterfront, frames of 116 and 161 ms in 2 of
+2 stock runs.
+
+*Analogy:* a one-minute errand queued at the counter that serves only slow orders, while the express counter stands empty.
+
+**What we did.** The setting is Epic's own (credit: Epic Games, Unreal Engine 5.3, `TaskGraph.TaskPriorities.NavTriggerAsyncQueries`; the same default in 5.4-5.7); the DLL sets it to `nnn` (normal thread priority, normal task priority), the
+same as `TaskGraph.TaskPriorities.NavTriggerAsyncQueries=nnn` in your Engine.ini, through the engine's own console
+variable call, on the game thread, when the first cell is added to the world (the same entry the streaming budget keys
+use). A value you set yourself (Engine.ini, console) is kept; switching the key off puts back `bnn` only if the value is
+still ours. The engine reads the priority every time it dispatches the task, so nothing needs to restart.
+
+**Why the game can't change (equivalent, not bit for bit).** Only the worker thread that runs the task differs. It is the
+same task over the same queued searches in the same order, each search is the same code on the same inputs, the game
+still waits for the task to finish at the same place before it uses or changes anything the searches read, and the
+results are handed back as before. One timing detail: when the game starts waiting it asks the task to stop after the
+search in hand and the rest wait for the next frame; the task now usually starts before that, so it gets through more
+searches in the frame (results arrive on the same frame or an earlier one, never later). The stock game already varied
+here with thread timing. In the same flights with the key on those frames were gone and the per-thread costs and the
+ray-tracing builds were unchanged. On by default since 1.6.0. Switching it on live works when its hook was
+installed at start-up (this key, `StreamRegisterGranularity` or `StreamInBudget` on; the last two are on by default).
 
 ## Travelling: physics, when a new area arrives
 
@@ -1253,7 +1365,34 @@ moved. The cell is already hidden and its objects stopped updating at the start 
 streamed cells), so nothing you see changes; the cell leaves the world's list a few frames later, and the next cell
 behind you waits for it as it always waits for the one before. Loading screens: the game lifts the engine's limit there,
 so everything still happens in one frame. A blocking removal (the engine waiting for streaming to finish) goes the
-engine's way. `StreamOutEndPlaySlice=0` is the engine's way (live; installed at start-up; not on the OBSE64 route).
+engine's way. `StreamOutEndPlaySlice=0` is the engine's way (live; installed at start-up).
+
+### Placed objects checked for what they touch once, at the end of their set-up (`FlowOverlapsOnce`)
+
+**The problem.** When a cell is added to the world, the game sets up each object placed in it (plants, rocks, chests,
+doors, clutter) in one call. Inside that call it switches each of the object's collision settings four times and back
+to where it started (a pickable plant: its own setting, "block everything", its own setting, "no collision", its own
+setting). After each switch the engine (UE 5.3, `UPrimitiveComponent::SetCollisionProfileName` with its default "update
+overlaps") asks the physics scene what the object now touches: four full checks per object part, and only the last one
+decides what it touches afterwards. These checks take most of the time of the set-ups.
+
+**What we did.** While that set-up call runs, an object part that touched nothing when the call first asked to check it
+is not checked after each switch; it is noted (once, in the order of its last switch), and when the call returns each
+noted part that is still in the world gets that same check once, with its final setting. A part that already touched
+something is checked after every switch, exactly as before. This is the engine's own rule for grouped moves: inside an
+`FScopedMovementUpdate` Unreal Engine (5.3, and still in 5.7) does not check after each change but once when the group
+ends; the game's set-up call was not wrapped in one.
+
+**What changes (equivalent, not identical).** What every object touches afterwards (and what touches it) is what the
+game's last check computes: nothing else runs on the game thread inside that call, so the final check sees the same
+world. In our state checks on two rides, the objects' contacts after each set-up were the same as the game's (on the
+longer ride in every one of its set-ups). What disappears are the "started touching / stopped touching" notices for
+contacts that existed only between two switches inside the call. We read the game's listeners to those notices (every
+one in the game's own code, and the Blueprints we met on our test rides): the weather and sound boxes, door and light
+volumes, the butterflies and the crawling insects react only to the player, the trap and character listeners only to characters, and the rest
+(a placed object's water state, a trap's target list) is set by the first notice and undone by the second. In our test
+rides the set-ups took 13 to 33 % less time; we measured no change in frame rate. `FlowOverlapsOnce=0` is the game's way
+(live; installed at start-up).
 
 ## Travelling: characters and cells
 
@@ -1344,7 +1483,7 @@ engine's way. `StreamOutEndPlaySlice=0` is the engine's way (live; installed at 
 
 **What we did.** When a far-away character that nobody can see asks for its robe's first cloth build (the robe has no simulation yet), the build waits. Further requests while it waits become part of the same build. It is made a few frames later, with the game's own function and the robe as it is at that moment, as a piece of the frame's pacing budget, like the character's other creation steps. It is made at once when the character comes near or into view, when the character's own logic asks whether its cloth is simulating, on a loading screen or in a menu, when the switch goes off, and after at most 60 frames. A robe whose character is removed while its build waits is never built.
 
-**Why the picture is the same.** Only the moment of the build moves, and only while the character is far away and unseen: the same robe is built from the same state by the game's own code. Until then the robe behaves as one that was just put on: no cloth movement yet, drawn as the plain skinned mesh, which nobody sees at that distance. When the character comes into view the cloth is built in the frame after it is first drawn (1-2 frames, like `NpcCreationPacing`'s own steps, mostly inside the spawn fade-in); until then the renderer has the empty box described below. One thing the game does right after a robe's first build is redone after the delayed one: the robe's bounding box (the box around its cloth that the renderer uses, for example to decide which shadow areas it touches) is computed from the new cloth and handed to the renderer, as the game does when the robe is put on; without that the robe would keep the empty box it got while it had no cloth. Screenshots of the shrine's robed worshippers after they come near match within the run-to-run variation (the grass in the wind and the characters' poses vary between any two runs). A timing change of the same kind as `NpcCreationPacing`'s, with the same bounds: a few frames, off-screen, an off switch. Installed when the game starts (not on the OBSE64 route), then live; it needs `NpcCreationPacing`.
+**Why the picture is the same.** Only the moment of the build moves, and only while the character is far away and unseen: the same robe is built from the same state by the game's own code. Until then the robe behaves as one that was just put on: no cloth movement yet, drawn as the plain skinned mesh, which nobody sees at that distance. When the character comes into view the cloth is built in the frame after it is first drawn (1-2 frames, like `NpcCreationPacing`'s own steps, mostly inside the spawn fade-in); until then the renderer has the empty box described below. One thing the game does right after a robe's first build is redone after the delayed one: the robe's bounding box (the box around its cloth that the renderer uses, for example to decide which shadow areas it touches) is computed from the new cloth and handed to the renderer, as the game does when the robe is put on; without that the robe would keep the empty box it got while it had no cloth. Screenshots of the shrine's robed worshippers after they come near match within the run-to-run variation (the grass in the wind and the characters' poses vary between any two runs). A timing change of the same kind as `NpcCreationPacing`'s, with the same bounds: a few frames, off-screen, an off switch. Installed when the game starts, then live; it needs `NpcCreationPacing`.
 
 ---
 
@@ -1456,6 +1595,113 @@ searches on the game thread as before. Off on PCs with fewer than 8 usable logic
 already runs such searches on other threads for its background path finding. In a proof build 11 of 11 compared
 results were identical. `RepathParallel=0` turns it off (live; installed at start-up).
 
+### Characters' routes searched as soon as the navigation changes (`RepathEarly`, off by default)
+
+**The problem.** Whenever the navigation data changes (a cell's navigation loaded or unloaded, or a piece of it rebuilt
+while the game runs), the engine marks the routes that crossed it and searches them again at its next navigation step,
+at the start of the next frame. `RepathParallel` spreads several such searches over helper threads, but one long search
+still holds the game thread for its whole length, and a single route across a large area can take a large part of a
+frame by itself.
+
+**What we did.** At the moment of the change, right after the engine has marked the routes, the fix prepares each
+search exactly as the engine's next step will (the same start, goal, limits and filter, and the engine's own projection
+of start and goal onto the navigation mesh) and lets RepathParallel's helper threads run the engine's own search code
+while the game goes on with the rest of the frame. At the engine's step the results are handed over under
+RepathParallel's rule: only when every input of the engine's own search is byte for byte the same, and only if the
+navigation data has not changed since the helpers started. A helper's search never calls into the game: it reads only
+the navigation mesh and its own copies of the inputs; a search that reaches a special link (a door, a ladder), whose
+answer would come from the game, is dropped and done by the engine as before. A change to the navigation mesh's memory
+while a helper reads it (tiles added or removed, the mesh freed) first stops that helper and waits for it, so the mesh's
+memory never changes under a search; any other edit of the mesh (an area or a link's state changed in place) makes the
+helper's result unusable, and the engine searches again. At the engine's step, a helper's search that can no longer be
+handed over (the character has moved since, the route is no longer waiting, or the navigation data has changed) is
+stopped instead of waited for, so the frame does not wait for work it already knows it cannot use.
+
+**Why the game can't change.** The engine's search code with the same inputs on the same navigation mesh gives the same
+route, and the hand-over checks both. Otherwise the engine searches as before, at the same moment; the route is ready at
+the same step as without the fix (no added delay). `RepathEarly=0` turns it off (live; installed at start-up; needs
+`RepathParallel`).
+
+### A long route search finished in the background (`RepathDefer`, equivalent)
+
+**The problem.** When the navigation data changes (cells streaming in or out on a road), the engine searches the routes
+that crossed it again at its next navigation step, all in one frame. Most of these searches take a few hundredths of a
+millisecond, but now and then one is long: a far character whose goal lies across a large area, 10-15 ms on its own. In
+our Imperial City flights that one search made the same 22-37 ms frame at the Talos bridge in every flight, and in a
+real play at Mortal Camp it made a 33 ms frame. `RepathParallel` runs several searches side by side, but the frame still
+waits for the longest; `RepathEarly` starts them a few milliseconds sooner, which helps only when the character has not
+moved in between.
+
+**What we did.** At the navigation step every waiting search is prepared as the engine would prepare it and handed to
+`RepathParallel`'s helper threads, with the engine's own search code. The frame waits half a millisecond; the short
+searches are done by then and used at once, under `RepathParallel`'s rule (every input byte for byte the same). A search
+still running is taken off the engine's list of routes waiting for a search and left to finish in the background; the
+frame goes on. In the first frame after it is done (usually the next one), the route goes back at the head of that list
+and the engine's step uses the background result if the character and its goal are still within half a metre of where
+they were when the search began and nothing else about the search changed (the same navigation polygons, limits and
+filter); otherwise the engine searches again then, as before. A route is never kept out for more than 6 frames: then
+the frame waits for its search. While a background search runs, a change to the navigation mesh's memory first stops it
+and waits for it (as for `RepathEarly`), and any change to the navigation data drops the result: the engine searches the
+route again with the data as it is.
+
+A search that reaches a navigation link the game must decide on (for example a door) cannot go on in the background:
+whether the link may be used is a question to the game, and the game is running meanwhile. Such a search stops at once.
+If every search of the frame has ended within the half millisecond and one of them stopped at such a link, nothing is
+put aside, not even the results already found in that half millisecond: the frame runs exactly as with `RepathDefer=0`,
+so `RepathParallel` searches them all side by side while the frame waits, asking the links as it always does. (Before this, those searches ran one after another in the frame: on the road west of the Cursed Mine after
+a fast travel, five searches of about 7 ms each made frames of 30-50 ms.) `RepathParallel` also searches whatever else
+is waiting in any frame in which no background search is running, leaving out only the routes a background result is
+being handed to.
+
+**Why the game plays the same.** A route that is waiting for its search is an ordinary state in the engine: the character
+keeps walking along its old route until the new one arrives (the engine itself keeps routes waiting while a character
+uses a door or a ladder, for as long as that takes). The route arrives one or a few frames later, as if the navigation
+change had come that much later, and is the route from a point up to half a metre behind the character: its first
+metres are drawn from where the character is now, as always, so only a near-tie between two ways across the whole area
+could pick the other one. This is equivalent, not identical (on by default since 1.6.0). `RepathDefer=0` turns it
+off (live; installed at start-up; needs `RepathParallel`).
+
+### Characters' sight lines worked out on helper threads (`PerceptionLosPrefetch`, equivalent)
+
+Contributed by bpodwinski (pull request #55); the two guards described under "Why the game can't change" were added
+in our review.
+
+**The problem.** Five times a second every character looks around: for each character in front of it and within its
+range, the game checks whether it can see it, with up to three sight lines (to the body, then to two points of the
+skeleton), one after the other on the game's main thread. In a crowd of 40 soldiers or a battle of 76 characters this is
+the largest single item of that thread: a soldier's round takes 0.4 to 0.9 ms, and several rounds run in each frame.
+
+*Analogy:* a guard who checks each window of a corridor one by one, when three colleagues could look through them at
+the same time and just tell him what they saw.
+
+**What it does.** When a round starts, right after the game has listed the characters around, the fix picks the ones the
+round's loop will check, with the same tests the loop makes (the kind of character, not itself, within range computed
+from the same values in the same order, in front of it with the game's own field-of-view test), and works out their sight
+lines on four helper threads with the game's own sight-line code. Then the game's loop runs as always, in its own order;
+each time it asks for a sight line, it gets the answer already worked out for that pair, or waits for that one answer
+if it is not ready yet. Anything the fix did not prepare (another kind of round, other arguments) runs the game's own
+code. Rounds of the player (which look along the camera) are left as they are.
+
+**Why the game can't change.** The sight-line code only reads the world. Between the moment the fix works an answer out
+and the moment the loop asks for it, the round itself only sorts characters, notes who it saw in its own list and sends
+messages to the old engine; none of that moves anyone or changes what a sight line sees. Other threads (animation,
+physics) run during the game's own round too, so an answer worked out a moment earlier can only differ by a race the
+game itself does not order (the same reasoning as `RigTraceReuse`). Two cases are left to the game: while the engine
+lists any lightweight-instance manager (a UE feature: asking such a hit for its actor can create one, which only the
+main thread may do), and for a character whose eye point is not the game's usual one. The helpers also use the main
+thread's floating-point settings. The contributor checked it with a mode that runs the game's own check anyway and
+compares: 0 differences in over 1.1 million sight lines, in the crowd and in the battle.
+`PerceptionLosPrefetch=2` runs that check (results in the `[perclos]` log line).
+
+**Measured by the contributor** (one PC: Ryzen 7 5800X3D, RTX 5080; `-Scenario actors -Scenes actors-crowd,actors-battle`, A-B-B-A in one
+game). 4K with FSR Performance, no frame generation: the main thread's work per frame 60 -> 41 ms in the battle (14 -> 20
+fps) and 19.5 -> 17.8 ms in the crowd. In the small window, a soldier's round 750-900 -> 205-230 us in the battle and
+400-450 -> 135-150 us in the crowd. Ours (Ryzen 7 5800X, RX 9070 XT, small window, one game, the key switched live):
+458,097 sight lines checked against the game's own in the crowd, the battle and a fight of ours, 0 different; in the
+battle a soldier's round 424-439 -> 133-142 us and the main thread's work per frame 30.0 -> 28.2 ms (two runs each).
+On by default since 1.6.0; off on PCs with fewer than 8 usable logical
+processors.
+
 ### Far-away calm characters and horses move in 30 steps a second (`FarPawnMoveHalfRate`, `FarHorseMove`, not identical)
 
 **The problem.** Every character's movement update (walking along its route, staying on the ground) runs every frame,
@@ -1528,6 +1774,35 @@ first load). The creature is finished once its files are in, behind whatever the
 returning creature was finished 50-130 ms after it was queued, as soon as or sooner than without the key (the game also
 waited for the loader then, and then read the files in the foreground). Nothing is shown half-built: the creature
 appears when it is finished, as before. `CreatureAnimPreload=0` is the game's way (live).
+
+### Power-attack animations stay loaded when their last user leaves (`PowerAttackAnimKeep`, game behaviour)
+
+**The problem.** The game's old engine keeps its animation files (`.kf`, one per move) in a table with a use count
+each. When a person (not a creature) is built, the old engine asks for every animation file of the people's folder by
+name. A file that is not in the table is loaded on the spot, in the foreground: the old engine pauses its background
+loaders, waits for them to finish what they are doing, reads the file, and lets them go, while the game waits. Nearly
+all files are always there, because every person in the world, the player included, keeps the animations it uses. The
+power attacks are handled differently. A person asks for those files with the rest and lets go of them at once, and the
+game leaves them in the table with a use count of 0; its clean-up of unused files on loading screens skips exactly
+these animations. We read that as: they may stay loaded while nobody uses them. But a character that holds one of
+these files keeps it in use (which characters do, we have not established), and when the last one lets go, the step
+that counts the use down sees 0 and throws the file away. The next person built then loads it again in the
+foreground. In about an
+hour of our play this happened five times, 17 files in all. Four times the loaders were idle and it cost 1-2 ms; once
+the one loader thread was in the middle of a long task (a new row of cells) and six files cost 75 ms in one frame, 72 ms
+of it waiting, the worst frame of that half hour (86 ms).
+
+**What we did.** With `PowerAttackAnimKeep=1`, when that count-down brings a power-attack animation's use count to 0,
+the file is not thrown away: it stays in the table at 0, exactly as the game leaves the power-attack files that people
+only asked for. One read of the count in the game's code is replaced by a call that answers "still in use" for these
+files; everything else in that step is the game's.
+
+**Why the game can't change.** No file is loaded earlier, later or from anywhere else; a later request finds the file
+in the table and counts it up again, which is what the game already does for a file at 0. Other animations are thrown
+away as before. The cost is memory: a power-attack file that would have been thrown away stays until the game closes.
+That is at most the power-attack files of the kinds of character met since the game started: 33 files, 1.4 MB on disk,
+for people; 259 files, 6.0 MB on disk, if every kind of creature in the game were met as well (we did not measure
+their size in memory). `PowerAttackAnimKeep=0` is the game's way (read at start-up, then live).
 
 ### Far characters' equipment and hair wait their turn (`PacingOwnerWalk`, part of `NpcCreationPacing`)
 
@@ -1637,8 +1912,7 @@ changes on screen is when a held far character becomes visible: later in its fad
 On the Imperial City flight fewer steps were forced into slow frames (3-5 per flight against 6-10, ours, 4K with frame
 generation, 60 fps cap; measured on the build before this release's review fixes, which changed the rule that picks when
 each step runs); the frames of 28 ms or more did not differ clearly in our few flights.
-On by default (`PacingGateShownHoldMs=1000`; a restart to change it from 0, then live, 0 = the game's fade). With OBSE64 it is not
-available (it is set up before the game's code starts); the log says so.
+On by default (`PacingGateShownHoldMs=1000`; a restart to change it from 0, then live, 0 = the game's fade).
 
 ### Far characters arriving out of sight do not animate for their first second (`FadeInUnseen`, part of `NpcCreationPacing`; engine behaviour, idea from Epic's Unreal Engine 5.5)
 
@@ -1770,7 +2044,7 @@ world, and never for a character that a spell effect is aimed at; those cells ge
 back to within that tenth of a second reloads its characters as it reloads any reference without 3D: later than
 without this key, never later than in the game itself, which had already unloaded the whole cell. The cell's decals stay until its unload, a few frames after its characters went. A small gain: in our
 tests it removed no drop you would see by itself. On by default (`CellEvictSplit=2`; live, 0 = the game's unload in one
-step); it needs `CellBufferPacedEvict`, so it is not available with OBSE64.
+step); it needs `CellBufferPacedEvict`, which works on both routes.
 
 ### The next row of cells loaded ahead (`RowPreload`, game behaviour)
 
@@ -1791,6 +2065,130 @@ same ahead of the crossing. A row you never enter stays in the buffer and is unl
 like any cell you left behind. The 2006 game also loaded the cells' 3D ahead; that part is not restored, because in the
 remaster it would switch on a cell's lights for the game's logic before the cell itself. Needs `CellBufferPacedEvict`
 and `NpcCreationPacing`. Start-up, then live.
+
+### Objects in the cells ahead have their files loaded first (`CellObjectPreload`, game behaviour)
+
+**The problem.** When the old engine switches a cell on, it makes an Unreal actor for every object placed there that
+can move or be taken: books, food, quills, alchemy sets, chests, clutter. Each create looks up the object's two Unreal
+packages (its form asset, then its actor class, as for characters: see `CreatePreload`), and when one of them is not
+loaded yet it loads it on the spot: the game thread waits for the disk inside that frame, 1-5 ms per object. A cell with
+a few new kinds of objects (an alchemist's table, a bookshelf) adds them up: at the bend before Aleswell 12 ms of a
+27 ms frame were such loads. `CreatePreload` cannot help there, because a cell's objects are made at once as part of the
+cell's set-up, not one by one by the characters' queue.
+
+**What we did.** `RowPreload` loads the next row of cells a few seconds before you reach it. At that moment the fix
+reads each of those cells' list of placed references and notes the base form of every reference that has no Unreal actor
+yet (objects and characters alike; static objects such as rocks, walls and houses are left out, because the cell's level
+already loads those in the background). At the end of a frame it looks each one up as the create will (the same lookup
+`CreatePreload` uses) and asks Unreal's background loader for whatever is missing: the form asset first (once), then,
+once that has loaded, the actor class it names. The requests go in just below the game's own background loads, so the
+level files of the cells you are entering are not held up; if a create needs one of these files before it has arrived,
+the create's own load raises it to the top, as the loader does for any request made twice. The loads take about 0.07 s.
+When the crossing then switches the cell on, the game makes its objects as before and they find their files loaded. At
+most 16 requests per frame; a kind of object is asked for again only after 20 s; the requests stop at a menu, a loading
+screen or a pending fast travel.
+
+**Why the game can't change.** No create is moved, held back or reordered; the only difference is when the same
+packages are loaded, by the same loader, with the same contents. A create whose file is still loading waits only for the
+rest; one whose file is not there loads it as before. Nothing is kept: a file loaded for a cell you then turn away from is
+used by nothing and is freed by the game's next garbage collection, like any other unused file. One side effect in
+timing: Unreal's timed garbage collection does not start while files are loading, so a pass can come up to the tens of
+milliseconds a batch of these loads takes later, as with any load the game makes.
+
+**What it gives.** In our 4K test rides (two with and two without, interleaved) the objects' loads from disk inside a
+frame went from 5-7 per ride (10-11 ms in all) to none, apart from one at the start of a ride, before any cell had been
+loaded ahead. At the bend before Aleswell the cell's 13 objects took 6 ms instead of 14-20 ms and the longest frame went
+from 26.6 ms to 16.7 ms. At the exit from Fort Urasek the frame stays long (27-32 ms): there most of the time is spent
+making people, not loading files. The work at the frame's end averaged 0.06 ms in the frames that had some, 0.5 ms at most.
+Needs `NpcCreationPacing`, `RowPreload` and `CreatePreload`. `CellObjectPreload=0` turns it off (live; installed at
+start-up).
+
+### Characters half built before they arrive (`CreateAhead`, game behaviour)
+
+When the old engine switches a cell on, every character in it is created on the game thread in one piece: Unreal's
+`SpawnActor` (the actor, its components, the body's first animation set-up, its physics: about 3.8 ms for a person) and
+then `FinishSpawning` with everything after it (the construction script, the start of play, the looks, the tie to the
+old engine's reference: about 2.5 ms). The pieces of a crowd come one per frame, in frames that are busy with the new
+cell anyway: a run of long frames where people appear.
+
+With `CreateAhead=1` the first half is done a few seconds earlier. Who will come is known ahead of time in two ways.
+`RowPreload` loads the next row of cells before the crossing, and a loaded cell holds its references; the fix reads each
+character or creature reference that has no actor yet (its id, its base form, its place and the scale the game will ask
+for, read with the reference's own function). Creatures and people that the game places from its levelled lists are in no
+cell ahead; for those, up to three spare actors are kept for a base form the game has created in the last 90 seconds.
+At the end of a frame, after the frame-rate cap's wait, at most one such actor is built with the game's own
+`UWorld::SpawnActor` and the game's own spawn settings (copied from one of its creates), and only when the frame that
+just ended waited at least `CreateAheadSlackMs` in the cap, when `NpcCreationPacing` holds no work back, and when the
+character's class is loaded (`CreatePreload` asks for it). The actor is made 500 m below its place in Unreal's
+"deferred" state: it has not begun play, does not tick, has no controller and does not think. Its parts are registered
+as for any spawned actor (the render and physics scenes hold them, 500 m below, and the level's actor list holds the
+actor), but the game is not told of it: Unreal normally tells everyone who asked to hear of new actors (two notices
+inside `SpawnActor`); for an actor built ahead those two notices are held back.
+
+The game's create then runs as always. Where it would call `SpawnActor`, it gets the actor that is waiting, but only
+when it asks for exactly what was built: the same class, the same spawn settings field by field, and the same scale to
+the last bit, and only while it still stands exactly where it was built. At that moment the actor's creation time is set to the world's time (so its age is the same as without
+the fix), and the two held-back notices are made, in Unreal's order, so everyone hears of the character at the same
+point of the create as without the fix. For the two notices the actor's place is the one it asked for (where Unreal's
+own `SpawnActor` would have put it by then), and right after them it goes back to 500 m below until the next step moves
+it, because that step works out the final place from where the actor was built. This matters: the game keeps an index of
+where every character stands, which the other characters' steering uses to walk around them; it files a character by
+its place at the notice and files it again only when it moves (or when the whole index is rebuilt, every 5 minutes). An
+earlier test build announced the actor while it was still 500 m below, so a character that stood still was missing from
+that index at its real place for up to 5 minutes. What still differs for the listeners: the first notice ("about to be
+initialised") comes after the actor's parts were already set up, and at the notices the actor's rotation and parts are
+still the ones it was built with (none of the game's listeners reads them). An actor that is thrown away unused is never announced, and its removal is not announced
+either (Unreal's two "destroyed" notices are not made for it). Its own
+`FinishSpawning` call, with the transform it asked for, puts the actor at its place (Unreal does
+this for any deferred actor whose final transform differs from the first), and everything after that is the game's code
+as before: the character is started, dressed, tied to its reference and faded in. If anything differs, the waiting
+actor is destroyed and the game spawns its own, as without the fix. (A kind of character whose actors turn out to have a place of their own relative to where they are built is then no longer built ahead; the log says so once.) In our tests a create that found its actor took
+2.9-3.4 ms instead of 6.1-6.9 ms, the characters ended at the same position, rotation and scale as without the fix, and
+their first visible poses stayed within the differences between two runs of the game itself. What that does to the
+frames: at the Waterfront (five flights each way) the frames that hold a character create were 20 ms or longer 25 % of
+the time instead of 55 %; the longest frames there (28 ms and more) did not change, they are mostly not creates. The
+build itself is not free: a frame that builds an actor ahead averaged 16.7-16.8 ms, at most 18.5 ms on the Waterfront
+flight and 21.75 ms on a 4K route with long jumps.
+
+An actor is never built from a class the game's garbage collection is taking away. Who will come is noted a few
+seconds before the build, and the character's class (its blueprint) may by then be in memory only because it was loaded
+early: nothing refers to it yet, so a garbage-collection pass in between may find it unused and free it. So nothing is
+built while a garbage collection is still clearing memory, and every build looks the class up again at that moment and
+uses only what it finds then (Unreal's lookup never returns an object that collection has already given up). Once an
+actor of it exists, the class stays in memory as long as the actor does, as in the game. (A lab build of ours before
+this release missed this and crashed; no release had it.)
+
+Nothing built ahead is kept across anything that may change the world: when a menu or a loading screen stops the game
+(doors and fast travel included), when a fast travel is pending, when a save starts (any save, whatever
+`SaveBytesBulk` says), or when the key is switched off, every waiting actor is destroyed with the game's own destroy
+call. One whose create has not come after 20 seconds is destroyed too, one per frame and only in frames with time to
+spare; at most 12 wait at a time, and each is tracked the way the engine tracks weak references, so an actor the
+engine removed by itself is never touched. If Unreal's `SpawnActor` ever fails while building ahead, the fix switches
+itself off until the game is restarted. Without a frame-rate cap no frame has spare time and nothing is built ahead.
+Needs `NpcCreationPacing` and `CreatePreload`; `RowPreload` supplies the cells ahead. Start-up, then live.
+
+`CreateAheadPool` sizes the spares (24 by default since 1.6.0). With 0 at most 12 actors wait and spares are only built while fewer than
+8 wait, and a spare waits until its kind has not been made for 90 seconds. In four of our plays that kept the waiting
+spares on the kinds of the last town or fast travel while the road's creatures came without one: about half of the
+creates that found no actor found the pool full of other kinds. With 12-32 up to that many wait (spares while four fewer
+wait), and when the pool is full and a kind the game made in the last 20 seconds has fewer than three spares (and its
+spare could be built at once), one spare of a kind not made for 20 seconds (and made longer ago than the kind that wants
+the room) is destroyed, in a frame with time to spare and as that frame's only work, so the next such frame can build
+the wanted spare. More of the levelled creates then find an actor waiting; the price is more actors built in quiet
+frames that end up thrown away unused (each build is a frame of about 17 ms, as above), a little more garbage for the
+next clean-up, and more memory. Live.
+
+`CreateAheadLevelled` is about the levelled creatures and people the game has already placed. When a cell is switched on
+for the first time, the game picks each levelled spawn from its list and makes a run-time reference (an id starting with
+FF) for the one it picked; that reference stays in the cell's list while the cell is switched off again behind you,
+with its kind and place kept. When you come back, the cell's switch-on makes its character again, at the crossing, one
+per frame, like a placed character. With 1 the cell walk that reads the placed characters of the cells ahead also reads
+these references, so the first half of their creates is built ahead in the same way, for that very reference, instead
+of waiting for a spare of its kind. The game's pick is never made or changed by the fix: it only reads references the
+game made earlier. A create takes such an actor only when it asks for the same base form as the one read (a run-time id
+could in principle have been given to another reference since); a create that comes before its actor was built finds a
+spare of its kind as before. The price is more builds in quiet frames when you turn away before reaching the cell (each
+is thrown away after 20 seconds, one per quiet frame). 0 = run-time references get spares only. Live.
 
 ## Doors, loading screens and start-up
 
@@ -1990,15 +2388,15 @@ times, 10 s apart, and the log says which it was.
 **Only with the task-thread guard (since 1.4.0).** The faster pace hands the engine's task threads more pipelines at
 once, and the stock engine's task threads can then all end up waiting for wake-up calls nobody sends (the game bug that
 `TaskWaitDeadlockGuard` fixes, see its section). That guard can only be put in place when the fix loads as
-`version.dll`: as an OBSE64 plugin it loads after the engine's task threads have started. After a report of a freeze at
+`version.dll` or before WinMain as an OBSE64 plugin (since the next version; before, it stayed off there). After a report of a freeze at
 the main menu during the start-up build on the OBSE64 route (issue #51, Linux/Proton; cause not confirmed), the faster
-pace now runs only while the guard is installed and on (1). Without it (the OBSE64 package; `TaskWaitDeadlockGuard=0`
+pace now runs only while the guard is installed and on (1). Without it (a late load as an OBSE64 plugin; `TaskWaitDeadlockGuard=0`
 at start-up; a game build where the guard is not found) `SetBatchMode` is not wrapped at all and the log says why
 (`[pso] PsoPrecompileFast not installed: ...`). While the game runs, `PsoPrecompileFast=0` hands the pace back to the
 game's own at once (the wrapper passes its requests on unchanged). Switching `TaskWaitDeadlockGuard` to 0 while the game
 runs does the same only when `PsoCompileThreadPool` is not running: with that pool on (the default) the guard refuses to
 leave 1, logs it, and the faster pace stays; to turn the guard off, set `TaskWaitDeadlockGuard=0` before starting the
-game (then the pool and the faster pace are not installed either). What an OBSE64 player gives up is
+game (then the pool and the faster pace are not installed either). What a player without the guard gives up is
 the time measured below: the build runs until ~110-150 s after launch, and doors and fast travel in that time are held
 up to 5 s longer, as in the stock game.
 
@@ -2052,6 +2450,88 @@ else is touched. The effects stay in memory for the session instead of being unl
 does not finish within 60 s, the game loads that effect itself, as before. `ImpactPreload=0` stops asking for more
 (live; installed at start-up; needs `NpcCreationPacing`).
 
+<a id="startupbarfinish"></a>
+
+### The black screen at start-up no longer fills an unseen loading bar (`StartupBarFinish`, game behaviour)
+
+**The problem.** After you start the game the screen stays black for a while, and then everything stops before the
+first logo: about 3 s in our 4K start-ups, also without OblivionPerfFix. About 1.5 s of that is the game's old engine
+filling its own loading bar from 0 to 100 after its data has finished loading: it moves the bar one percent each time
+the Windows clock (GetTickCount, 15.6 ms per tick) has moved on, calling its step function in a busy loop in between, and
+at each percent it stops all of its loading threads (waiting until each one is idle), updates its menus, draws the
+loading menu and starts the threads again. Nothing of that is shown at start-up, and the rest of the game waits for it.
+Every loading screen in play ends with the same 1.5 s (the loading screen's picture stands still meanwhile).
+
+**What we did.** The bar's finish loop asks a small step function to move the bar until it reaches 100. For the first
+loading menu after the game starts, we set the bar's target to 99 before the loop's first step; the game's own step adds
+the last percent and does what its last step always does (the bar at 100, the menu told 100, no pause and no drawing),
+and the loop ends. The other steps are skipped. Once that first loading menu is gone, the key has nothing more to do, so
+no loading screen in play is touched. Every other use of the bar (the bar moving while a load runs) is untouched.
+
+**Why the game can't change.** The loop starts only after the load is done, so nothing that was loaded changes; the bar
+ends in the state the loop always leaves it in. The only difference is the 99 pauses and redraws of a menu nobody sees.
+In our 4K start-ups the stop before the first logo went from 2.8 s to 1.2 s (two launches each); the rest of it is other
+start-up work. `StartupBarFinish=2`, the default since 1.6.0, does the same at the end of every loading screen (each one
+about 1.5 s shorter): a change you can see, which also shortens the loading screen's idle time that
+`DrawBehindLoadingScreen` and `StreamBehindLoadingScreen` use; `StartupBarFinish=1` keeps the game's loading screens. `StartupBarFinish=0` is the game's way (installed at
+start-up). The log has one line
+per finish loop: when, from which value, how many step calls and how long.
+
+<a id="topicsort"></a>
+
+### The start-up sorts its dialogue topics with a fast method (`TopicSort`, game behaviour)
+
+**The problem.** While the game's old engine loads its plugins on the black screen before the first logo, it sorts its
+list of dialogue topics by name (also without OblivionPerfFix). It uses a bubble sort that always makes as many passes as
+there are topics, comparing every pair of neighbours in each pass, even when the list is already in order: with the few
+thousand topics of the game's plugins that is millions of name comparisons, about 0.4 s in our start-ups (4,182 topics), while the rest of the
+game waits for the old engine. The same sort also runs on your known topics whenever you learn a new one (a short list, 1-28
+items, about 0.003-0.017 ms either way).
+
+**What we did.** The sort function now jumps to our own sort of the same list: a merge sort, which needs a few tens of
+thousands of comparisons for the same list. It reads the list the way the game does, compares two names with the game's
+own comparison function (the C runtime's case-insensitive `_stricmp`, called through the game's own import), and writes the
+topics back into the same list entries in the new order.
+
+**Why the game can't change.** The bubble sort only ever swaps two neighbours when the right one comes strictly first, so
+topics with names that compare equal never pass each other, and it ends with the list in order. There is exactly one
+ordering that is sorted and keeps such topics in their previous order, and a stable merge sort with the same comparison
+produces exactly that one. Our self-test runs the game's own sort function from the game's exe and ours on the same lists
+(hundreds of random lists with ties, names differing only in case, missing names, and a topic-shaped list of 4,000 names)
+and checks that every entry ends up the same; in our lab build a check mode ran both on the real topic list in the game and compared them.
+The proof needs one comparison order, so the hook is only installed when both of the game's default-name pointers (for a topic
+with no name) point at an empty string.
+In our 4K start-ups the sort went from about 0.4 s to 1-2 ms and the stop before the first logo from 1.2-1.3 s to
+0.9 s (with `StartupBarFinish=1`; two start-ups each). When you learn a topic the game sorts only your own short list of
+known topics, which was already quick, and ours is no slower. `TopicSort=0` is the game's sort. The hook is written when the game
+starts, so switching the key on needs a restart.
+
+<a id="pluginprefetch"></a>
+
+### The plugin files are read into the file cache early (`PluginPrefetch`, game behaviour)
+
+**The problem.** On the black screen before the first logo the game's old engine reads its plugin files (Oblivion.esm,
+277 MB, and the DLC and Altar plugins, about 340 MB in all) record by record. When Windows still has them in its file
+cache from an earlier start, this is quick; when it does not (some time after the last start, or after other programs
+used the memory), the reads come from the disk in small pieces, and in our start-ups that made the stop up to about 2 s
+longer (3.4-4.1 s instead of 1.4 s for the same work).
+
+**What we did.** Right after the game starts (about 5 s in, 7-9 s before the old engine needs them), a helper thread at the lowest
+priority reads `Data\Plugins.txt` and each plugin file listed there once from start to end in large pieces, and then ends.
+Windows keeps what was read in its file cache (memory it gives back whenever anything else needs it), so the old engine's
+reads find the data there. The helper uses one 1 MB buffer, asks Windows for low disk priority, skips missing files and
+anything that is not a disk file, and never blocks the game from opening them. The folder is the game's own (`Content\Dev\ObvData\Data` of the game's install,
+from the path the game itself uses).
+
+**Why the game can't change.** It only reads the files; the game reads the same bytes, from memory instead of the disk.
+The read takes 0.05-0.2 s about 5 s after the start and did not slow the game's own start-up in our tests, which ran on an
+NVMe disk only; on a hard disk the extra sequential read could compete with the game's own start-up reads, so if start-ups
+get slower there, set the key to 0. When the files were already cached it changes nothing. Whether it gains anything is a hypothesis: three of our
+start-ups without it had the stop 2-2.4 s longer (3.4-4.1 s instead of 1.3-1.4 s) and we think the files were not cached
+then, but we did not record the cache state and could not force that case, and the start-ups with the key on followed
+other start-ups, so their files were cached anyway. The log shows each large file's read speed (a few GB/s when it was already cached). `PluginPrefetch=0` is
+off.
+
 <a id="resetloadersnoflush"></a>
 
 ### Renaming an object no longer waits for every background load (`ResetLoadersNoFlush`, engine behaviour)
@@ -2068,8 +2548,125 @@ package's loader); with no loader it returns, with a loader (or no package) the 
 
 **Why the game can't change.** For a package without a loader the engine's reset finds nothing to do; only the wait is
 gone. The background loads finish when the loader finishes them, as they would have without the rename.
-`ResetLoadersNoFlush=0` is the engine's way (live; installed at start-up; not on the OBSE64 route). The log counts the
+`ResetLoadersNoFlush=0` is the engine's way (live; installed at start-up). The log counts the
 calls, how many found loads in flight, and any package that had a loader.
+
+<a id="gcpassafterbusy"></a>
+
+### No frame-rate-limit wait before a frame that is about to be long (`CapSleepSkip`, off by default)
+
+**The problem.** With a frame-rate limit, the game waits before each frame until the limit's time is up. A frame that
+follows a quick one therefore starts with a wait of up to 8-10 ms at 60 fps, and if that frame is long, the wait and the
+long frame add up: in our measurements of real play the gap between two shown frames was always the wait before the frame,
+plus the frame's own work, plus how late the render thread got to it. Two of the drops at one camp were exactly that: an
+8.4 ms wait before a garbage-collection pass of 14.5 ms, and a 4.9 ms wait before a frame removing a cell from the world.
+
+**What we did.** At the end of each frame, before the wait, the mod already knows two kinds of long frame that come next:
+a garbage-collection pass whose timer is up (the engine's own tests, read as `GcPassAfterBusy` reads them, and none of the
+signals for which that fix would put the pass off), and a cell whose removal from the world is under way (its next step
+runs in the coming frame). Only then the engine's own wait is cut by up to 8 ms: the engine asks once for the limit before
+it waits, and for that one question the mod answers with a limit that ends the wait sooner. Right after, the time the wait
+did not take is added back to the frame's time step, so the game moves on by exactly the step it would have taken after
+the full wait. At most one frame in four, never in menus or loading screens, never without a limit.
+
+**Why the game plays the same.** The frame simulates the same step as without the fix; the next frame's step is its own
+length, as always. The moment the frame starts and is shown moves: its input is read earlier and it reaches the screen
+earlier, so nothing is added to the delay between your input and the screen. Two things are not exactly as before. Every
+later frame also starts that much earlier, so the game's clock stays ahead of the real clock by the sum of the cuts (up to
+8 ms each; over a stretch with a cut in every fourth frame the world runs that much faster than real time while it lasts).
+And when the shortened frame then has to wait for the render thread and the frame after it does not wait, the head start
+is spent in that wait and the next frame's step is longer by up to the cut. Both are far below what can be seen, but the
+fix is "the same steps in almost all frames", not "identical". `CapSleepSkip=0` turns it off (live;
+installed at start-up; needs `NpcCreationPacing` and `GcPassAfterBusy`).
+
+### The timer's garbage collection waits for a calm frame (`GcPassAfterBusy`, engine behaviour)
+
+**The problem.** About once a minute the engine collects garbage on a timer: one pass on the game thread of 7-17 ms in our
+recorded plays, on whatever frame the timer runs out. When that frame is already busy (a cell being added to or removed
+from the world, characters being set up, or simply a slow frame) the two add up to a sudden drop. In three of our
+recorded plays the pass was in 9 of 77 counted sudden drops.
+
+**What we did.** The engine already has a one-frame delay for this pass (`UEngine::DelayGarbageCollection`, checked just
+before the timer pass runs). On a frame where the pass would run and the game is busy, we set that same flag, so the
+engine's own code puts the pass off by one frame; the next frame asks again. The pass runs on the first calm frame, or
+when the bound is over (`GcPassAfterBusy=1`: 500 ms; 100-1000 = the bound in ms). Busy means: a cell was added to the world (a step that took
+at least 50 microseconds) or removed from it in this or the last frame, at least 1 ms of character set-up steps ran in
+this frame, or the frame has already taken 13 ms when the pass would start (a 25 ms frame minus a typical 10 ms pass and
+a little room).
+
+**Why the game can't change.** The same pass runs; only its moment moves, by at most the bound, and a later pass also
+collects what became garbage in the wait (stock collects it one pass later). The pass resets the timer when it runs, so the next pass follows the usual interval after this one: it moves by the
+same few frames, and nothing piles up. The garbage of those frames stays in
+memory that much longer (the pass grows by about 0.07 ms per ms of cell removal in the wait, ours: well under 1 ms).
+Never delayed: collections something forced (the game, loading screens, the engine's own triggers such as many unloaded
+cells), full purges, any frame with a menu, dialogue or loading screen up, and while Windows is short of memory (as `MemoryRelief` sees it; with
+`MemoryRelief=0` there is no memory check). The purge that follows a pass runs in its time slices as before. `GcPassAfterBusy=0` is the engine's way (live; installed at
+start-up). The log says for each delayed pass how many frames and milliseconds it waited and why it ran.
+
+<a id="gcprepahead"></a>
+
+### The cells you left are prepared for the garbage collection pass just before it (`GcPrepAhead`, engine behaviour)
+
+**The problem.** A cell you leave behind is removed from the world but kept in memory, in a list, until the next
+garbage collection pass, so that it can be taken back as it is if you turn round. The pass (about once a minute) first
+prepares every cell on that list for collection: it tells the cell's streaming object that the cell is gone, cleans the
+level up, marks every object of the cell as garbage and renames its packages. That costs about 0.05-0.1 ms a cell, all in
+the pass's frame. After a long ride the list is long: at a camp after a ride in one of our plays, 57 cells waited and the
+pass took 14.5 ms (a red second on the frame-rate overlay), about 5 ms of it this preparation.
+
+**What we did.** In the last second before the pass is due (from the engine's own timer, or from the number of waiting
+cells at which World Partition asks for a pass), in calm frames, we call the engine's own preparation
+(`FLevelStreamingGCHelper::PrepareStreamedOutLevelForGC`) for the oldest waiting cells, at most two cells or 0.5 ms a
+frame, and take each prepared cell off the list. Each preparation holds the engine's garbage-collection lock, taken without
+waiting, as the pass holds it while it prepares: other threads that use the engine's objects under that lock (the game's
+own Oblivion thread does) are kept out exactly as during the pass; if one of them holds it, we leave that frame. The
+engine counts prepared cells itself, so the number of cells waiting for collection, which its triggers read, does not
+change. The pass then prepares only the rest. The window for World Partition's count opens only when the pass is at most
+two cells away and they are coming now; if prepared cells then wait more than 2 s for their pass, that window stays shut
+until the pass after next (the log counts such late passes).
+
+**Why the game can't change.** Nothing is freed earlier: the same pass collects the same objects, and its purge runs as
+before. A cell prepared and waiting for the pass is a state the engine has a setting for:
+`LevelStreaming.ShouldReuseUnloadedButStillAroundLevels` 0 (it then prepares every cell as soon as it leaves the
+world, outside the world's update). The game itself runs with 1, so before this can be on by default the game is
+tested with that setting at 0, the longest exposure to the state (every cell, up to a minute before its pass). The one difference you could meet: a cell we prepared and that is wanted
+back before the pass is loaded again instead of being taken back as it was (as with that setting, and as after any
+pass); the window of one second before the pass keeps that rare, and the log counts it. Only cells waiting at least 3 s
+are prepared, the preparation runs where the pass would run it (after the world's update, no world in its update, the
+same check as the engine's), and never in a menu, dialogue or loading screen, while files load in the background (the
+pass's own rule), while a collection is still being purged, when memory is low, or in a frame that is busy (a cell added
+or removed, characters being set up) or already 12 ms long. Needs `NpcCreationPacing` (the frame's time); the
+"cell added or removed" signals come from `StreamRegisterGranularity` and `StreamOutEndPlaySlice` (on by default).
+`GcPrepAhead=0` is the engine's way (live; installed at start-up). The log says for each pass how many cells were
+prepared early, in how many frames and milliseconds, how many were left for the pass, how long the prepared cells
+waited, and how many prepared cells were wanted back.
+
+<a id="gcmarkpriority"></a>
+
+### Garbage collection's helpers get a core when the pass waits for them (`GcMarkPriority`, engine behaviour)
+
+**The problem.** The first part of a garbage-collection pass (finding every object that is still in use) is split across
+the engine's worker threads, and the game thread stops until all of it is done. The game thread takes over any part no
+worker has started yet, but a part a worker has started stays with that worker. Some of the engine's workers run below
+normal priority, so when other programs keep the processor busy, Windows can take the core away from such a worker in
+the middle of its part, and the game thread, out of work of its own, waits for it. In one of our runs with other
+programs busy, a pass took 16.5 ms where our model of passes of that size predicts about 7 ms, with the game thread
+waiting for a worker at the end (the cause is inferred; the gain in the game is not measured yet).
+
+**What we did.** The engine starts these parts through one function address, handed to every thread that works on the
+pass. We point it at a small function of ours that calls the engine's own: if the thread running a part is below normal
+priority, it runs that part at normal priority (`GcMarkPriority=1`; `2` = above normal) and goes back to its own
+priority when the part is done. Threads at or above that level are not touched. In the engine's Windows setup the game,
+render and RHI threads run at normal priority, so at 1 a raised worker is level with the threads that make the frame; it
+does not outrank them. At 2 the game thread is raised to above normal for its part too and the raised workers outrank
+the render and RHI threads: 2 is not recommended. A raised worker that has finished its part keeps spinning at that
+priority until the last part of the pass is done. Only the two places that hand out this address are
+changed, once at start-up.
+
+**Why the game can't change.** The same parts, the same work and the same objects found; the engine already lets any of
+its workers or the game thread do any part, in any order, and the result does not depend on who does it. Only which
+thread Windows runs first, for the length of one part, changes. `GcMarkPriority=0` is the engine's way (live; installed
+at start-up). The log counts the parts and how many were raised.
 
 ## Menus
 
@@ -2128,7 +2725,12 @@ section's table with the engine's own object creation, and fills it with copies 
 - **HDR** (On/Off; default Off, so the player switches it on);
 - **Peak Brightness**, 400 to 4000 nits (default 1000): the brightest highlight; match it to your display's peak;
 - **Paper White**, 80 to 400 nits (default 200): how bright menus, subtitles and the HUD are;
-- **Black Floor**, -4 to -1 (log10 nits; default -4, the deepest black): -4 recommended for OLED, -2 for LED/LCD;
+- **Black Floor**, -8 to -1 in whole steps (log10 nits: -4 = 0.0001 nits; default -4): -4 recommended for OLED, -2 for
+  LED/LCD. Lower values darken the shadows: below -4 the start of the engine's HDR tone curve stays where it is, but
+  its darkest output keeps falling with the setting, and the curve's lower part bends down from mid-grey to it, so
+  the shadows get darker over a wide band while mid-grey and everything brighter stay as they were (the curve
+  set-up of Epic's Unreal Engine 5.3; computed at Mid-Tone 15 and peak 1000: four stops below mid-grey, -6 gives about
+  half and -8 under a third of -4's brightness). From about -6 the deepest shadows turn fully black;
 - **Mid-Tone**, 5 to 50 nits (default 15, the game's): the scene's mid-tones, so the overall brightness of the picture.
 
 Each row has a short description, shows its current value (your saved one where there is one), and works, applies and
@@ -2369,7 +2971,7 @@ resized in between) leaves that picture to the game.
 A save made while a menu is open (the fast-travel autosave, a save from the System menu) binds its thumbnail handler to
 the menus' screenshot service and later removes it from a different list, so the handler stays bound for the rest of the
 session, one more per such save (a game bug, also without the mod; `SaveThumbLeftoverFix`, below, removes them, so
-this applies only with it off or with the OBSE package). The game then gives each of them every later menu
+this applies only with it off). The game then gives each of them every later menu
 picture, which only copies it into the finished save's buffer; nothing reads that buffer before the next save resets
 it. We give them the same picture when our copy arrives, a few frames later, and none if our copy is dropped (the menu
 closed first): so this part is equivalent rather than identical, as the buffer holds the picture later or keeps an older
@@ -2382,6 +2984,13 @@ the game's own (slow, for testing; it also covers HDR10). Costs two screen-sized
 menu on (about 63 MB at 4K). Ours, 4K, a lab menu test (the menus opened by a lab script, not in the public benchmark): inventory, magic, pause and
 character open frames 42-56 ms (31-45 %) shorter.
 `GpuMenuShot=0` turns it off (live).
+
+Not on every PC: on an Intel Arc card with OptiScaler (DLSS frame generation sent to XeFG) the game froze with a GPU
+crash at the second menu opening (issue #54, our bug since 1.3.0-beta). We could not reproduce it and found no fault in
+our own commands; the stock game waits for the graphics card at every menu opening, which a third-party layer may rely
+on. So on Intel GPUs, and whenever OptiScaler or a similar swap-chain or frame-generation layer is loaded (DLSS Enabler,
+a DLSS-G to FSR 3 replacement, a dxgi.dll / d3d12.dll / d3d11.dll proxy in the game's folder, which includes ReShade or
+Special K installed that way), the game makes the picture as with `GpuMenuShot=0`; the log says so once per session.
 
 ## Saving
 
@@ -2397,7 +3006,7 @@ character open frames 42-56 ms (31-45 %) shorter.
 
 **What we did.** Only while the list is being turned into bytes (`SaveGameToMemory`), and only for a plain byte array written to an ordinary saving archive, the DLL writes the array the way Unreal writes it, but the bytes in one call: the count, the size note, then the whole array. Anything else (other arrays, other archives, loading) goes to the game's own code. The calls of `SaveGameToMemory` are found by one pass over the game's code; each hit must lie inside a function of the exe's unwind table and be followed by the game's check of the result, or it is left alone.
 
-**Why the game can't change.** The archive appends what it is given, so one call with the whole array writes exactly the bytes the per-byte loop wrote: the same file. The self-test runs the game's own function and the DLL's on the same arrays (0 to a million bytes) and compares every byte and call; the maintainers' test build also wrote every save both ways in the game and compared them (identical). Installed while the game starts, only when the key is on (not on the OBSE64 route).
+**Why the game can't change.** The archive appends what it is given, so one call with the whole array writes exactly the bytes the per-byte loop wrote: the same file. The self-test runs the game's own function and the DLL's on the same arrays (0 to a million bytes) and compares every byte and call; the maintainers' test build also wrote every save both ways in the game and compared them (identical). Installed while the game starts, only when the key is on.
 
 ---
 
@@ -2413,7 +3022,7 @@ character open frames 42-56 ms (31-45 %) shorter.
 
 **What we did.** When the only ones waiting for that screenshot are the save and the save system's own picture store (a save from the pause menu, or while resting or waiting, has other listeners: the game's way runs there), the DLL asks for the same copy of the same frame, at the same point of the frame's work, but without waiting for it. A helper thread waits for the graphics card's signal, converts the picture with the same conversion as the game (byte for byte) and hands it to the save system's picture store first and then to the save, which writes its file after it as before. The picture arrives one to four frames later. If the copy could not be read (never seen), the save gets a black picture instead of waiting forever; if memory for the picture is short, the helper waits until there is.
 
-**Why the game can't change.** The same frame is copied and converted the same way: the maintainers' test build read every picture the game's way as well and compared every pixel (identical in all saves checked: quicksaves, autosaves, door autosaves; 480p and 4K with frame generation). Saves load back to the saved spot. The save system's store gets the picture before the save is allowed to go on, as in the game, where both happen before anything else runs. Installed while the game starts, only when the key is on (not on the OBSE64 route).
+**Why the game can't change.** The same frame is copied and converted the same way: the maintainers' test build read every picture the game's way as well and compared every pixel (identical in all saves checked: quicksaves, autosaves, door autosaves; 480p and 4K with frame generation). Saves load back to the saved spot. The save system's store gets the picture before the save is allowed to go on, as in the game, where both happen before anything else runs. Installed while the game starts, only when the key is on.
 
 **If the graphics card never answers.** The helper's wait for the graphics card's copy, and the screenshot broadcast's wait for the helper, used to have no limit. Both now give up after 10 seconds (the picture is black, the unfinished copy is left alone, a line is logged), so a removed device cannot make the save wait for ever. Not seen in play; no change while the card works.
 
@@ -2484,7 +3093,7 @@ starts, then switches live.
 
 **What we did.** During a save the DLL keeps an index of that list (each object's first place), updated as the list grows; a lookup asks the index and checks the list entry it points to. Not found: the game's own append, as before. Outside a save the game's search runs.
 
-**Why the game can't change.** The index returns the first place, which is what reading from the start returns, so the save holds the same numbers. The self-test compares the two on over a million random lookups; the maintainers' test build compared every lookup in the game (no difference in about 300,000). Installed while the game starts, only when the key is on (not on the OBSE64 route).
+**Why the game can't change.** The index returns the first place, which is what reading from the start returns, so the save holds the same numbers. The self-test compares the two on over a million random lookups; the maintainers' test build compared every lookup in the game (no difference in about 300,000). Installed while the game starts, only when the key is on.
 
 **Effect (all three together).** Quicksaves in a held, save-free scene at 4K with frame generation and a 60 fps cap: the save's frame went from 90-113 ms (median 110) plus a second frame of 30-43 ms to 25-32 ms (median 28), with no second slow frame; at 480p from 70-77 ms (median 75) to 27-30 ms.
 
@@ -2502,7 +3111,7 @@ starts, then switches live.
 
 **What we did.** The game's code calls its autosave from six places. The DLL sends the two without a menu option (after a level-up and the quests' save command) through a small wrapper, found by their code and checked. While all four of the menu's autosave options are off, the wrapper does not make the save; with any one of them on, it saves as before. The other four places (rest, wait, travel, doors) are unchanged.
 
-**What changes.** Only whether those two autosaves are written. The level-up and the quest go on as before, and your own saves and quicksaves are untouched (checked in play by the contributor). With all four options off there is then no automatic save to go back to after a level-up or at a quest's save point, so it is **off by default** (`AutosaveFollowsMenu=0`, in the ini's "Game bug fixes"); set it to 1 if you want no autosaves at all (installed at start-up, then live; not on the OBSE64 route). Each autosave it holds back is one `[autosave]` line in the log. Pull request #35 by Mishu117.
+**What changes.** Only whether those two autosaves are written. The level-up and the quest go on as before, and your own saves and quicksaves are untouched (checked in play by the contributor). With all four options off there is then no automatic save to go back to after a level-up or at a quest's save point, so it is **off by default** (`AutosaveFollowsMenu=0`, in the ini's "Game bug fixes"); set it to 1 if you want no autosaves at all (installed at start-up, then live). Each autosave it holds back is one `[autosave]` line in the log. Pull request #35 by Mishu117.
 
 ## Frame generation
 
@@ -2669,7 +3278,87 @@ with exactly the recorded crash; with the guard it carried on, and the log count
 
 **What we did.** Both hits pass through two calls in the old engine's code, which the DLL sends through small wrappers (found by their code and checked). Each of your arrows now hits once: the second hit of the same arrow on the same target within a quarter of a second is not made (the two hits come a few milliseconds apart). When the old engine's own impact is the first, it uses the multiplier the new engine worked out for your last arrow hit instead of 1x (with a bow that only changes with your Sneak skill). Until your first arrow hit in a session there is no such value yet, and that hit keeps the old engine's 1x, as in the stock game. Hits by other characters are unchanged.
 
-**What changes.** Damage, back to what the game intends: a sneak shot with a bow does your sneak multiplier, once. Checked in play by the contributor (pull request #35): every sneak shot hit once, at the bow's multiplier. On by default since 1.2.4, in the ini's "Game bug fixes"; `BowSneakAttackFix=0` brings back the stock game's damage (start-up, then live; not on the OBSE64 route). Pull request #35 by Mishu117. Nothing you see changes apart from the damage and the "Sneak attack for ..." message.
+**What changes.** Damage, back to what the game intends: a sneak shot with a bow does your sneak multiplier, once. Checked in play by the contributor (pull request #35): every sneak shot hit once, at the bow's multiplier. On by default since 1.2.4, in the ini's "Game bug fixes"; `BowSneakAttackFix=0` brings back the stock game's damage (start-up, then live). Pull request #35 by Mishu117. Nothing you see changes apart from the damage and the "Sneak attack for ..." message.
+
+---
+
+<a id="stuckeffectlookfix"></a>
+
+### Torches and footsteps heard from where they are (`WorldSoundPositionFix`, game bug)
+
+**The problem.** A bug in the game's own sound data (issue #52). When an NPC lights a torch, you hear it at full volume in
+both ears, no matter where the NPC is: the game creates NPCs well ahead of you, so you often hear a guard light a torch
+100 m or more away, before you can see anyone, and louder than your own torch. A few other sounds have half of the same
+problem: deer, daedra-spider and ogre footsteps and eleven dungeon traps get quieter with distance as they should, but
+always sound as if they were straight in front of you. The game's sounds are set up in Wwise (the audio engine the game
+uses) as a tree: each sound inherits "where it is and how it fades" from the group above it, or overrides it. For these
+15 entries the override says "no 3D sound"; for the NPC torch it also switches off the fade with distance, although a
+20 m fade is attached to it. The player's own torch in third person, every other torch sound and the sounds around them
+are set up as 3D sounds; we read all of the game's 136,707 sound files to find the entries that differ.
+
+*Analogy:* one loudspeaker in a concert hall that someone wired straight into the headphones.
+
+**What we did.** The game hands each sound file to Wwise when it loads it. Just before Wwise reads it, the DLL looks for
+the 15 listed entries and, only if each one is exactly as the game ships it, switches 3D sound on for it, as for the
+sounds around it (for the NPC torch also its own 20 m fade). The files on disk are not changed.
+
+**What changes.** An NPC lighting a torch is heard from where the torch is and fades out within 20 m; the footsteps and
+traps come from their side and fade as before. Nothing else: every other sound, voices and your own sounds are as in the
+game. On by default since 1.6.0; in the ini's "Game bug fixes" as `WorldSoundPositionFix` (takes a restart).
+
+---
+
+<a id="arrowhitsoundfix"></a>
+
+### Other characters' arrow hits heard once, where they hit (`ArrowHitSoundFix`, game bug)
+
+**The problem.** A bug in the game's code (issue #52). When an arrow hits someone, two parts of the game play the hit's
+thud. The arrow's own hit code plays it on the arrow, where it hit, with the right sound for what it hit. The shooter's "I hit something" code plays the same sound on the shooter's weapon. That second part is the one
+that makes a sword's hit sound, and for a sword it is right: the sword is at the victim. A bow is in the shooter's hands,
+10 to 30 m or more from where the arrow lands. The game runs both of its engines on each arrow hit, and each that
+registers the hit runs the shooter's code once, so a hit is heard at the shooter once or twice, and at the target once
+or not at all. A hunter near you shooting a deer 100 m away sounds like a full-volume hit right next to you; a hunter far
+away and a deer close by sound almost silent. This is the "sometimes very loud, sometimes not" arrow hit.
+
+*Analogy:* a referee who blows the whistle where the foul happened, and an assistant who blows another whistle from the
+bench, sometimes twice.
+
+**What we did.** When the shooter's code is about to play the hit on the bow, the DLL checks whether that arrow hit's
+sound is already playing on the arrow. If it is, the bow's copy is left out. If not, the sound is played on the arrow
+instead, set up exactly as the arrow's own hit code sets it up (the same sound, chosen for what was hit), and when the
+arrow's own code then comes to play it, it is not played a second time. If the arrow is gone or the sound cannot be played
+on it, the bow's plays as in the game, so a hit is never silent. Sword hits, spells and anything else are not touched.
+
+**What changes.** Another character's arrow hit is heard once, where the arrow hits, like a sword's hit: it fades with
+distance from the hit, not from the shooter. Your own arrows are unchanged (you keep hearing your hits as the game makes
+them). On by default since 1.6.0; in the ini's "Game bug fixes" as `ArrowHitSoundFix` (installed at start-up,
+then switchable live).
+
+---
+### A spell's look no longer stays on your weapons (`StuckEffectLookFix`, game bug)
+
+**The problem.** A bug in the game's own effect code (issue #48). When an effect with a look hits a character (fire,
+frost, shock, a drain, the red of an enchanted weapon's hit), the game colours everything the character carries: body,
+armour, shield, weapons, bow, staff, quiver and arrows. When the effect ends, its clean-up takes the colour off the body,
+the armour and the shield, but skips the weapons. So your sword, bow, staff or quiver keeps the colour of the last such
+effect until you equip it again (fast travel or a cell change do not help, because the same weapon stays in your
+hands). The same happens to a rider who gets off a horse while the horse's effect is still on: the horse's
+clean-up no longer reaches the rider, who keeps the horse's colour.
+
+*Analogy:* a decorator who paints the room and the furniture but, when told to strip it, only does the walls.
+
+**What we did.** The DLL watches the game's own calls that put such a colour on a mesh or take it off (found by name,
+checked by their code), and remembers for each mesh which effect put it there and what was there before. Once a frame,
+a mesh that still shows the colour of an effect whose clean-up has already run has that colour taken off. If a look
+underneath is still on and would still be put on that mesh now (an effect of the weapon itself, or of the character or
+horse it is attached to at that moment), that look is shown instead; a rider who has got off never gets the horse's
+colour back this way.
+
+**What changes.** Only the leftover colour: nothing is done while an effect is still on (including its fade-out), and
+nothing to a colour any other part of the game put there. On by default since 1.6.0; in the ini's "Game
+bug fixes" as `StuckEffectLookFix` (start-up, then live). Other stuck looks reported by players (Chameleon or
+Invisibility that stays, a colour stuck on the body) come from other paths of the same code and are not changed by this
+fix yet.
 
 ---
 
@@ -2748,7 +3437,7 @@ Never seen in a test or in play; it is the same kind of exposure, found by a rev
 
 **What we did.** The DLL replaces the engine's waiting step for task threads with the same steps plus one: the helper thread, when it sees the tasks done, also wakes the waiting thread itself. Whichever wake-up comes first ends the wait; the other one finds nothing left to do.
 
-**Why the game can't change.** The same tasks run in the same way; only a thread that would have slept forever (or a few milliseconds too long) wakes up when its tasks are done. It is installed at start-up as `version.dll` only (the task system is already running when OBSE64 loads plugins: there the log says it is not installed and the game's own wait is kept).
+**Why the game can't change.** The same tasks run in the same way; only a thread that would have slept forever (or a few milliseconds too long) wakes up when its tasks are done. It is installed at start-up, with `version.dll` and with OBSE64 (which loads plugins before the task system starts; only a late load leaves it off, and then the log says so and the game's own wait is kept).
 
 **Measured (2026-10-24, the test PC limited to 4 cores, everything cached):** the stock game froze at the first teleport and ended itself 120 s later; with the mod but the guard off it froze at the main menu; with the guard on there was no freeze, also with the driver's cache emptied (4 and 6 cores). The log counts how often the guard woke a thread first.
 
@@ -3022,6 +3711,8 @@ paths, which draw the same picture.
 
 **Why the image can't change.** Nothing you see: the same commands reach the GPU. When memory is tight, about 0.3-0.5 GB less video memory once an area has loaded (single trims freed 0.27 and 0.50 GB; mean use over six 720p scenes 8.25-8.31 GB instead of 8.48-8.87), which is about what parallel translation costs, and lower peaks after doors (1440p, 12 GB budget: 11.61 instead of the stock game's 11.97 GB at the inn exit).
 
+**Our bug, fixed in 1.6.0: too few kept for a ride (`AllocatorTrimCopyFloor`).** The trim used to keep only what the last 20 seconds had needed plus a small margin, often just 12-20 allocators. Riding on, texture streaming sometimes needs more at once; the missing ones are then made anew in one go, and each new one's first block of memory joins one queue in the driver. In one of our plays that queue stood in front of a new texture pool the game was creating while holding a lock the render thread needed, and the picture held for 30-50 ms. The stock game never gives any back, so this is ours. With `AllocatorTrimCopyFloor` (64 by default since 1.6.0, about 64 MB; 0 = as before) the trim never gives back copy allocators below that number, counting those in use. It never makes any: after the game starts, or after a spell over the video memory budget, the stock can be smaller until the game itself needs more. After 10 seconds over the budget it gives back down to the last few seconds' need, as before. We expect this to prevent those holds; that is not shown yet. Nothing you see changes.
+
 **Our bug, fixed after 1.1.0-beta.** The spare entries go back into the stock in two rounds (stand-ins first, so the real ones are taken first). The second round used to look at every entry again, including ones the first round had already put back; if the engine had taken one of those out in between and was giving it a fresh allocator, the trim reset and put back an entry in use, which could crash the game. Each entry's round is now decided before any goes back, and after an error the trim stays off until the game restarts. What is released is unchanged.
 
 ---
@@ -3036,9 +3727,11 @@ paths, which draw the same picture.
 
 *Analogy:* a delivery firm that only buys a van when a parcel is already waiting at the door, and ten parcels arrive at once. So it buys the vans it will need before opening.
 
-**What we did.** Once, before the first area is up, on a thread of its own and with short pauses (about 3 s): the stock is brought to up to 300 allocators, and each records 17 empty lists with one clear and one copy, the recipe that makes the driver hand out what the game's use would. The lists are closed and thrown away. The stock stays usable throughout; a part of it is held back for the game until the end.
+**What we did.** Once, behind the first loading screen, on a thread of its own and with short pauses (about 2 s): the stock is brought to up to 300 allocators, and each records 17 empty lists with one clear and one copy, the recipe that makes the driver hand out what the game's use would. The lists are closed and thrown away. The stock stays usable throughout; a part of it is held back for the game until the end.
 
 **Why the image can't change.** Nothing recorded here is ever sent to the graphics card, and no game logic runs. The game later gets the same allocators, already holding their memory.
+
+**When it runs.** Up to 1.5.0 it ran about 5 seconds after the graphics device was made, which on every start fell on the first second of the start-up logos and made them stutter (our bug: in our test, 19 frames of 30 ms or more in the first 2.5 seconds against 3 without it), because the frames being shown wait behind the same driver queue. Now its thread waits, touching nothing, until the game shows its first loading screen (the one before the first area: Continue, Load or New game), where there is nothing to see or do, and does its work there in small steps, at most one per frame, so that the loading screen's own frames stay smooth too; it still stops when that area fades in, so it never runs in play. It sees the loading screen through `NpcCreationPacing`'s once-a-frame hook; with that off at start-up (or if that hook has not run within 20 seconds) it starts at once, as before.
 
 **What it costs.** Up to about 0.8 GB of video memory from the start of the session. Without this fix the game grows towards about 0.5 GB during play, so in long sessions the difference shrinks to 0.2-0.3 GB. Going over the video memory Windows gives the game makes everything slower and, on our test PC, came before its rare graphics driver hangs, and nothing at the start can tell that another program will fill the card later. So set `CmdMemPregrow=0` if another program fills your card while you play, or you get graphics driver hangs.
 
@@ -3095,7 +3788,7 @@ writes a row for each every 2 seconds to `OblivionPerfFix-ticksplit.csv` next to
 tools/tick_split.py <csv>` ranks it (`--run <benchmark run folder>` gives one table per scene). It only reads the clock
 around the game's own calls: about 45 ns per timed update in the self-test, about 0.4 ms per frame in a crowd of ~1,300
 updates per frame (within the noise); with the switch at 0 at start-up nothing is installed. Only with the `version.dll`
-install (with OBSE64 it stays off); `tools/tick_split.py` is in the GitHub repository, not in the mod's zips. It helped
+install (also with OBSE64); `tools/tick_split.py` is in the GitHub repository, not in the mod's zips. It helped
 us confirm where the horse corral's time went (stack samples named the cause) for `PhysAnimNoEmptyLock` and
 `RigTraceReuse`.
 

@@ -87,7 +87,7 @@ bool Redirect(uint8_t* call, uint8_t* stub, bool beforeGameCode)
     if (lo + 3 < qword + 8) {
         DWORD old;
         auto* q = reinterpret_cast<volatile LONG64*>(qword);
-        if (!VirtualProtect(reinterpret_cast<void*>(qword), 8, PAGE_EXECUTE_READWRITE, &old)) return false;
+        if (!CodeSiteProtect(reinterpret_cast<void*>(qword), 8, &old)) return false;
         const LONG64 before = *q;
         LONG64 after = before;
         memcpy(reinterpret_cast<uint8_t*>(&after) + (lo - qword), &rel32, 4);
@@ -157,7 +157,7 @@ bool ApplyVramCounterFix(bool beforeGameCode)
     FlushInstructionCache(GetCurrentProcess(), region, 14);
     g_original = reinterpret_cast<QueryFn>(query);
     if (!Redirect(widget, region, beforeGameCode)) {
-        VirtualFree(region, 0, MEM_RELEASE);
+        FreeOwnCode(region);
         g_original = nullptr;
         Log("[vram] writing the widget's call at exe+0x%llX failed: VramCounterFix not installed",
             static_cast<unsigned long long>(widget - game.base));

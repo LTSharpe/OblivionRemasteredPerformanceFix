@@ -5,7 +5,13 @@
 // functions (water_spread.cpp's WaterSpreadTestLogic: first renders, near zones, unknown position, forced updates, a tick gap and
 // mode 0 never wait; one zone per frame oldest first; the frame bound; the merge hold ends after its time and the update then
 // happens; merge and spread together hold no request longer than max(MaxFrames frames, MergeMs) from its first ask, at 60 and at
-// 10 fps; a failed update is asked again within the bound; public values keep only the spread and merge bits).
+// 10 fps; a failed update is asked again within the bound; public values keep only the spread and merge bits). WaterInfoAfterCrossing
+// (waterlate 2026-11-18, cases 13-20): held while stream steps come, released 150 ms after the last, one zone per frame; at the
+// bound (500 ms) while steps never stop; off, near, first render and no signal never held; with the spread off both go at once;
+// no merge hold after a crossing hold. Review fixes (cases 21-26): switched off live while held, a failed update at the release,
+// a tick gap / new subsystem while held, Altar's loading mode on / unknown and its end, local-only tessellation zones and an
+// unconfirmed flag offset never held, the spread's "older waits" skips a zone held through a crossing; and the local-tessellation
+// flag's offset read from GetDynamicWaterMeshCenter on the mapped exe is +0x2E0 (water_zone.h).
 #pragma once
 
 static void WaterSpreadRun(const GameModule& game)
@@ -15,7 +21,10 @@ static void WaterSpreadRun(const GameModule& game)
     Check(ok == 1, "WaterInfoSpread: every site and the shared water-zone layout match on the mapped exe");
     if (ok != 1 || flag != 0x300 || tex != 0x298 || ext != 0x304 || gz != 0x30C)
         printf("    found %d, flag +0x%X, texture +0x%X, extents +0x%X, GroundZMin +0x%X\n", ok, flag, tex, ext, gz);
+    const int local = WaterSpreadTestLocalTess(game);
+    Check(local == 0x2E0, "WaterInfoAfterCrossing: GetDynamicWaterMeshCenter found once, local-tessellation flag at +0x2E0");
+    if (local != 0x2E0) printf("    found +0x%X\n", local);
     const int fail = WaterSpreadTestLogic();
-    Check(fail == 0, "WaterInfoSpread: defer / merge / flush logic with fakes; merge + spread within max(MaxFrames, MergeMs)");
-    if (fail) printf("    failed checks (bits): 0x%X\n", fail);
+    Check(fail == 0, "WaterInfoSpread / WaterInfoAfterCrossing: defer / merge / flush / crossing-hold logic with fakes; bounds kept");
+    if (fail) printf("    failed checks (bits): 0x%X (cases 21-26: 0x%X)\n", fail, WaterSpreadTestCrossingBits());
 }

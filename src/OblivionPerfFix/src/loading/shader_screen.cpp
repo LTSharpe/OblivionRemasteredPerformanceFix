@@ -208,7 +208,7 @@ bool ApplyShaderScreenAfterDriverChange(bool beforeGameCode, const wchar_t* dir)
 {
     if (g_call) return true;
     if (!beforeGameCode) {
-        Log("[shaderscreen] can only be installed at start-up (version.dll), not installed");
+        Log("[shaderscreen] can only be installed at start-up (loaded late here), not installed");
         return false;
     }
     if (!dir) return false;
@@ -248,7 +248,7 @@ bool ApplyShaderScreenAfterDriverChange(bool beforeGameCode, const wchar_t* dir)
     FlushInstructionCache(GetCurrentProcess(), region, 14);
     const int64_t rel = region - (call + 5);
     if (rel != static_cast<int32_t>(rel)) {
-        VirtualFree(region, 0, MEM_RELEASE);
+        FreeOwnCode(region);
         Log("[shaderscreen] call stub out of reach: ShaderScreenAfterDriverChange not installed");
         return false;
     }
@@ -257,7 +257,7 @@ bool ApplyShaderScreenAfterDriverChange(bool beforeGameCode, const wchar_t* dir)
     g_recordPath = std::wstring(dir) + L"\\OblivionPerfFix-gpu.txt";
     const int32_t rel32 = static_cast<int32_t>(rel);
     if (!WriteCode(call + 1, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&rel32), 4))) {
-        VirtualFree(region, 0, MEM_RELEASE);
+        FreeOwnCode(region);
         g_original = nullptr;
         Log("[shaderscreen] writing the call at exe+0x%llX failed: ShaderScreenAfterDriverChange not installed",
             static_cast<unsigned long long>(call - game.base));

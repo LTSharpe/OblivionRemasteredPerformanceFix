@@ -397,7 +397,7 @@ bool PatchDetour(uint8_t* fn, size_t n, uint8_t* slot, bool beforeGameCode)
     DWORD old;
     if ((at & 7) + n <= 8) {
         auto* q = reinterpret_cast<volatile LONG64*>(at & ~uintptr_t{7});
-        if (!VirtualProtect(const_cast<LONG64*>(q), 8, PAGE_EXECUTE_READWRITE, &old)) return false;
+        if (!CodeSiteProtect(const_cast<LONG64*>(q), 8, &old)) return false;
         const LONG64 before = *q;
         LONG64 after = before;
         memcpy(reinterpret_cast<uint8_t*>(&after) + (at & 7), jmp, n);

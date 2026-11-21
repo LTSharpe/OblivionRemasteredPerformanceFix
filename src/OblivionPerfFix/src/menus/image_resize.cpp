@@ -183,12 +183,12 @@ uint8_t* AllocNearImage(size_t size)
         const uintptr_t regionEnd = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
         if (mbi.State == MEM_FREE && a + size <= regionEnd)
             if (void* p = VirtualAlloc(reinterpret_cast<void*>(a), size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE))
-                return static_cast<uint8_t*>(p);
+                return static_cast<uint8_t*>(RegisterOwnCode(p));
         a = (regionEnd + gran - 1) & ~(gran - 1);
     }
     for (uintptr_t a = (base & ~(gran - 1)) - gran; a > gran && end - a < kReach; a -= gran)
         if (void* p = VirtualAlloc(reinterpret_cast<void*>(a), size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE))
-            return static_cast<uint8_t*>(p);
+            return static_cast<uint8_t*>(RegisterOwnCode(p));
     return nullptr;
 }
 
@@ -228,7 +228,7 @@ bool ApplyImageResizeFix(bool beforeGameCode)
     FlushInstructionCache(GetCurrentProcess(), stub, 14);
     const int64_t rel = stub - (call + 5);
     if (rel != static_cast<int32_t>(rel)) {
-        VirtualFree(region, 0, MEM_RELEASE);
+        FreeOwnCode(region);
         Log("[resize] call stub out of reach: fix not installed");
         return false;
     }
@@ -246,7 +246,7 @@ bool ApplyImageResizeFix(bool beforeGameCode)
         ok = true;
     } else if (hi < qword + 8) {
         auto* q = reinterpret_cast<volatile LONG64*>(qword);
-        if (VirtualProtect(reinterpret_cast<void*>(qword), 8, PAGE_EXECUTE_READWRITE, &old)) {
+        if (CodeSiteProtect(reinterpret_cast<void*>(qword), 8, &old)) {
             const LONG64 before = *q;
             LONG64 after = before;
             for (size_t i = first; i <= last; ++i)
@@ -261,7 +261,7 @@ bool ApplyImageResizeFix(bool beforeGameCode)
         Log("[resize] the call cannot be switched atomically while the game runs: fix not installed");
     }
     if (!ok) {
-        VirtualFree(region, 0, MEM_RELEASE);
+        FreeOwnCode(region);
         Log("[resize] writing the call at exe+0x%llX failed: fix not installed", static_cast<unsigned long long>(call - game.base));
         return false;
     }

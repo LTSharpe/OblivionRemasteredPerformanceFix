@@ -112,15 +112,15 @@ bool InstallFrozenClothStretchFix(bool beforeGameCode)
     void* hook = reinterpret_cast<void*>(&UpdateHook);
     memcpy(stub + sizeof code, &hook, sizeof hook);
     DWORD old;
-    if (!VirtualProtect(stub, 32, PAGE_EXECUTE_READ, &old)) { VirtualFree(stub, 0, MEM_RELEASE); return Fail("trampoline protection"); }
+    if (!VirtualProtect(stub, 32, PAGE_EXECUTE_READ, &old)) { FreeOwnCode(stub); return Fail("trampoline protection"); }
     FlushInstructionCache(GetCurrentProcess(), stub, 32);
     const int64_t rel = stub - (call + 5);
-    if (rel != static_cast<int32_t>(rel)) { VirtualFree(stub, 0, MEM_RELEASE); return Fail("trampoline out of reach"); }
+    if (rel != static_cast<int32_t>(rel)) { FreeOwnCode(stub); return Fail("trampoline out of reach"); }
     uint8_t patch[5]{0xE8};
     const int32_t disp = static_cast<int32_t>(rel);
     memcpy(patch + 1, &disp, 4);
     g_original = reinterpret_cast<UpdateFn>(update);
-    if (!WriteCode(call, patch)) { VirtualFree(stub, 0, MEM_RELEASE); return Fail("call patch failed"); }
+    if (!WriteCode(call, patch)) { FreeOwnCode(stub); return Fail("call patch failed"); }
     g_call = call; g_installed = true;
     Log("[frozencloth] suspended LOD call exe+0x%X, Solver::Update exe+0x%X: installed (per-cloth teleport; reset precedence retained)",
         static_cast<unsigned>(call - game.base), static_cast<unsigned>(update - game.base));

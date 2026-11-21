@@ -240,7 +240,7 @@ bool InstallFrameFence(bool beforeGameCode)
     bool ok = false;
     if ((at & 7) <= 3) {
         auto* q = reinterpret_cast<volatile LONG64*>(at & ~uintptr_t{7});
-        if (VirtualProtect(const_cast<LONG64*>(q), 8, PAGE_EXECUTE_READWRITE, &old)) {
+        if (CodeSiteProtect(const_cast<LONG64*>(q), 8, &old)) {
             const LONG64 before = *q;
             LONG64 after = before;
             memcpy(reinterpret_cast<uint8_t*>(&after) + (at & 7), jmp, sizeof jmp);

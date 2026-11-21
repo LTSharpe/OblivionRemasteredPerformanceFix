@@ -15,6 +15,15 @@ inline const uint8_t* FakeLookup(void*, const void* cvar)
 inline void Run(const opf::GameModule& game)
 {
     using namespace opf;
+    // Black Floor: the row's range -8..-1 and which saved values the rows take (rounded to whole steps)
+    Check(kHdrBlackFloorMin == -8.f && kHdrBlackFloorMax == -1.f, "hdr menu: Black Floor's range is -8..-1");
+    auto floorOf = [](double d) { float f = 99.f; return HdrBlackFloorFromSaved(d, &f) ? f : 99.f; };
+    Check(floorOf(-4) == -4.f && floorOf(-8) == -8.f && floorOf(-1) == -1.f && floorOf(-6) == -6.f && floorOf(-5.6) == -6.f &&
+              floorOf(-7.4) == -7.f && floorOf(-3.5) == -4.f && floorOf(-1.2) == -1.f,
+          "hdr menu: saved Black Floors -8..-1 taken, rounded to the nearest whole step");
+    Check(floorOf(-8.01) == 99.f && floorOf(-9) == 99.f && floorOf(-0.99) == 99.f && floorOf(0) == 99.f &&
+              floorOf(std::nan("")) == 99.f,
+          "hdr menu: saved Black Floors outside -8..-1 (or NaN) keep the default");
     HdrMenuInfoOut h{};
     if (!Installed(FindHdrMenu(&h), "HdrMenuRows (HDR menu rows)")) return;
     Check(h.fromString == game.base + 0xE56680, "hdr menu: FText::FromString at exe+0xE56680");

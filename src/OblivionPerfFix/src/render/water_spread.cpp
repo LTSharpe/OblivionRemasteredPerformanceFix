@@ -40,6 +40,26 @@
 // "waterspread2" (Bravil marks: no clear gain); the maintainer plays with it on (default on by the maintainer's decision, 2026-11-08).
 // Side effect: in a frame with a water-info update the Niagara GPU sims run inside the first water renderer (each counts as a
 // first view family); spreading puts updates into more frames (once per frame either way).
+//
+// WaterInfoAfterCrossing (worker waterlate, 2026-11-18, S-003; public tree, default 0 until the release). A cell crossing marks
+// the same zone again and again: the removal behind the player, then each level added ahead when its last AddToWorld slice
+// broadcasts (UE 5.3 AWaterZone::OnLevelChanged -> MarkForRebuild sets the bool; WaterZoneActor.cpp:180-236). At the IC
+// flight's crossings the big zone was redrawn three times ~0.25 s apart (removal, add 1, add 2; rtwater, rtpool) and a small
+// zone in the removal's own frame. With this key (value = the bound in ms, 0 = off) a request is held while the world is
+// adding or removing a level (a stream step within WaterInfoAfterCrossingQuietMs, 150, i.e. the gap between a crossing's
+// adds) and its first ask is less than the bound old; then it goes through the spread as usual (its frame bound counts from
+// there, so released zones still go one per frame; the merge hold is skipped: it already merged). So the marks of one
+// crossing become one redraw per zone, drawn in the calm frames after the crossing with the ground and water of that moment.
+// Bound: the key's ms + MaxFrames frames from the first ask. Signals are the tree's own stream hooks (StreamOutEndPlaySlice's
+// RemoveFromWorld unregister hook, StreamRegisterGranularity's AddToWorld hook, a call that did >= 50 us of work), the same
+// GcPassAfterBusy uses; without the add hook (either key) nothing is held. Never held: what the spread never defers (first render, flush, unknown
+// position, near, forced); anything while Altar's loading mode is on or unknown (it keeps the world ticking behind a door or a
+// fast travel; its end flushes for 1 s, as a tick gap does: everything pending goes in that second);
+// zones with local-only tessellation (their marks follow the camera, not crossings; the flag's offset +0x2E0 is read from
+// GetDynamicWaterMeshCenter's code, else nothing is held). Later UE (5.4-5.7, ue5-main): Update and the subsystem tick are unchanged (one update per zone per
+// frame on a set flag, no coalescing or budget). Readers of what is held: only the water bodies' materials (texture parameter
+// WaterVelocityAndHeight, scalars WaterZMin/Max, GroundZMin; WaterBodyComponent.cpp:1725-1745): render only, no gameplay.
+// EQUIVALENT: intermediate textures of a crossing are not drawn; the final one has the same inputs as stock's last redraw.
 #include "common.h"
 #include "water_zone.h"
 
@@ -74,6 +94,14 @@ constexpr const char* kBoundsPro = "48 83 EC 38 48 8B 81 ?? ?? ?? ?? 0F 29 74 24
 // UWaterSubsystem::Tick (FTickableGameObject slot): mov r11,rsp; push rbp; push r13; lea rbp,[r11-5Fh]; sub rsp,0E8h; cookie
 constexpr const char* kTickPro = "4C 8B DC 55 41 55 49 8D 6B A1 48 81 EC E8 00 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 45 F7 49";
 
+// AWaterZone::GetDynamicWaterMeshCenter: sub rsp,28h; cmp byte [rcx+bEnableLocalOnlyTessellation],0; je; movups xmm0,
+// [rcx+LocalTessellationCenter]; ...; ret; mov rax,[rcx+RootComponent]; ... (the root's location). WaterInfoAfterCrossing reads
+// the flag's offset from here (+6) and holds nothing unless it is kWaterZoneLocalTessellation.
+constexpr const char* kLocalCenter =
+    "48 83 EC 28 80 B9 ?? ?? ?? ?? 00 74 ?? 0F 10 81 10 03 00 00 48 8B C2 F2 0F 10 89 20 03 00 00 0F 11 02 F2 0F 11 4A 10 48 83 C4 "
+    "28 C3 48 8B 81 A0 01 00 00 48 85 C0 74 ?? 0F 10 80 80 02 00 00 0F 11 04 24 0F 10 80 90 02 00 00";
+constexpr size_t kLocalCenterFlag = 6;
+
 using UwitFn = bool (*)(void* zone);
 using BoundsFn = void* (*)(const void* zone, double* box);  // FBox2D {Min.X, Min.Y, Max.X, Max.Y, bool bIsValid}
 using TickFn = void (*)(void* self, float dt);
@@ -87,6 +115,11 @@ void** g_tickSlot = nullptr;
 bool g_installed = false;
 
 std::atomic<int> g_mode{0}, g_perFrame{1}, g_maxFrames{4}, g_mergeMs{250}, g_nearM{-1};
+std::atomic<int> g_afterMs{0}, g_quietMs{150};       // WaterInfoAfterCrossing (0 = off) and its quiet window
+std::atomic<double> g_lastStreamMs{-1e30};           // game thread: the last level add / remove step seen by the stream hooks
+std::atomic<bool> g_stream{false};                   // a stream hook has reported at least once (for the log line)
+std::atomic<int> g_localState{0};                    // bEnableLocalOnlyTessellation's offset confirmed: 0 not checked, 1 yes, -1 no
+int (*g_testLoading)() = nullptr;                    // self-test: the loading mode
 
 // Test hooks (self-test only)
 double (*g_testNow)() = nullptr;
@@ -120,6 +153,8 @@ struct Zone {
     uint64_t askFrame = 0;       // frame the wait began: the frame bound counts from here
     uint64_t seenFrame = 0;      // last frame it asked
     bool pending = false, everGo = false, merging = false;
+    bool crossing = false;       // held by WaterInfoAfterCrossing now
+    bool crossDone = false;      // this request was held through a crossing and released (no merge hold, frame bound restarted)
 };
 
 // Game thread only (UWaterSubsystem::Tick)
@@ -130,11 +165,13 @@ struct State {
     const void* subsystem = nullptr;
     int goThisFrame = 0;
     const Zone* prio = nullptr;  // the oldest waiting zone at the frame's start
+    int loading = -1, loadingPrev = -1;  // Altar's loading mode this frame / last frame (WaterInfoAfterCrossing on only)
 } s;
 
 struct Stats {
     std::atomic<uint64_t> asks{0}, waits{0}, goNow{0}, goHeld{0}, goBound{0}, heldFrames{0},
-        maxFrames{0}, heldUs{0}, maxUs{0}, first{0}, nearGo{0}, noPos{0}, flushGo{0}, flushes{0}, forced{0};
+        maxFrames{0}, heldUs{0}, maxUs{0}, first{0}, nearGo{0}, noPos{0}, flushGo{0}, flushes{0}, forced{0},
+        crossHeld{0}, crossQuiet{0}, crossBound{0}, crossMaxUs{0}, streamNotes{0}, loadEnds{0};
 } st;
 
 void Max(std::atomic<uint64_t>& a, uint64_t v)
@@ -172,14 +209,15 @@ double DistM(const uint8_t* z, double px, double py)
     return std::sqrt(dx * dx + dy * dy) / 100.0;
 }
 
-enum class Why { kGo, kFirst, kFlush, kNoPos, kNear, kBound, kMergeHold, kSlot, kOlder };
+enum class Why { kGo, kFirst, kFlush, kNoPos, kNear, kBound, kMergeHold, kSlot, kOlder, kCrossing };
 
 Why Decide(Zone& e, const uint8_t* z, int mode, double now, double* distOut)
 {
     *distOut = -1;
     if (!*reinterpret_cast<void* const*>(z + g_texOff)) return Why::kFirst;
     if (now < s.flushUntilMs) return Why::kFlush;
-    if (!(mode & 3)) return Why::kGo;
+    const int after = std::min(1000, std::max(0, g_afterMs.load(std::memory_order_relaxed)));
+    if (!(mode & 3) && !after) return Why::kGo;
     double px = 0, py = 0;
     const bool pos = PlayerXY(&px, &py);
     const double d = pos ? DistM(z, px, py) : -1;
@@ -187,7 +225,32 @@ Why Decide(Zone& e, const uint8_t* z, int mode, double now, double* distOut)
     if (!pos) return Why::kNoPos;
     const int nearM = g_nearM.load(std::memory_order_relaxed);
     if (nearM >= 0 && d <= nearM) return Why::kNear;
-    if ((mode & 2) && e.everGo) {
+    // WaterInfoAfterCrossing: held while levels are being added or removed, at most `after` ms from the first ask
+    if (after && !e.crossDone) {
+        const double quiet = std::min(500, std::max(16, g_quietMs.load(std::memory_order_relaxed)));
+        const bool streaming = now - g_lastStreamMs.load(std::memory_order_relaxed) < quiet;
+        const bool may = s.loading == 0 && g_localState.load(std::memory_order_relaxed) == 1 && !z[kWaterZoneLocalTessellation];
+        if (may && streaming && now - e.pendMs < after) {
+            if (!e.crossing) st.crossHeld.fetch_add(1, std::memory_order_relaxed);
+            e.crossing = true;
+            return Why::kCrossing;
+        }
+        if (e.crossing) {  // released: by the quiet frames, or by the bound while the crossing goes on
+            e.crossing = false;
+            e.crossDone = true;
+            e.merging = false;     // a merge hold before the crossing is over too
+            e.askFrame = s.frame;  // the spread's frame bound counts from here: released zones still go one per frame
+            (streaming ? st.crossBound : st.crossQuiet).fetch_add(1, std::memory_order_relaxed);
+            Max(st.crossMaxUs, static_cast<uint64_t>((now - e.pendMs) * 1000.0));
+        }
+    }
+    if (!after && e.crossing) {  // switched off live while held: the spread's rules (or at once), its frame bound restarted
+        e.crossing = false;
+        e.crossDone = true;
+        e.askFrame = s.frame;
+    }
+    if (!(mode & 3)) return Why::kGo;
+    if ((mode & 2) && e.everGo && !e.crossDone) {
         const double merge = std::min(1000, std::max(0, g_mergeMs.load(std::memory_order_relaxed)));
         if (now - e.lastGoMs < merge) {
             e.merging = true;
@@ -202,7 +265,7 @@ Why Decide(Zone& e, const uint8_t* z, int mode, double now, double* distOut)
         // pendFrame, which the merge hold moves, the hold and the spread added up: 14-16 frames / 245-274 ms in play1107d).
         if (s.frame - e.askFrame >= maxF) return Why::kBound;
         if (s.goThisFrame >= std::max(1, g_perFrame.load(std::memory_order_relaxed))) return Why::kSlot;
-        if (s.prio && s.prio != &e && s.prio->pending && s.prio->seenFrame + 1 >= s.frame) return Why::kOlder;
+        if (s.prio && s.prio != &e && s.prio->pending && !s.prio->crossing && s.prio->seenFrame + 1 >= s.frame) return Why::kOlder;
     }
     return Why::kGo;
 }
@@ -211,7 +274,7 @@ Why Decide(Zone& e, const uint8_t* z, int mode, double now, double* distOut)
 bool WaterSpreadHook(void* zone)
 {
     const int mode = g_mode.load(std::memory_order_relaxed);
-    if (!mode) return g_uwit(zone);
+    if (!mode && g_afterMs.load(std::memory_order_relaxed) <= 0) return g_uwit(zone);
     const uint8_t* z = static_cast<const uint8_t*>(zone);
     if (!z[g_flagOff]) {  // forced by the console variable only
         st.forced.fetch_add(1, std::memory_order_relaxed);
@@ -229,7 +292,7 @@ bool WaterSpreadHook(void* zone)
     e.seenFrame = s.frame;
     double dist = -1;
     const Why w = Decide(e, z, mode, now, &dist);
-    if (w == Why::kMergeHold || w == Why::kSlot || w == Why::kOlder) {
+    if (w == Why::kMergeHold || w == Why::kSlot || w == Why::kOlder || w == Why::kCrossing) {
         st.waits.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
@@ -259,6 +322,8 @@ bool WaterSpreadHook(void* zone)
     if (r) {  // a failed update keeps the request (and its first ask): it goes again next frame by the bound, as stock retries
         e.pending = false;
         e.merging = false;
+        e.crossing = false;
+        e.crossDone = false;
         e.everGo = true;
         e.lastGoMs = now;
         e.tex = *reinterpret_cast<void* const*>(z + g_texOff);
@@ -280,10 +345,30 @@ void TickStart(void* self)
         s.subsystem = self;
     }
     s.lastTickMs = now;
+    // WaterInfoAfterCrossing: Altar's loading mode, read once a frame; its end flushes as a tick gap does
+    if (g_afterMs.load(std::memory_order_relaxed) > 0) {
+        s.loading = g_testLoading ? g_testLoading() : StreamLoadingModeNow();
+        if (s.loadingPrev == 1 && s.loading != 1) {
+            s.flushUntilMs = now + 1000.0;
+            st.flushes.fetch_add(1, std::memory_order_relaxed);
+            st.loadEnds.fetch_add(1, std::memory_order_relaxed);
+        }
+        s.loadingPrev = s.loading;
+        // Diagnosis (once): steps are seen (the removal hook) but the loading mode can't be read for a while: nothing is held
+        static int unknownTicks = 0;
+        if (s.loading == -1 && g_stream.load(std::memory_order_relaxed) && unknownTicks >= 0 && ++unknownTicks >= 600 &&
+            !g_testLoading) {
+            unknownTicks = -1;
+            Log("[waterspread] WaterInfoAfterCrossing: Altar's loading mode can't be read (no AddToWorld hook: StreamRegisterGranularity "
+                "and StreamInBudget off, or its console variable not found): nothing is held");
+        }
+    } else {
+        s.loading = s.loadingPrev = -1;
+    }
     // The oldest zone that waited last frame (merge holds excluded) is served first this frame.
     s.prio = nullptr;
     for (const Zone& e : s.zones)
-        if (e.pending && !e.merging && e.seenFrame + 1 == s.frame && (!s.prio || e.pendFrame < s.prio->pendFrame)) s.prio = &e;
+        if (e.pending && !e.merging && !e.crossing && e.seenFrame + 1 == s.frame && (!s.prio || e.pendFrame < s.prio->pendFrame)) s.prio = &e;
 }
 
 void TickHook(void* self, float dt)
@@ -397,11 +482,39 @@ bool Install(const GameModule& game, const char** why)
 
 }  // namespace
 
+namespace {
+// bEnableLocalOnlyTessellation's offset as GetDynamicWaterMeshCenter reads it (0 = not found once)
+uint32_t FindLocalTessOffset(const GameModule& game)
+{
+    const auto m = FindAll(game.text, ParsePattern(kLocalCenter));
+    if (m.size() != 1) return 0;
+    uint32_t off;
+    memcpy(&off, m[0] + kLocalCenterFlag, 4);
+    return off;
+}
+// Once, when the hold is first wanted (start-up or a live switch-on): confirms the offset Decide reads in every zone
+void CheckLocalTess()
+{
+    int expected = 0;
+    if (!g_localState.compare_exchange_strong(expected, 2)) return;  // checked (or being checked)
+    const uint32_t off = FindLocalTessOffset(Game());
+    const bool ok = off == kWaterZoneLocalTessellation;
+    g_localState = ok ? 1 : -1;
+    if (!ok)
+        Log("[waterspread] WaterInfoAfterCrossing: the water zone's local-tessellation flag is not where expected (%s): nothing is held",
+            off ? "another offset" : "GetDynamicWaterMeshCenter not found once");
+}
+}  // namespace
+
 // Start-up only (version.dll route: the call is patched before the game's code runs). mode 0 = not installed.
 bool InstallWaterInfoSpread(bool beforeGameCode, int mode, int nearM, int perFrame, int maxFrames, int mergeMs)
 {
-    if (!mode) { Log("[waterspread] WaterInfoSpread off in OblivionPerfFix.ini (takes a restart to switch on)"); return false; }
-    if (!beforeGameCode) { Log("[waterspread] WaterInfoSpread: start-up only (version.dll), not installed"); return false; }
+    // Installed when either key wants the call site: WaterInfoSpread, or WaterInfoAfterCrossing (set before this call)
+    if (!mode && g_afterMs.load() <= 0) {
+        Log("[waterspread] WaterInfoSpread and WaterInfoAfterCrossing off in OblivionPerfFix.ini (takes a restart to switch on)");
+        return false;
+    }
+    if (!beforeGameCode) { Log("[waterspread] WaterInfoSpread: start-up only (loaded late here), not installed"); return false; }
     const GameModule& game = Game();
     const char* why = "";
     if (!Install(game, &why)) {
@@ -409,13 +522,44 @@ bool InstallWaterInfoSpread(bool beforeGameCode, int mode, int nearM, int perFra
         return false;
     }
     g_installed = true;
+    if (g_afterMs.load() > 0) CheckLocalTess();
     SetWaterInfoSpread(mode, nearM, perFrame, maxFrames, mergeMs);
     Log("[waterspread] WaterInfoSpread installed: call exe+0x%X -> UpdateWaterInfoTexture exe+0x%X, tick slot exe+0x%X (exe+0x%X), "
-        "zone flag +0x%X, texture +0x%X (layout shared with WaterInfoSkip); mode %d, near %d m (live)",
+        "zone flag +0x%X, texture +0x%X (layout shared with WaterInfoSkip); mode %d, near %d m, after crossing %d ms (live)",
         static_cast<unsigned>(g_site - game.base), static_cast<unsigned>(reinterpret_cast<uint8_t*>(g_uwit) - game.base),
         static_cast<unsigned>(reinterpret_cast<uint8_t*>(g_tickSlot) - game.base),
-        static_cast<unsigned>(reinterpret_cast<uint8_t*>(g_tick) - game.base), g_flagOff, g_texOff, g_mode.load(), g_nearM.load());
+        static_cast<unsigned>(reinterpret_cast<uint8_t*>(g_tick) - game.base), g_flagOff, g_texOff, g_mode.load(), g_nearM.load(),
+        g_afterMs.load());
     return true;
+}
+
+
+// WaterInfoAfterCrossing: the bound in ms (0 = off, max 1000) and the quiet window (16-500 ms). Monitor thread, and once before
+// InstallWaterInfoSpread (it decides whether the call site is installed when WaterInfoSpread is 0). Live once installed; a
+// request held when it is switched off goes through the spread (or at once) at its next ask.
+void SetWaterInfoAfterCrossing(int afterMs, int quietMs)
+{
+    afterMs = std::clamp(afterMs, 0, 1000);
+    g_quietMs = std::clamp(quietMs, 16, 500);
+    if (afterMs > 0 && g_installed) CheckLocalTess();
+    if (g_afterMs.exchange(afterMs) != afterMs && g_installed)
+        Log("[waterspread] WaterInfoAfterCrossing=%d ms (quiet %d ms)%s", afterMs, g_quietMs.load(),
+            g_stream.load() ? "" : ": no stream hook in place (StreamOutEndPlaySlice / StreamRegisterGranularity off), nothing is held");
+}
+
+// Game thread, from the stream hooks: a level is being added to or removed from the world in this frame.
+void WaterCrossingNoteStream()
+{
+    g_stream.store(true, std::memory_order_relaxed);
+    g_lastStreamMs.store(NowMs(), std::memory_order_relaxed);
+    st.streamNotes.fetch_add(1, std::memory_order_relaxed);
+}
+// The AddToWorld hook times its calls for us while the hold is on (a call that did >= 50 us of work is a step)
+bool WaterCrossingWatching() { return g_installed && g_afterMs.load(std::memory_order_relaxed) > 0; }
+void WaterCrossingNoteAdd(int64_t qpcTicks)
+{
+    static const double perUs = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return static_cast<double>(f.QuadPart) / 1e6; }();
+    if (qpcTicks > 0 && static_cast<double>(qpcTicks) / perUs >= 50.0) WaterCrossingNoteStream();
 }
 
 // Monitor thread (live once installed). A change of value takes effect at the zone's next ask; requests left waiting when it is
@@ -453,9 +597,17 @@ void LogWaterInfoSpreadStats()
         static_cast<unsigned long long>(st.nearGo.load()), static_cast<unsigned long long>(st.noPos.load()),
         static_cast<unsigned long long>(st.flushGo.load()), static_cast<unsigned long long>(st.flushes.load()),
         static_cast<unsigned long long>(st.forced.load()));
+    if (g_afterMs.load() > 0 || st.crossHeld.load())
+        Log("[waterspread] WaterInfoAfterCrossing %d ms: requests held through a crossing %llu, released after the quiet frames %llu, "
+            "by the bound %llu, max %.1f ms from the first ask; stream steps seen %llu; loading-mode ends flushed %llu",
+            g_afterMs.load(), static_cast<unsigned long long>(st.crossHeld.load()),
+            static_cast<unsigned long long>(st.crossQuiet.load()), static_cast<unsigned long long>(st.crossBound.load()),
+            double(st.crossMaxUs.load()) / 1000.0, static_cast<unsigned long long>(st.streamNotes.load()),
+            static_cast<unsigned long long>(st.loadEnds.load()));
 }
 
 // ---- self-test ----
+int WaterSpreadTestLocalTess(const GameModule& game) { return static_cast<int>(FindLocalTessOffset(game)); }
 int WaterSpreadTestDiscover(const GameModule& game, uint32_t* flag, uint32_t* tex, uint32_t* extents, uint32_t* groundZ)
 {
     Found f;
@@ -477,6 +629,9 @@ bool TestPos(double* x, double* y) { *x = t_px; *y = t_py; return t_posOk; }
 int t_calls = 0;
 const void* t_last = nullptr;
 bool t_fail = false;  // the next update fails (returns false, as UpdateWaterInfoTexture can)
+int t_loading = 0;    // Altar's loading mode as the hold sees it
+int TestLoading() { return t_loading; }
+int t_crossBits = 0;  // failed checks of cases 21-26 (WaterInfoAfterCrossing review S1-S3, N1)
 bool TestUwit(void* zone)
 {
     ++t_calls;
@@ -505,6 +660,14 @@ int WaterSpreadTestLogic()
     const TickFn stk = g_tick;
     const uint32_t sf = g_flagOff, stx = g_texOff, sr = g_resOff;
     const int sMode = g_mode, sPer = g_perFrame, sMax = g_maxFrames, sMerge = g_mergeMs, sNear = g_nearM;
+    const int sAfter = g_afterMs, sQuiet = g_quietMs;
+    const double sLastStream = g_lastStreamMs;
+    const int sLocal = g_localState;
+    g_afterMs = 0;
+    g_localState = 1;  // the offset as confirmed in the game's code (checked on the mapped exe by the wrapper)
+    g_testLoading = TestLoading;
+    t_loading = 0;
+    t_crossBits = 0;
     g_uwit = TestUwit;
     g_bounds = TestBounds;
     g_tick = TestTick;
@@ -676,14 +839,204 @@ int WaterSpreadTestLogic()
         for (int k = 0; k < 6 && zones[1][F]; ++k) frame(1, none);
         if (zones[1][F]) fail |= 0x80000;
     }
+    // 13-20. WaterInfoAfterCrossing (waterlate): a request is held while stream steps come (QuietMs 150), at most AfterMs (500)
+    // from its first ask; released zones go one per frame (spread), within AfterMs + MaxFrames frames.
+    {
+        const bool c01[4] = {true, true, false, false};
+        const bool c0[4] = {true, false, false, false};
+        const bool c012[4] = {true, true, true, false};
+        auto firstGo = [&](int notesFrames, int maxFrames, const bool ask[4], int* goAt) {  // frame index of each zone's go
+            for (int i = 0; i < 4; ++i) goAt[i] = -1;
+            for (int k = 0; k < maxFrames; ++k) {
+                if (k < notesFrames) WaterCrossingNoteStream();
+                const int w = frame(1, k == 0 ? ask : none);
+                for (int i = 0; i < 4; ++i) if ((w >> i & 1) && goAt[i] < 0) goAt[i] = k;
+            }
+        };
+        int at[4];
+        g_mode = 3; g_perFrame = 1; g_maxFrames = 4; g_mergeMs = 250; g_nearM = -1; g_afterMs = 500; g_quietMs = 150;
+        // 13. the crossing ends after 6 frames of steps: both held through them, then zone 0 once the 150 ms are quiet, zone 1 next
+        settle();
+        g_lastStreamMs = -1e30;
+        firstGo(6, 40, c01, at);
+        // last note before frame 5 (t5 - 16.7); quiet when now - last >= 150: frame 5 + 9 - 1 = 13 at 16.7 ms steps
+        if (at[0] < 13 || at[0] > 14 || at[1] != at[0] + 1 || zones[0][F] || zones[1][F]) fail |= 0x200000;
+        // 14. steps never stop: held until the bound (500 ms = frame 30 from the first ask), then it goes
+        settle();
+        firstGo(60, 60, c0, at);
+        if (at[0] < 29 || at[0] > 31 || zones[0][F]) fail |= 0x400000;
+        // 15. three zones at the bound: one per frame, all within AfterMs + MaxFrames frames
+        settle();
+        firstGo(60, 60, c012, at);
+        if (at[0] < 29 || at[1] != at[0] + 1 || at[2] != at[1] + 1 || at[2] > 30 + 4 || zones[2][F]) fail |= 0x800000;
+        // 16. off (0): steps do not hold anything
+        g_afterMs = 0;
+        settle();
+        firstGo(10, 3, c0, at);
+        if (at[0] != 0) fail |= 0x1000000;
+        g_afterMs = 500;
+        // 17. never held: the zone the player stands in with NearM 0; a first render (no texture yet)
+        g_nearM = 0;
+        settle();
+        {
+            const bool c3[4] = {false, false, false, true};
+            firstGo(10, 3, c3, at);
+            if (at[3] != 0) fail |= 0x2000000;
+            void* const keep = *reinterpret_cast<void**>(zones[2] + T);
+            *reinterpret_cast<void**>(zones[2] + T) = nullptr;
+            const bool c2[4] = {false, false, true, false};
+            firstGo(10, 3, c2, at);
+            if (at[2] != 0) fail |= 0x2000000;
+            *reinterpret_cast<void**>(zones[2] + T) = keep ? keep : &oldTex;
+        }
+        g_nearM = -1;
+        // 18. WaterInfoSpread 0 with the hold on: held through the steps, then both go together (no spread), as stock would
+        g_mode = 0;
+        settle();
+        firstGo(6, 40, c01, at);
+        if (at[0] < 13 || at[0] > 14 || at[1] != at[0] || zones[0][F] || zones[1][F]) fail |= 0x4000000;
+        g_mode = 3;
+        // 19. no merge hold after a crossing hold: zone 0 updates, steps begin, it asks again 2 frames later; it goes as soon as
+        // the steps have been quiet 150 ms (about 200 ms after its update), not at the 250 ms merge time
+        settle();
+        g_lastStreamMs = -1e30;
+        if (frame(1, c0) != 0x1) fail |= 0x8000000;
+        WaterCrossingNoteStream();
+        frame(1, none);
+        WaterCrossingNoteStream();
+        int went = frame(1, c0), k = 2;  // its new ask (held)
+        for (; k < 40 && !went; ++k) went = frame(1, none);
+        // last step stamped at frame 1 (one frame before the ask); quiet from frame 10 = ~167 ms after the update (merge: 250 ms)
+        if (went != 0x1 || k > 12) fail |= 0x8000000;
+        // 20. no stream step ever seen: nothing is held
+        settle();
+        g_lastStreamMs = -1e30;
+        firstGo(0, 3, c0, at);
+        if (at[0] != 0) fail |= 0x10000000;
+        // 21. (R1) switched off live while held: goes at its next ask, within MaxFrames frames
+        settle();
+        {
+            int goAt = -1;
+            for (int q = 0; q < 20; ++q) {
+                WaterCrossingNoteStream();
+                if (q == 5) g_afterMs = 0;
+                const int w = frame(1, q == 0 ? c0 : none);
+                if ((w & 1) && goAt < 0) goAt = q;
+            }
+            if (goAt < 5 || goAt > 9 || zones[0][F]) t_crossBits |= 0x1;
+            g_afterMs = 500;
+        }
+        // 22. (R1) the update fails at the release: asked again next frames and not held again, although steps come back
+        settle();
+        {
+            int firstCall = -1, doneAt = -1;
+            for (int q = 0; q < 40 && doneAt < 0; ++q) {
+                if (q < 6 || q >= 14) WaterCrossingNoteStream();
+                t_fail = q >= 6 && q < 15;
+                const int c = t_calls;
+                frame(1, q == 0 ? c0 : none);
+                if (t_calls != c && firstCall < 0) firstCall = q;
+                if (firstCall >= 0 && !zones[0][F]) doneAt = q;
+            }
+            t_fail = false;
+            if (firstCall < 13 || firstCall > 14 || doneAt < 0 || doneAt > firstCall + 5) t_crossBits |= 0x2;
+        }
+        // 23. (R1) a tick gap while held flushes: it goes at once although steps go on; a new subsystem too
+        settle();
+        {
+            int goAt = -1;
+            for (int q = 0; q < 12; ++q) {
+                WaterCrossingNoteStream();
+                if (q == 5) t_now += 400;
+                const int w = frame(1, q == 0 ? c0 : none);
+                if ((w & 1) && goAt < 0) goAt = q;
+            }
+            if (goAt != 5) t_crossBits |= 0x4;
+            settle();
+            for (int q = 0; q < 3; ++q) { WaterCrossingNoteStream(); frame(1, q == 0 ? c0 : none); }
+            if (!zones[0][F]) t_crossBits |= 0x4;  // held
+            static int other;
+            WaterCrossingNoteStream();
+            t_now += 16.7;
+            TickHook(&other, 0.0167f);
+            const int c = t_calls;
+            if (WaterSpreadHook(zones[0])) zones[0][F] = 0;
+            if (t_calls != c + 1 || zones[0][F]) t_crossBits |= 0x4;
+        }
+        // 24. (S2) Altar's loading mode on or unknown: nothing held; its end flushes (a zone asking then goes at once)
+        settle();
+        t_loading = 1;
+        firstGo(10, 3, c0, at);
+        if (at[0] != 0) t_crossBits |= 0x8;
+        t_loading = -1;
+        settle();
+        firstGo(10, 3, c0, at);
+        if (at[0] != 0) t_crossBits |= 0x8;
+        t_loading = 1;
+        settle();
+        {
+            int goAt = -1;
+            for (int q = 0; q < 12; ++q) {
+                WaterCrossingNoteStream();
+                if (q == 4) t_loading = 0;
+                const int w = frame(1, q == 4 ? c0 : none);
+                if ((w & 1) && goAt < 0) goAt = q;
+            }
+            if (goAt != 4) t_crossBits |= 0x8;
+        }
+        t_loading = 0;
+        // 25. (S3) a zone with local-only tessellation is never held; the flag's offset not confirmed: nothing is held
+        settle();
+        zones[1][kWaterZoneLocalTessellation] = 1;
+        {
+            const bool c1[4] = {false, true, false, false};
+            firstGo(10, 3, c1, at);
+            if (at[1] != 0) t_crossBits |= 0x10;
+        }
+        zones[1][kWaterZoneLocalTessellation] = 0;
+        g_localState = -1;
+        settle();
+        firstGo(10, 3, c0, at);
+        if (at[0] != 0) t_crossBits |= 0x10;
+        g_localState = 1;
+        // 26. (N1) the spread's "older waits" does not wait for a zone that is itself held through a crossing (it became held
+        // after the frame's start picked it): a zone already released goes; with that zone not held, it waits as before
+        {
+            const State keep = s;
+            s = State{};
+            s.frame = 100;
+            s.zones.reserve(64);
+            s.zones.push_back(Zone{});
+            s.zones.push_back(Zone{});
+            Zone& za = s.zones[0];
+            Zone& zb = s.zones[1];
+            za.zone = zones[0]; za.pending = true; za.crossing = true; za.seenFrame = 100; za.pendFrame = 1;
+            zb.zone = zones[2]; zb.pending = true; zb.crossDone = true; zb.askFrame = 100; zb.pendFrame = 2; zb.seenFrame = 100;
+            s.prio = &za;
+            double dist = 0;
+            if (Decide(zb, zones[2], 1, t_now, &dist) != Why::kGo) t_crossBits |= 0x20;
+            za.crossing = false;
+            if (Decide(zb, zones[2], 1, t_now, &dist) != Why::kOlder) t_crossBits |= 0x20;
+            s = keep;
+            s.prio = nullptr;  // pointed into the replaced table; the next tick picks it again
+        }
+        settle();
+        if (t_crossBits) fail |= 0x40000000;
+        g_afterMs = 0;
+    }
     // 12. public values: only the spread and merge bits are kept (lab: also bit 4, the per-request log)
     if (Clean(3) != 3 || Clean(-1) != 0 || (Clean(7) & 3) != 3 || Clean(0) != 0) fail |= 0x100000;
     g_uwit = su; g_bounds = sb; g_tick = stk;
     g_flagOff = sf; g_texOff = stx; g_resOff = sr;
     g_testNow = nullptr; g_testPos = nullptr;
     g_mode = sMode; g_perFrame = sPer; g_maxFrames = sMax; g_mergeMs = sMerge; g_nearM = sNear;
+    g_afterMs = sAfter; g_quietMs = sQuiet; g_lastStreamMs = sLastStream;
+    g_localState = sLocal;
+    g_testLoading = nullptr;
     s = State{};
     return fail;
 }
+
+int WaterSpreadTestCrossingBits() { return t_crossBits; }
 
 }  // namespace opf

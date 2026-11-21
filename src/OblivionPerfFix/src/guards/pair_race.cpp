@@ -210,7 +210,7 @@ bool InstallPairRace(bool beforeGameCode, int fixKey, const wchar_t* iniPath)
     if (!fix) Log("[pairrace] PairReleaseOnce off in OblivionPerfFix.ini (takes a restart to switch on)");
     if (!probe && !fix) return false;
     if (!beforeGameCode) {
-        Log("[pairrace] PairReleaseOnce: start-up only (version.dll), not installed");
+        Log("[pairrace] PairReleaseOnce: start-up only (loaded late here), not installed");
         return false;
     }
     PairRaceDiscovery d{};
@@ -282,7 +282,7 @@ int PairReleaseOnceTestInstall()
         reinterpret_cast<RcxFn>(stubRun)(ringSession);
         reinterpret_cast<RcxFn>(stubRun)(emptySession);
         // the rax stub through a thunk: mov rax,rcx; call stub; ret
-        uint8_t* const thunk = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
+        uint8_t* const thunk = static_cast<uint8_t*>(RegisterOwnCode(VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE)));
         bool thunkRan = false;
         if (thunk) {
             const int64_t rel = stubDrain - (thunk + 8);
@@ -297,7 +297,7 @@ int PairReleaseOnceTestInstall()
                 reinterpret_cast<RcxFn>(thunk)(emptySession);
                 thunkRan = true;
             }
-            VirtualFree(thunk, 0, MEM_RELEASE);
+            FreeOwnCode(thunk);
         }
         if (g_count[0] != 1 || (thunkRan && g_count[1] != 2)) fail = 9;
     }

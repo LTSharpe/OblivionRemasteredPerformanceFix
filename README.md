@@ -57,8 +57,7 @@ Performance, frame generation, frame rate capped at 60; public scenes in `bench/
 | Imperial City Waterfront (`ic-spots`, `ic-waterfront-pass`): the one frame where an area's set-up meets waiting characters | every waiting character's clothes, hair and body steps in that frame | **a shorter frame** in our tests; the steps follow in the next frames | `PacingLeanFlowDrain` (pull request #25) |
 
 These compare 1.2.3 with those switches off and on (everything else on), not with the stock game, measured on
-pre-release builds with the same code for these switches. `PhysAnimNoEmptyLock` and `RigTraceReuse` need the
-`version.dll` route (with OBSE64 they stay off); `ChaosMaxPayloadSize` and `PacingLeanFlowDrain` work on both.
+pre-release builds with the same code for these switches. These work on both routes (`version.dll` and OBSE64).
 
 **New in 1.3.0.** Against 1.2.4, all switches at their defaults (ours: RX 9070 XT, Ryzen 7 5800X, 4K, FSR Performance,
 frame generation, 60 cap, the public save-free flights `showcase` and `bravil-road`, 3 fresh games each): the Imperial
@@ -121,7 +120,7 @@ we expect those rows to be unchanged or better now; we have not re-measured them
 |---|---|
 | Steam, no mod manager | the four steps above |
 | Vortex or Mod Organizer 2 | install the same zip as a mod: it has the game's folder layout. In Mod Organizer 2 the files must land in the game's folder, not in `Data` (use its Root Builder plugin, or extract by hand) |
-| OBSE64, or another mod that already uses `version.dll` (some upscaler mods do) | don't overwrite that `version.dll`: download `OblivionPerfFix-<version>-OBSE.zip` instead and extract it into the game folder. It puts `OblivionPerfFix.dll` and its ini into `OblivionRemastered\Binaries\Win64\OBSE\Plugins\`, where OBSE64 loads it. Many fixes can only be put in place before the game's own code runs and stay off on this route ([which ones](#obse64-route-what-stays-off)); the log says so for each. If both are installed, the fix loads once |
+| OBSE64, or another mod that already uses `version.dll` (some upscaler mods do) | don't overwrite that `version.dll`: download `OblivionPerfFix-<version>-OBSE.zip` instead and extract it into the game folder. It puts `OblivionPerfFix.dll` and its ini into `OblivionRemastered\Binaries\Win64\OBSE\Plugins\`, where OBSE64 loads it. The fixes work there as with `version.dll`, with a few exceptions ([which ones](#obse64-route-what-stays-off)); the log says so for each. If both are installed, the fix loads once |
 | Xbox / PC Game Pass (experimental) | download `OblivionPerfFix-<version>-GamePass.zip`; its files go into `OblivionRemastered\Binaries\WinGDK\` in the game's folder (usually `C:\XboxGames\The Elder Scrolls IV - Oblivion Remastered\`). Reported working by a few players; less tested than Steam: the log says which fixes found their code, and no log at all usually means it didn't load. A [test report](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/new/choose) helps everyone |
 | Steam Deck / Linux (one Linux report so far; Steam Deck untested) | as for Steam, then add `WINEDLLOVERRIDES="version=n,b" %command%` to the game's launch options |
 
@@ -143,23 +142,23 @@ but not always:
 
 ### OBSE64 route: what stays off
 
-OBSE64 loads its plugins after the game's own code has started, and many fixes can only be put in place before that.
-With the OBSE package these stay off (the log says so for each): `ViewRenameGuard`, `NpcFadeInNoRebuild`, `FrozenClothStretchFix`, the four `WaterCapture*` fixes, `RayTracingBuildBatch`, `RtSceneBufferKeep`, `InstanceClearReserve`, `OsPageCache`, `NavLinkFast`, `ParallelStaticBodies`, `PipelinedBodyCreation`, `DirtyTreeQuickInsert`, `BulkIndexInsert`, `PhysicsPushParallel`, `PhysicsDestroyBatch`, `BodyRemovalSpread`, `StreamRegisterGranularity`, `PhysAnimNoEmptyLock`, `NpcBodiesOneLock`, `ClothRegisterLite`, `RigVmHashMemo`, `RigLogicMapCache`, `RigTraceReuse`, `AnimTeardownParallel`, `CellBufferPacedEvict`, `ClothBuildDefer`, `ScreenshotReadbackConvert`, `ScreenshotParallel`, `SaveBytesBulk`, `SaveRefIdIndex`, `MenuOpenFlashFix`, `ShaderScreenAfterDriverChange`, `BowSneakAttackFix`, `AutosaveFollowsMenu`, `SaveThumbLeftoverFix`, `FrameGenCameraInfo`, `FrameGenPacingTuning`, `TaskWaitDeadlockGuard` (and `PsoCompileThreadPool` and, since 1.4.0, `PsoPrecompileFast`, which need it), `PairReleaseOnce`, `MapPopupSpread`, `RepathParallel`, `WaterInfoSkip`, `WaterInfoSpread`, `LumenCardsNarrow`, `LumenScanCull`, `LooseMissCache`, `CreatePreload`, `OtFrameTrim`, `FarPawnMoveHalfRate` and `FarHorseMove`, `RigImportTemplate`, `CmdMemPregrow`, `ObjectReplaceCrashGuard`, and since 1.5.0 `StreamOutEndPlaySlice`, `ResetLoadersNoFlush`, `RowPreload`, `StreamInBudget`, `FadeInUnseen`, `PacingGateShownHoldMs`, `CellEvictSplit` and `IndirectArgBufferPool`, and the diagnostics `HitchLedger` and `HitchLedgerTickSplit`; `FrameGenAsyncCompute` keeps the game's value. The others work on both routes,
-among them `ChaosMaxPayloadSize`, `NpcCreationPacing`, `NaniteInitialRootPages`, `FrameRateLimitAtStart`
-and the Lumen, upload and GPU-scene memory fixes. If you can, use the `version.dll` package.
-
-**Updates:** track the mod on [Nexus Mods](https://www.nexusmods.com/oblivionremastered/mods/5709) (Vortex and Mod Organizer 2
-then show when a new version is out), or on GitHub choose *Watch > Custom > Releases*. To update, extract the new zip
-over the old files. If you changed settings in `OblivionPerfFix.ini`, set them again in the new one: new fixes come with
-new keys.
-
-Nothing else to set up: the defaults are what we recommend, and the fixes adapt to your PC (see
-[Compatibility](#compatibility)). Every fix has its own switch in `OblivionPerfFix.ini` (1 = on, 0 = off), explained in
-the file itself, which has three parts:
-1. **Performance improvements** (all on): the game's own work done in a cheaper way.
-2. **Game bug fixes** (on, except two that say why they are off): the game does what it was meant to. Set them to 0 to
-   stay closer to the stock game; leave the crash and freeze guards on.
-3. **Optional tweaks** (all off): they may change the look or how the game plays; switch one on only if you want it.
+OBSE64 calls its plugins on the game's main thread before the game's main code starts (after the program's own
+set-up, before the engine starts its threads). At start-up the DLL checks that it is on the main thread and that the
+engine has not started any thread yet, and logs it (a `[stage]` line); then every fix is put in place as with `version.dll`. A few cases stay off, and the log says so for each:
+- the plugin was loaded later than that (another tool loaded it, or a future OBSE64 changes when plugins load): the
+  `[stage]` line says "late", and the fixes that must be in place before the game starts stay off (as with OBSE packages
+  before this version). `NavQueryPriority` is one of them; the same setting then works as two lines in your Engine.ini
+  (`Documents\My Games\Oblivion Remastered\Saved\Config\Windows\Engine.ini`): `[SystemSettings]` and below it
+  `TaskGraph.TaskPriorities.NavTriggerAsyncQueries=nnn`;
+- AMD's frame-generation library was already loaded by another program before the game's start: the frame-generation
+  fixes (`FrameGenCrashGuard`, `FrameGenPacingTuning`, `FrameGenAsyncCompute`) stay off, as they would with `version.dll`;
+- `OsPageCache` (with `OsPageCacheAsyncRelease`) when its two patch sites cannot be switched in one step on a future game
+  build (the memory allocator is already running then);
+- another mod (for example UE4SS) has already put a hook where a fix would patch (its jump at or just before that place
+  in the game's code, or its pointer in one of the game's function tables): that fix stays off and a `[hook]` line names
+  the other mod (on both routes). A function another mod has hooked that a fix only calls is still used, through that
+  mod's hook.
+`IndirectArgBufferPool` works there too; the console then still shows the setting's old value (0), while the renderer uses 1.
 
 ## Optional: AMD ML frame generation (Radeon RX 9000)
 
@@ -269,6 +268,8 @@ tweaks (part 3, all off) change the look or the play on purpose, only if you swi
 | **Menus and loading screens** (1.3.0) | The map built its markers three to five times in one frame; a menu's background picture waited for a copy back from the graphics card; menus redrew every lake's water picture with nothing changed; the arriving area's first frame did all its first-time work as the loading screen faded | build the markers once, make the picture on the graphics card, skip unchanged water redraws, draw the area for 3 frames behind the loading screen |
 | **Lumen's object check** (1.4.0) | Every frame, Lumen checked, on the game's helper threads, whether each of its 1.5-2 million object groups in the open world should get or lose its surface cards, although almost none can change in a frame, and pushed the other threads' data out of the processor's caches doing it | skip blocks of groups that provably can't change this frame and let the game's own code check the rest (the approach of Unreal Engine 5.6.0, by Epic): the same requests, only work whose result is unchanged is removed (check mode found no difference in more than 170 million compared tasks; screenshots match the stock game within run-to-run variation at six of seven test views, at the seventh, a close-up in shadow, they differ, and we traced that to our test camera (it settles a fraction of a centimetre differently after each teleport), not to the fix: we found no difference attributable to the fix and none was noticed in play; we do not claim identical pictures); **the check takes 3-4 instead of 37-44 ms of processor time per frame, summed over the helper threads** (`bravil-road`, 4K, a first measurement: one run with the fix off, three on; the effect depends on the place; `LumenScanCull`; `LumenScanCull=0` switches it off) |
 | **Travel and crowds: waits for the disk and the engine** (1.5.0) | The first weapon hit on each surface, a returning creature's animations and the next row of cells were loaded in the foreground while the game waited; a cell you left, a bow draw and a new row of cells each cost one long frame; far characters' steps landed on frames that were already slow | load them in the background or ahead, as the 2006 game did, and spread or slim the work, mostly as later Unreal Engine versions (5.4-5.6) do (`ImpactPreload`, `CreatureAnimPreload`, `RowPreload`, `StreamOutEndPlaySlice`, `ResetLoadersNoFlush`, `StreamInBudget`, `FadeInUnseen`, `ParallelFileReads`, `IndirectArgBufferPool`, `CellEvictSplit`); our own character pacing is fixed (`PacingHairActor`, `PacingFlowProgress`, `CreatePreloadEarly`) and improved (`PacingBaseGate`, `PacingGateShownHoldMs`): **on our Imperial City flight the Waterfront's frames of 28 ms or more went from 19 to 10 per flight** (three flights each way, 4K, frame generation, 60 fps cap; ours); numbers per key are in [CHANGELOG.md](CHANGELOG.md) |
+| **Travel and crowds: characters, routes, physics, clean-up** (1.6.0) | A character was built in one piece when its cell was switched on (6-7 ms for a person, so a crowd came as a run of long frames); loose objects of a new cell read their files from disk in that frame; one long route search, or the path-search task queued behind ray-tracing builds (frames of 116 and 161 ms in our flights), could hold up a frame; a frame over 20 ms got a second physics step; the garbage collection pass fell on busy frames | build the first half of each character ahead in frames with time to spare; load the objects' files with the cells ahead; finish a long route search in the background; run the path-search task at normal priority (Epic's setting); one physics step up to 30 ms (Epic's settings; not bit for bit); let the clean-up pass wait for a calm frame and prepare it ahead; numbers per key are in [CHANGELOG.md](CHANGELOG.md) |
+| **Sounds and looks** (1.6.0, part 2 of the ini) | an NPC lighting a torch heard at full volume from anywhere, creature footsteps and traps without direction, another character's arrow hit heard at the shooter's bow ([#52](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/52)); a spell's colour left on your weapons and quiver after the effect ended ([#48](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/48)) | 3D sound for those 15 sound entries as the game's other world sounds have; the arrow hit heard once, where it hits; the leftover colour taken off once the effect has ended (game bugs, also without the mod) |
 | **Handhelds, integrated graphics** (1.2.4) | there the graphics use the PC's RAM, so the memory our fixes keep to avoid stutter can be missing for the game and Windows on 16 GB devices | on such a PC with Windows and under 20 GB of RAM, those fixes act as the game (`SharedMemoryGpu`; the 24 GB Ally X, Proton, CrossOver and Mac players are unaffected) |
 | **Crashes and bugs** (part 2 of the ini) | crashes in the game's name table, its trap code, Unreal's video-memory tidying (UE-217692) and AMD's frame generation library; FSR left off after an alt-tab; a bright flash when the menu opens; since 1.2.4 (pull requests #33 and #35 by Mishu117): no shader screen after a driver update, "Show VRAM" stuck at 0/0, the wrong native resolution of very wide monitors, bow sneak attacks at 1x, magenta specks on skin above 4K; since 1.3.0: a rare crash on arrival, menus opening slower after every fast travel | each guarded so the game carries on as it would have; FSR comes back by itself; the menu opens onto its normal background; the game does what it was meant to. Switch any of them off to stay closer to the stock game |
 | **Optional tweaks** (part 3 of the ini, all off) | trade-offs some players want: the world unfrozen behind the loading screen, streamed textures kept or uploaded faster, HDR gamma 2.2, HDR menu backgrounds and save thumbnails, HDR and HUD rows in the Graphics menu, DLSS Ray Reconstruction (pull requests #34 and #36 by Mishu117) | nothing unless you switch it on: they may change the look or how the game plays |
@@ -496,7 +497,7 @@ game update.
   then timed by what they update, every 2 seconds, into `OblivionPerfFix-ticksplit.csv` (about 0.3 MB a minute);
   `python tools\tick_split.py OblivionPerfFix-ticksplit.csv` ranks them (the script is in this GitHub repository, not in
   the mod's zips). It costs well under a microsecond per update (about 0.4 ms per frame in a big crowd) and nothing
-  when off. Only with the `version.dll` install (with OBSE64 it stays off). [How it works](docs/how-it-works.md#hitchledger).
+  when off. With both installs. [How it works](docs/how-it-works.md#hitchledger).
 - **Tried it on your PC?** A [test report](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/new/choose)
   (hardware, did it load, how it felt) helps us get out of beta.
 - **Want to measure?** Run the [benchmark kit](#check-it-on-your-pc-before--after) (`Benchmark.cmd`) and share its

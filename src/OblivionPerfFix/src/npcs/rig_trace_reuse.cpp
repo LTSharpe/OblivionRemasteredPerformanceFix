@@ -217,13 +217,13 @@ uint8_t* Detour(uint8_t* site, size_t prologue, void* hook, const char* what)
     memcpy(tramp + prologue + sizeof jmpAbs, &back, sizeof back);
     DWORD old;
     if (!VirtualProtect(region, 64, PAGE_EXECUTE_READ, &old)) {
-        VirtualFree(region, 0, MEM_RELEASE);
+        FreeOwnCode(region);
         Log("[rigtrace] %s: could not make the trampoline executable", what);
         return nullptr;
     }
     FlushInstructionCache(GetCurrentProcess(), region, 64);
     const int64_t rel = region - (site + 5);
-    if (rel != static_cast<int32_t>(rel)) { VirtualFree(region, 0, MEM_RELEASE); Log("[rigtrace] %s: out of reach", what); return nullptr; }
+    if (rel != static_cast<int32_t>(rel)) { FreeOwnCode(region); Log("[rigtrace] %s: out of reach", what); return nullptr; }
     return tramp;
 }
 bool Patch(uint8_t* site, uint8_t* region)
@@ -258,7 +258,7 @@ bool InstallRigTraceReuse(bool beforeGameCode, const wchar_t* iniPath)
     if (g_installed) return true;
     (void)iniPath;
     if (!beforeGameCode) {
-        Log("[rigtrace] RigTraceReuse: only installed when the game starts (version.dll route; not on the OBSE64 route): not installed");
+        Log("[rigtrace] RigTraceReuse: only installed when the game starts (loaded late here): not installed");
         return false;
     }
     const GameModule& game = Game();
@@ -276,8 +276,8 @@ bool InstallRigTraceReuse(bool beforeGameCode, const wchar_t* iniPath)
     uint8_t* const unitTramp = Detour(site, kPrologue, reinterpret_cast<void*>(&UnitHook), "the sphere-trace unit");
     uint8_t* const execTramp = Detour(exec, kExecPrologue, reinterpret_cast<void*>(&ExecHook), "UControlRig::Execute");
     if (!unitTramp || !execTramp) {
-        if (unitTramp) VirtualFree(unitTramp - 16, 0, MEM_RELEASE);
-        if (execTramp) VirtualFree(execTramp - 16, 0, MEM_RELEASE);
+        if (unitTramp) FreeOwnCode(unitTramp - 16);
+        if (execTramp) FreeOwnCode(execTramp - 16);
         Log("[rigtrace] RigTraceReuse not installed");
         return false;
     }

@@ -61,7 +61,7 @@ std::atomic<bool> g_useFrameFence{false};   // [Fixes] RdgFrameFence (hidden; us
 bool WriteSite(const uint8_t (&bytes)[4])
 {
     DWORD old;
-    if (!VirtualProtect(g_site, 4, PAGE_EXECUTE_READWRITE, &old)) return false;
+    if (!CodeSiteProtect(g_site, 4, &old)) return false;
     uint32_t value;
     memcpy(&value, bytes, 4);
     if ((reinterpret_cast<uintptr_t>(g_site) & 3) == 0)

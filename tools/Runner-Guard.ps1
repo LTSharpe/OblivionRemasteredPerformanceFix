@@ -190,7 +190,7 @@ else {
     Log "closing its game (pid $($game.Id); mod answering: $answered)"
     switch ($CloseAction) {
         'bench' { try { & (Join-Path $PSScriptRoot 'Run-Benchmark.ps1') -Close -Force *>&1 | ForEach-Object { Log "  $_" } } catch { Log "  -Close failed: $_" } }
-        'kill' { Stop-Process -Id $game.Id -Force -ErrorAction SilentlyContinue }
+        'kill' { $kr = Stop-GameProcess $game 15000; if ($kr) { Log "  $kr" } }
         'none' { }
     }
 }

@@ -456,7 +456,7 @@ bool Detour(uint8_t* at, const uint8_t* pro, size_t n, void* hook, void** orig, 
     *orig = tramp;  // before the write: the hook may run as soon as the bytes are in
     if (!WriteCode(at, std::span<const uint8_t>(detour, n))) {
         *orig = prev;
-        VirtualFree(tramp, 0, MEM_RELEASE);
+        FreeOwnCode(tramp);
         Log("[water] %s: could not write the entry detour, not hooked", what);
         return false;
     }
@@ -475,7 +475,7 @@ bool InstallEndFlushDetour(uint8_t* at)
     if (!stub) { Log("[water] WaterCaptureNoRhiFlush: no memory within reach of the game for the stub"); return false; }
     auto* tramp = static_cast<uint8_t*>(VirtualAlloc(nullptr, 64, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
     if (!tramp) {
-        VirtualFree(stub, 0, MEM_RELEASE);
+        FreeOwnCode(stub);
         Log("[water] WaterCaptureNoRhiFlush: no memory for the trampoline (error %lu)", GetLastError());
         return false;
     }
@@ -499,8 +499,8 @@ bool InstallEndFlushDetour(uint8_t* at)
     g_endFlush = reinterpret_cast<EndFlushFn>(tramp);
     if (!WriteCode(at, std::span<const uint8_t>(patch, kEndFlushMoved))) {
         g_endFlush = nullptr;
-        VirtualFree(tramp, 0, MEM_RELEASE);
-        VirtualFree(stub, 0, MEM_RELEASE);
+        FreeOwnCode(tramp);
+        FreeOwnCode(stub);
         Log("[water] WaterCaptureNoRhiFlush: could not write the entry jump");
         return false;
     }
@@ -520,7 +520,7 @@ bool InstallNearDetour(uint8_t* at, const uint8_t* pro, size_t proLen, size_t mo
     if (!stub) { Log("[water] %s: no memory within reach of the game for the stub", what); return false; }
     auto* tramp = static_cast<uint8_t*>(VirtualAlloc(nullptr, 64, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
     if (!tramp) {
-        VirtualFree(stub, 0, MEM_RELEASE);
+        FreeOwnCode(stub);
         Log("[water] %s: no memory for the trampoline (error %lu)", what, GetLastError());
         return false;
     }
@@ -545,8 +545,8 @@ bool InstallNearDetour(uint8_t* at, const uint8_t* pro, size_t proLen, size_t mo
     *orig = tramp;
     if (!WriteCode(at, std::span<const uint8_t>(patch, moved))) {
         *orig = prev;
-        VirtualFree(tramp, 0, MEM_RELEASE);
-        VirtualFree(stub, 0, MEM_RELEASE);
+        FreeOwnCode(tramp);
+        FreeOwnCode(stub);
         Log("[water] %s: could not write the entry jump", what);
         return false;
     }
@@ -572,7 +572,7 @@ void FakeRt(void*, const void*)  // what the water-info render does: FSR3's Post
 bool InstallWaterCapture(bool beforeGameCode, bool gtDetour)
 {
     if (!beforeGameCode) {
-        Log("[water] WaterCapture*: can only be installed at start-up (version.dll), not installed");
+        Log("[water] WaterCapture*: can only be installed at start-up (loaded late here), not installed");
         return false;
     }
     g_sites = FindSites();

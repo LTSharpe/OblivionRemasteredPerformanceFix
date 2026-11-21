@@ -175,7 +175,7 @@ void SetLooseMissCache(int mode) { g_mode.store(mode ? 1 : 0, std::memory_order_
 bool InstallLooseMissCache(bool beforeGameCode, int mode)
 {
     if (g_installed) return true;
-    if (!beforeGameCode) { Log("[loosemiss] LooseMissCache: start-up only (version.dll route), not installed"); return false; }
+    if (!beforeGameCode) { Log("[loosemiss] LooseMissCache: start-up only (loaded late here), not installed"); return false; }
     const char* why = "";
     if (!Install(Game(), &why)) {
         Log("[loosemiss] LooseMissCache: %s, not installed", why);

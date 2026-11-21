@@ -1,7 +1,7 @@
 // Diagnostic TickSplit ([Fixes] HitchLedgerTickSplit, default 0 = not installed; needs HitchLedger=1 at start-up; public
 // since 1.2.3, lab since 2026-10-16): splits the game thread's tick work by tick-function kind and ticked class, so the
-// ledger's single "TG_PrePhysics" number can be ranked by cause (tools/tick_split.py reads the csv). Start-up only,
-// version.dll route (the OBSE64 route logs it as not installed).
+// ledger's single "TG_PrePhysics" number can be ranked by cause (tools/tick_split.py reads the csv). Start-up only
+// (a late OBSE64 load logs it as not installed).
 //
 // What is timed (game thread only; no behaviour change, the hooks only read the clock around the game's own calls):
 //  - every FTickFunction::ExecuteTick run by the tick task (TGraphTask<FTickFunctionTask>::ExecuteTask exe+0x37C18C0,
@@ -809,7 +809,7 @@ bool InstallTickSplit(bool beforeGameCode, const wchar_t* dir)
     QueryPerformanceFrequency(&g_freq);
     if (dir) g_path = std::wstring(dir) + L"\\OblivionPerfFix-ticksplit.csv";
     if (!beforeGameCode) {
-        Log("[ticksplit] HitchLedgerTickSplit: can only be installed at start-up (version.dll), not installed");
+        Log("[ticksplit] HitchLedgerTickSplit: can only be installed at start-up (loaded late here), not installed");
         return false;
     }
     if (!LedgerClockUs() && !g_testClock) {

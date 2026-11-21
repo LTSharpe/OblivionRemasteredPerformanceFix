@@ -2562,7 +2562,15 @@ Game bugs (they also happen without OblivionPerfFix). Bugs in our own fixes are 
   direct pool made the engine create ~300 direct allocators again in 5 minutes on a roomy card (~60 MB), and ~960 in 6
   minutes over an ~8.2 GB budget, where each new one took fresh chunks from a paging driver and two scenes ran 9-19%
   slower than the stock game: direct and compute pools are never trimmed. (3) A second process patching the constructor entry first makes the fix stand
-  down ("the constructor is not the expected one").
+  down ("the constructor is not the expected one"). (4) The 20-s rule kept too few for rides (our bug, fix built after
+  1.5.0): after a load it left 12-20 copy allocators; a later texture-streaming burst re-made 15-24 at once, their first
+  command chunks queued on the driver's paging fence ahead of a new texture pool created under the D3D12 pool
+  allocator's lock (`TryAllocateInternal` > `CreateNewPool` > `FD3D12MemoryPool::Init`), and the render thread waited
+  30-50 ms for that lock (one of our sampled plays; not reproduced in a public scenario yet). `AllocatorTrimCopyFloor`
+  (live; 0 until the next release, which sets 64) stops give-backs below that many, counting those in use, except after
+  10 s over the budget; it never makes allocators. That it removes the holds is expected, not yet shown. Why 64: in our
+  own logs the copy need outside loads clusters at 48-63 with few intervals above. Cost about 64 MB (311 copy allocators
+  had freed 0.27 GB).
 
 <a id="cmdmempregrow"></a>
 

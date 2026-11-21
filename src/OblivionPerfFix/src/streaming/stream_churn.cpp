@@ -742,7 +742,7 @@ bool RedirectCall(uint8_t* call, uint8_t* stub, bool beforeGameCode)
     if (hi < qword + 8) {
         auto* q = reinterpret_cast<volatile LONG64*>(qword);
         DWORD old;
-        if (!VirtualProtect(reinterpret_cast<void*>(qword), 8, PAGE_EXECUTE_READWRITE, &old)) return false;
+        if (!CodeSiteProtect(reinterpret_cast<void*>(qword), 8, &old)) return false;
         const LONG64 before = *q;
         LONG64 after = before;
         for (size_t i = first; i <= last; ++i)

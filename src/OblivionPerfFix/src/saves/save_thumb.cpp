@@ -486,7 +486,7 @@ DWORD WINAPI Worker(void*)
             GpuMenuShotServicePixels(j->gpuShotGen, keep, j->w, j->h);
             if (keep == own) own = nullptr;
         }
-        if (own) VirtualFree(own, 0, MEM_RELEASE);
+        if (own) FreeOwnCode(own);
         Log("[savethumb] the save's %dx%d picture (%s route, %s) delivered off the game thread: GPU copy wait %.1f ms, "
             "conversion %.1f ms, the save's callbacks %.1f ms", j->w, j->h, j->hdr ? "HDR" : "SDR",
             st == 1 ? "async copy" : "read on the render thread", waitMs, convertMs, deliverMs);
@@ -899,7 +899,7 @@ bool GpuShotTakeOver(void* viewport, const void* rect, bool hdr)
         if (refPx && textures >= 1 && textures <= 4) GpuMenuShotVerify(job, refPx, w, h);
         else Log("[gpushot] compare: nothing to compare");
         FreeArray(ref);
-        if (own) VirtualFree(own, 0, MEM_RELEASE);
+        if (own) FreeOwnCode(own);
     }
     GpuMenuShotTaken(job, gt);
     return true;

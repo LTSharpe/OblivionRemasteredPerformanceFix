@@ -827,7 +827,7 @@ void LogLumenCardsNarrowStats()
 bool InstallLumenCardsNarrow(bool beforeGameCode, int key)
 {
     if (!key) { Log("[lumennarrow] LumenCardsNarrow off in OblivionPerfFix.ini (takes a restart to switch on)"); return false; }
-    if (!beforeGameCode) { Log("[lumennarrow] LumenCardsNarrow: start-up only (version.dll), not installed"); return false; }
+    if (!beforeGameCode) { Log("[lumennarrow] LumenCardsNarrow: start-up only (loaded late here), not installed"); return false; }
     const GameModule& game = Game();
     Sites f{};
     const char* why = "";
@@ -1080,7 +1080,7 @@ int LumenNarrowTestStub()
     if (x.reset(fakeLsd) != 1 || g_stubSeen.calls != 1 || g_stubSeen.a != fakeLsd || g_stubSeen.misaligned) fail |= 32;
     memcpy(fakeLsd + 0x67C, &maxNe, 4);
     if (x.reset(fakeLsd) != 0) fail |= 64;
-    VirtualFree(x.mem, 0, MEM_RELEASE);
+    FreeOwnCode(x.mem);
     return fail;
 }
 
@@ -1096,10 +1096,10 @@ int LumenNarrowTestUnwind(const GameModule& game)
     const size_t lenReset = BuildResetStub(mem + 512, reinterpret_cast<const void*>(&ResetTestTarget), kDispReset, mem + 4096);
     Sites f{};
     const char* why = "";
-    if (!Discover(game, &f, &why) || !DiscoverReset(game, f.o.list, f.o.groupList, &f.resetSite, &why)) { VirtualFree(mem, 0, MEM_RELEASE); return 1; }
+    if (!Discover(game, &f, &why) || !DiscoverReset(game, f.o.list, f.o.groupList, &f.resetSite, &why)) { FreeOwnCode(mem); return 1; }
     const uint8_t* const infoLoop = FindUnwindInfo(game, f.site);
     const uint8_t* const infoReset = FindUnwindInfo(game, f.resetSite);
-    if (!infoLoop || !infoReset) { VirtualFree(mem, 0, MEM_RELEASE); return 1; }
+    if (!infoLoop || !infoReset) { FreeOwnCode(mem); return 1; }
     if (!BuildUnwind(mem + 1024, infoLoop) || !BuildUnwind(mem + 1152, infoReset)) fail |= 2;
     auto* const table = reinterpret_cast<RUNTIME_FUNCTION*>(mem + 2048);
     table[0].BeginAddress = 0;
@@ -1130,7 +1130,7 @@ int LumenNarrowTestUnwind(const GameModule& game)
     Walk(mem + kStubCallReturn, 0x270, 8);
     Walk(mem + 512 + kResetCallReturn, 0x8F0, 16);
     RtlDeleteFunctionTable(table);
-    VirtualFree(mem, 0, MEM_RELEASE);
+    FreeOwnCode(mem);
     return fail;
 }
 
@@ -1765,11 +1765,11 @@ int LumenNarrowTestLogic()
     g_mode = 0;
     g_lastMode = 0;
     g_ready = false;
-    VirtualFree(x.mem, 0, MEM_RELEASE);
-    VirtualFree(g_slots, 0, MEM_RELEASE);
-    VirtualFree(g_own, 0, MEM_RELEASE);
-    VirtualFree(g_queueFull, 0, MEM_RELEASE);
-    VirtualFree(g_pairs, 0, MEM_RELEASE);
+    FreeOwnCode(x.mem);
+    FreeOwnCode(g_slots);
+    FreeOwnCode(g_own);
+    FreeOwnCode(g_queueFull);
+    FreeOwnCode(g_pairs);
     g_slots = nullptr;
     g_own = nullptr;
     g_queueFull = nullptr;

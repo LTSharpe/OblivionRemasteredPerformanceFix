@@ -206,7 +206,7 @@ bool Find(uint8_t** site, IpaFn* fn, uint32_t* solverOff, uint32_t* lockOff)
 bool InstallNpcBodiesOneLock(bool beforeGameCode)
 {
     if (g_installed) return true;
-    if (!beforeGameCode) return Fail("only installed while the game starts (version.dll)");
+    if (!beforeGameCode) return Fail("only installed while the game starts (loaded late here)");
     uint8_t* site = nullptr;
     IpaFn fn = nullptr;
     if (!Find(&site, &fn, &g_solverOff, &g_lockOff)) return false;

@@ -30,6 +30,19 @@
 // empty (measured: ~0.03 ms each). Nothing that is recorded or submitted changes; only when allocators are created and
 // destroyed. Switched live from the ini.
 //
+// The copy floor (AllocatorTrimCopyFloor, live; 0 = the rule above alone; added 2026-11-16; 0 in the shipped ini until the
+// release, which sets 64): outside the over-budget mode a pass never gives back copy allocators below the floor, counting
+// those in flight (give or take a release racing the pass: inFlight is read once before the pop). It only stops releases
+// and never makes allocators, so the pool can sit below it after a session start or an over-budget episode until the game
+// grows it again; raising the key live refills nothing. Why: the 20-s rule left 12-20, and a later streaming burst on a
+// ride re-made 15-24 at once; their first driver memory queued on the device's paging fence ahead of a new texture pool
+// that texture streaming creates with the pool allocator's lock held, and the render thread waited 30-50 ms for that lock
+// (both such stalls in one of our sampled plays, 2026-11-15; that the floor removes them is expected, not yet shown).
+// Our bug: the stock game never gives any back. In our logs the copy need outside loads sits under 64 in 95 % of the
+// one-minute stats intervals (a cluster at 48-63, steady streaming), and 64 leaves 33 of 1062 trim-caused re-makes in our
+// plays. About 1 MiB each on our AMD card (444 copy + 42 direct freed 0.50 GB, 2026-10-12): 64 cost about 64 MB, some
+// 45-50 MB over the old rule. Once the game has been over its budget for 10 s the floor gives way (3-s window, margin 2).
+//
 // Part 2 (ImmediateAllocatorLists, hidden, 0 = off): the immediate context, which the RHI thread finalizes before every
 // parallel-translated pass set (FRHICommandListImmediate::QueueAsyncCommandListSubmit -> ExecuteAndReset ->
 // RHIFinalizeContext), keeps its command allocator for that many command lists instead of taking a new one each time
@@ -103,6 +116,8 @@ constexpr int kReleaseGroup = 4;      // released together, then a pause
 constexpr int kReleasePauseMs = 25;
 constexpr int kPressureSeconds = 10;  // over (or back under) the budget this long in a row before the mode changes
 constexpr int kBuckets = 64;          // one-second maxima of the allocators in flight
+constexpr int kCopyFloorDefault = 64;  // AllocatorTrimCopyFloor's default (1.6.0; here, common.h, the ini)
+constexpr int kCopyFloorMax = 512;
 
 using ObtainFn = void* (*)(void* device, int queueType);
 using ReleaseFn = void (*)(void* device, void* allocator);
@@ -168,6 +183,7 @@ std::atomic<int> g_bucketIndex{0};
 std::atomic<bool> g_enabled{false};
 std::atomic<bool> g_failed{false};  // an exception in a trim pass: off until the game restarts (the ini cannot switch it on)
 std::atomic<int> g_windowSeconds{20};
+std::atomic<int> g_copyFloor{kCopyFloorDefault};  // no copy allocator is given back below this many (in flight + free), except over budget
 std::atomic<int> g_pressure{0};   // 1: VRAM over budget (MemoryRelief): short window, small margin
 std::atomic<bool> g_tight{false};   // video memory within AllocatorTrimHeadroomMB of the budget (always true when that is 0)
 std::atomic<ULONGLONG> g_lastObtainMs{0};
@@ -300,7 +316,7 @@ bool DetourWith(uint8_t* fn, const uint8_t (&prologue)[5], void* hook, int slot,
     const uintptr_t at = reinterpret_cast<uintptr_t>(fn);
     if ((at & 7) <= 3) {
         auto* q = reinterpret_cast<volatile LONG64*>(at & ~uintptr_t{7});
-        if (!VirtualProtect(const_cast<LONG64*>(q), 8, PAGE_EXECUTE_READWRITE, &old)) return false;
+        if (!CodeSiteProtect(const_cast<LONG64*>(q), 8, &old)) return false;
         const LONG64 before = *q;
         LONG64 after = before;
         memcpy(reinterpret_cast<uint8_t*>(&after) + (at & 7), jmp, sizeof jmp);
@@ -335,12 +351,41 @@ void* PopFree(uint8_t* pool)
     return item;
 }
 
+// The copy pool's keep rule: how many free (real) allocators a trim pass leaves in the pool. The window peak plus a
+// margin (max(8, peak/8); 2 over budget), and outside the over-budget mode at least the floor in all (in flight + free).
+int64_t CopyKeepFree(int64_t peak, int64_t inFlight, bool pressure, int floor)
+{
+    const int64_t margin = pressure ? 2 : (std::max<int64_t>)(8, peak / 8);
+    int64_t keep = peak + margin - inFlight;
+    if (!pressure) keep = (std::max<int64_t>)(keep, static_cast<int64_t>(floor) - inFlight);
+    return (std::max<int64_t>)(0, keep);
+}
+// Hysteresis: a pass runs only for a clear surplus (more than 8 over the keep, outside the over-budget mode).
+bool CopyHasSurplus(int64_t freeReal, int64_t keepFree, bool pressure) { return freeReal > keepFree + (pressure ? 0 : 8); }
+
 int64_t WindowPeak(const QueueStats& s, int seconds)
 {
     const int now = g_bucketIndex.load();
     int64_t peak = s.inFlight.load();
     for (int i = 0; i < seconds && i < kBuckets; ++i) peak = (std::max)(peak, s.bucket[(now - i + kBuckets) % kBuckets].load());
     return peak;
+}
+
+// The copy pool's whole decision for one tick, as the tick uses it (and the self-test checks it on a fake QueueStats):
+// the window (3 s over budget), the keep rule with the floor, the hysteresis. run = false: no pass this second.
+struct CopyPass {
+    int64_t peak = 0, real = 0, keepFree = 0;
+    bool run = false;
+};
+CopyPass DecideCopyPass(const QueueStats& s, bool pressure, int windowSeconds, int floor)
+{
+    CopyPass p;
+    p.peak = WindowPeak(s, pressure ? 3 : windowSeconds);
+    p.real = s.created.load() - s.trimmed.load();
+    const int64_t inFlight = s.inFlight.load();
+    p.keepFree = CopyKeepFree(p.peak, inFlight, pressure, floor);
+    p.run = CopyHasSurplus(p.real - inFlight, p.keepFree, pressure);
+    return p;
 }
 
 
@@ -533,6 +578,22 @@ void SetAllocatorTrim(bool enabled, int windowSeconds)
     g_windowSeconds = (std::max)(1, (std::min)(windowSeconds, kBuckets - 1));
 }
 
+void SetAllocatorTrimCopyFloor(int floor)
+{
+    floor = (std::max)(0, (std::min)(floor, kCopyFloorMax));
+    static bool logged = false;
+    if (g_copyFloor.exchange(floor) != floor || !logged) {
+        logged = true;
+        if (!g_enabled.load())
+            Log("[alloc] command allocator trim off: AllocatorTrimCopyFloor %d has nothing to do", floor);
+        else if (floor > 0)
+            Log("[alloc] command allocator trim: no copy allocator given back below %d, counting those in use "
+                "(AllocatorTrimCopyFloor; it makes none; not once video memory has been over budget for 10 s)", floor);
+        else
+            Log("[alloc] command allocator trim: copy pool floor off (AllocatorTrimCopyFloor=0: the 20-s peak and margin only)");
+    }
+}
+
 namespace {
 // The self-test's fake pool: the push stands for the engine's release (reset + push), and after the first push the
 // "engine" takes the top wrapper out again (another thread's obtain), as in the 19:42 crash of 2026-10-21.
@@ -655,6 +716,80 @@ const char* AllocatorTrimSelfTest()
         for (int i = 0; i < n; ++i) stillStub += w[i].d3d == &g_stub ? 1 : 0;
         expect(stillStub == 0, "give-back: stand-ins left after the regrowth");
     }
+    // The copy floor (AllocatorTrimCopyFloor 64). A play of 2026-11-15, 21:07:33: 48 free, window peak 11, none
+    // in flight: the old rule kept 19 (released 29); with the floor nothing goes.
+    expect(CopyKeepFree(11, 0, false, 0) == 19 && CopyHasSurplus(48, 19, false), "floor: off, the old rule (peak 11 keeps 19)");
+    expect(CopyKeepFree(11, 0, false, 64) == 64 && !CopyHasSurplus(48, 64, false), "floor: 48 free, peak 11: nothing released");
+    expect(CopyKeepFree(4, 0, false, 64) == 64 && CopyHasSurplus(100, 64, false), "floor: 100 free, peak 4: trimmed to 64");
+    expect(!CopyHasSurplus(72, 64, false) && CopyHasSurplus(73, 64, false), "floor: the hysteresis of 8 above it");
+    expect(CopyKeepFree(63, 0, false, 64) == 71, "floor: a peak over it keeps peak + margin (63 + 8)");
+    expect(CopyKeepFree(30, 30, false, 64) == 34, "floor: counts the ones in flight (30 + 34 = 64)");
+    expect(CopyKeepFree(80, 70, false, 64) == 20, "floor: more in flight than the floor: peak + margin");
+    expect(CopyKeepFree(4, 0, true, 64) == 6 && CopyHasSurplus(7, 6, true), "floor: over budget it gives way (peak 4 + 2)");
+    expect(CopyKeepFree(0, 5, true, 64) == 0, "floor: never negative");
+    {
+        // After a load: 878 free, the window peak 63 then 4 (play e 21:16): passes of at most 32 a second end at 64-72.
+        int64_t freeReal = 878;
+        for (int t = 0; t < 200; ++t) {
+            const int64_t peak = t < 10 ? 63 : 4;
+            const int64_t keep = CopyKeepFree(peak, 0, false, 64);
+            if (CopyHasSurplus(freeReal, keep, false)) freeReal -= (std::min<int64_t>)(kMaxTrimPerTick, freeReal - keep);
+        }
+        expect(freeReal >= 64 && freeReal <= 72, "floor: a pool after a load ends at 64-72");
+        freeReal = 878;
+        for (int t = 0; t < 200; ++t) {
+            const int64_t keep = CopyKeepFree(4, 0, true, 64);
+            if (CopyHasSurplus(freeReal, keep, true)) freeReal -= (std::min<int64_t>)(kMaxTrimPerTick, freeReal - keep);
+        }
+        expect(freeReal == 6, "floor: over budget the pool goes to peak + 2 as before");
+    }
+    {
+        // The tick's own decision (DecideCopyPass) on a fake copy queue, and its keep handed to the pass's marking on a pool
+        // of 48 (then 100) real wrappers: what the tick would release, not a re-implementation of it.
+        static QueueStats fs;
+        static FakeWrapper fw[100];
+        static int fd3d[100];
+        static void* fheld[100];
+        static void* frel[100];
+        static uint8_t fstand[100];
+        auto setStats = [&](int64_t created, int64_t inFlight, int64_t peak) {
+            fs.created = created;
+            fs.trimmed = 0;
+            fs.inFlight = inFlight;
+            for (auto& b : fs.bucket) b.store(0);
+            fs.bucket[g_bucketIndex.load() % kBuckets].store(peak);
+        };
+        auto released = [&](int n, int64_t keep) {
+            for (int i = 0; i < n; ++i) {
+                fw[i] = {nullptr, kCopyQueue, &fd3d[i]};
+                fheld[i] = &fw[i];
+            }
+            int real = 0;
+            return MarkStandIns(fheld, n, keep, kMaxTrimPerTick, frel, fstand, &real);
+        };
+        setStats(48, 0, 11);  // play e 21:07:33: 48 free, window peak 11
+        CopyPass p = DecideCopyPass(fs, false, 20, 64);
+        expect(!p.run && p.keepFree == 64 && p.real == 48, "floor (tick): 48 free, peak 11, floor 64: no pass");
+        p = DecideCopyPass(fs, false, 20, 0);
+        expect(p.run && p.keepFree == 19 && released(48, p.keepFree) == 29, "floor (tick): floor 0: the old rule releases 29");
+        p = DecideCopyPass(fs, true, 20, 64);
+        expect(p.run && p.keepFree == 13 && released(48, p.keepFree) == 32, "floor (tick): over budget the floor gives way (peak 11 + 2)");
+        setStats(100, 0, 4);
+        p = DecideCopyPass(fs, false, 20, 64);
+        expect(p.run && p.keepFree == 64 && released(100, p.keepFree) == 32, "floor (tick): 100 free: 32 released, the first 64 kept");
+        setStats(80, 0, 4);
+        p = DecideCopyPass(fs, false, 20, 64);
+        expect(p.run && released(80, p.keepFree) == 16, "floor (tick): 80 free: down to 64, not below");
+        setStats(60, 20, 20);
+        p = DecideCopyPass(fs, false, 20, 64);
+        expect(!p.run && p.keepFree == 44, "floor (tick): 20 in flight + 40 free = 60 under the floor: no pass");
+        const int wasFloor = g_copyFloor.load();
+        SetAllocatorTrimCopyFloor(-5);
+        expect(g_copyFloor.load() == 0, "floor: a negative value is off");
+        SetAllocatorTrimCopyFloor(100000);
+        expect(g_copyFloor.load() == kCopyFloorMax, "floor: clamped to 512");
+        g_copyFloor = wasFloor;
+    }
     // An exception in a trim pass switches the trim off until the game restarts: the per-second ini reload must not
     // switch it back on.
     const bool wasEnabled = g_enabled.load(), wasFailed = g_failed.load();
@@ -752,7 +887,6 @@ void AllocatorTrimTick()
     const ULONGLONG now = GetTickCount64();
     if (!device || now - g_lastObtainMs.load() > 250 || now - g_deviceSinceMs.load() < 30000) return;
     const bool pressure = g_pressure.load() != 0;
-    const int window = pressure ? 3 : g_windowSeconds.load();
     for (int q = 0; q < kQueues; ++q) {
         // The direct and compute pools are always kept at their peak, as the game does: their need comes back with every
         // busy scene (trimming them on a roomy card made the engine create ~300 again in 5 minutes for ~60 MB; over budget
@@ -761,14 +895,12 @@ void AllocatorTrimTick()
         if (q != kCopyQueue) continue;
         if (!pressure && !g_tight.load()) continue;
         QueueStats& s = g_q[q];
-        const int64_t peak = WindowPeak(s, window);
-        const int64_t margin = pressure ? 2 : (std::max<int64_t>)(8, peak / 8);
-        const int64_t real = s.created.load() - s.trimmed.load();
-        const int64_t freeReal = real - s.inFlight.load();
-        const int64_t keepFree = (std::max<int64_t>)(0, peak + margin - s.inFlight.load());
-        if (freeReal <= keepFree + (pressure ? 0 : 8)) continue;  // hysteresis: trim only a clear surplus
+        const int floor = g_copyFloor.load();
+        const CopyPass p = DecideCopyPass(s, pressure, g_windowSeconds.load(), floor);
+        if (!p.run) continue;  // hysteresis: trim only a clear surplus
+        const int64_t peak = p.peak, real = p.real;
         TrimResult r;
-        const int ok = TrimQueue(device, q, keepFree, kMaxTrimPerTick, g_held, g_standIn, g_toRelease, &r);
+        const int ok = TrimQueue(device, q, p.keepFree, kMaxTrimPerTick, g_held, g_standIn, g_toRelease, &r);
         g_trimPasses.fetch_add(1);
         if (ok < 0) {
             NoteTrimException(q);
@@ -782,8 +914,9 @@ void AllocatorTrimTick()
             QueryPerformanceFrequency(&f);
             QueryPerformanceCounter(&c);
             Log("[alloc] trim: %s queue: %d of %d free allocators released, %.1f ms in the driver (longest %.1f ms; window peak %lld "
-                "in flight%s; qpc %.1f ms)", names[q], r.swapped, r.real, r.releaseMs, r.longestOneMs, static_cast<long long>(peak),
-                pressure ? ", over budget" : "", c.QuadPart * 1000.0 / f.QuadPart);
+                "in flight, %lld left in all, floor %d%s; qpc %.1f ms)", names[q], r.swapped, r.real, r.releaseMs, r.longestOneMs,
+                static_cast<long long>(peak), static_cast<long long>(real - r.swapped), pressure ? 0 : floor,
+                pressure ? ", over budget: no floor" : "", c.QuadPart * 1000.0 / f.QuadPart);
         }
     }
 }
