@@ -1414,6 +1414,40 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
             $script:sceneCond = $c
         }
 
+        # A walk scene's "mount" (2026-11-23, the galloping challenge): { "id": "<horse base form>", "pattern": "Horse" }.
+        # After the teleport (a mounted player cannot be teleported: the old engine leaves the horse behind, the player
+        # stays put), placeatme puts a new horse 300 units away, the camera turns to it and the activate key mounts it,
+        # as a player does; the controller then drives the horse (its pawn class says so). A spawned horse starts to
+        # wander within seconds, so this happens at once, with up to four tries.
+        function Mount-Horse($scene) {
+            $m = $scene.mount
+            $pattern = "$(Opt $m 'pattern' 'Horse')"
+            Send-Bench "obv player.placeatme $($m.id) 1 300 0" | Out-Null
+            Wait-Game 3
+            for ($try = 1; $try -le 4; $try++) {
+                Send-Bench "aim 1000 $pattern front" | Out-Null
+                Wait-Game 1
+                Send-Bench "aim 1000 $pattern" | Out-Null
+                Send-Bench 'activate' | Out-Null
+                Wait-Game 4
+                $p = Send-Bench 'pawn' -NoThrow
+                if ($p -match 'pawn=BP_Horse') { Step "$($scene.id): mounted ($p, try $try)"; $script:mounted = $true; return $true }
+            }
+            Warn "$($scene.id): the player did not mount the horse in 4 tries ($p); the scene runs on foot"
+            $false
+        }
+        # Off the horse again (the activate key while riding), so that the next scene's teleport moves the player.
+        function Dismount-Horse([string]$id) {
+            if (-not $script:mounted) { return }
+            $script:mounted = $false
+            for ($try = 1; $try -le 3; $try++) {
+                Send-Bench 'activate' -NoThrow | Out-Null
+                Wait-Game 3
+                if ((Send-Bench 'pawn' -NoThrow) -notmatch 'pawn=BP_Horse') { return }
+            }
+            Warn "${id}: still on the horse after three dismount tries"
+        }
+
         function Set-Conditions($scene) {
             $script:sceneCond = $null
             if ($pinOn) { Set-PinnedConditions $scene; return }
@@ -1749,6 +1783,7 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
                 'walk' {
                     Step "scene $index/$($sceneList.Count): $($scene.id) (walk)"
                     Move-To $scene.at; Set-Conditions $scene
+                    if ($scene.PSObject.Properties['mount']) { [void](Mount-Horse $scene) }
                     Wait-Game $settle
                     $measure = [double](Opt $scene 'measure' $scn.defaults.measure)
                     $pts = (@($scene.waypoints) | ForEach-Object { "$($_[0]),$($_[1])" }) -join ' '
@@ -1764,6 +1799,8 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
                         $t0 = Get-QpcMs
                         $answer = Send-Bench "walk $(Opt $scene 'mode' 'inject') $measure $pts"
                         $clock0 = if ($answer -match 'clock=([\d.]+)') { [double]$Matches[1] } else { $null }
+                        # "press": input actions pressed once as the walk starts (e.g. the gallop toggle on a horse)
+                        foreach ($act in @(Opt $scene 'press' @())) { Wait-Game 0.5; Send-Bench "press $act" | Out-Null }
                         $sw = [Diagnostics.Stopwatch]::StartNew(); $done = $null
                         while (-not $done -and $sw.Elapsed.TotalSeconds -lt $measure + 5) {
                             $done = @(Get-BenchEvents $logPos | Where-Object { $_.Text -match '^walk=done' })[0]
@@ -1778,6 +1815,7 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
                     } finally {
                         Send-Bench 'walkstop' -NoThrow | Out-Null
                         Send-Bench 'watch 0' -NoThrow | Out-Null
+                        Dismount-Horse $scene.id
                         $script:place = $null
                     }
                 }
@@ -2159,7 +2197,7 @@ function Get-SceneSeconds($s) {
             foreach ($l in $legs) { $t += [double](Opt $l 'hold' $h) + 8 + $(if (Opt $l 'at' $null) { $settle + 4 } else { 0 }) }
             $t
         }
-        'walk'   { $settle + [double](Opt $s 'measure' $scn.defaults.measure) + 8 }
+        'walk'   { $settle + [double](Opt $s 'measure' $scn.defaults.measure) + 8 + $(if ($s.PSObject.Properties['mount']) { 15 } else { 0 }) }
         'fly'    {
             $len = 0; $p = @($s.path)
             for ($i = 1; $i -lt $p.Count; $i++) { $len += [math]::Sqrt([math]::Pow($p[$i][0] - $p[$i - 1][0], 2) + [math]::Pow($p[$i][1] - $p[$i - 1][1], 2) + [math]::Pow($p[$i][2] - $p[$i - 1][2], 2)) }

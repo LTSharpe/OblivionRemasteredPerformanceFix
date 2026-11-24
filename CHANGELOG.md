@@ -9,6 +9,18 @@ Downloads, checksums and build attestations: https://github.com/LTSharpe/Oblivio
 Bug fixes say whose bug it was: **game bug** = also happens without OblivionPerfFix (in the game, its engine or a
 driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 
+## Unreleased
+
+### Other
+
+- **Benchmark: `ride-track-gallop`, the riding track on a horse at a gallop** (the galloping challenge, save-free). After
+  the teleport the player mounts a new black horse (`placeatme`, then the activate key, as a player does) and the walk
+  presses the gallop toggle once: about 670 units/s on the straights (a recorded play session: 633-658), the 80 s track
+  in about 83 s. A walk scene can now say `"mount"` and `"press"` (docs/benchmark.md, the challenge scenes); the mod has
+  `press` and `pawn` verbs. On an i7-12700, profile `small`, 3 fresh games: game thread 7.77 ms per frame galloping vs 7.34
+  running and 6.90 flying the same track; the ridden horse's movement component takes about 220 us per call (a
+  character's: 30-50 us).
+
 ## 1.6.0-beta
 2026-11-21. For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Numbers marked "ours" are from our
 test PC (Ryzen 7 5800X, RX 9070 XT: one PC with an AMD graphics card; nothing here was tested on an NVIDIA card).

@@ -280,8 +280,8 @@ world (the default), and note what still differs between runs (characters' behav
 The open problems we invite help on (GitHub issues labelled "challenge") each have a save-free scene in
 `bench/scenarios/challenges.json`: `ic-waterfront-pass` (the Imperial City Waterfront's character bursts),
 `brindle-corral-hold`, `brindle-control-hold` and `brindle-corral-walk` (the Brindle Home horse corral, a control spot
-~120 m west, and a walk inside the corral), `ride-track-fly` and `ride-track-foot` (a riding track flown at horse speed
-and walked; riding a horse itself is not in the benchmark yet). Iterate small with one game kept open, then confirm at
+~120 m west, and a walk inside the corral), `ride-track-fly`, `ride-track-foot` and `ride-track-gallop` (a riding track
+flown at horse speed, run on foot, and ridden at a gallop). Iterate small with one game kept open, then confirm at
 your own settings; with `HitchLedger=1` and `HitchLedgerTickSplit=1` in the ini (set before the game starts) each run
 also leaves the tick split, which `py -3 tools\tick_split.py <csv> --run <run folder>` ranks per scene:
 
@@ -290,7 +290,13 @@ also leaves the tick split, which `py -3 tools\tick_split.py <csv> --run <run fo
 .\tools\Run-Benchmark.ps1 -Scenario challenges -Scenes brindle-corral-hold -Profile own
 ```
 
-Run the hold and its control in the same game, one after the other, so they differ only in the place. The issue for each
+Run the hold and its control in the same game, one after the other, so they differ only in the place.
+
+A walk scene can ride a horse: `"mount": { "id": "0001F11A" }` puts a new horse (that base form, here the game's black
+horse) next to the player after the teleport and mounts it with the activate key, as a player does (up to four tries;
+the run's log says which), and `"press": ["Movement/IA_Game_Movement_Gallop"]` presses that input action once as the walk
+starts (on a horse the gallop is a toggle). The player gets off the horse at the end of the scene, so the next teleport
+works (a mounted player cannot be teleported). The mod's `press <Folder/IA_Name>` and `pawn` verbs do the work. The issue for each
 challenge says what we know and what we already tried.
 
 ### Identical runs: pinned conditions, `-FixedSeed` and `tools\Repro-Check.ps1`
