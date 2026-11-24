@@ -9,6 +9,21 @@ Downloads, checksums and build attestations: https://github.com/LTSharpe/Oblivio
 Bug fixes say whose bug it was: **game bug** = also happens without OblivionPerfFix (in the game, its engine or a
 driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 
+## Unreleased
+
+### Other
+
+- **Benchmark: `-Scenes` runs the scenes in the order you list them** (our bug in the benchmark, not in the fix or the
+  game). Until now every selection ran in the scenario's order, without a word, so
+  `-Scenes ic-waterfront-pass,brindle-control-hold,brindle-corral-hold` (challenge #32's "via the control spot")
+  measured the corral before the control spot. A pattern such as `canal-*` keeps the scenario's order within it.
+
+- **Benchmark: `-LiveFixIni`** switches a fix key in a kept game for an A-B-B-A: with `-Session reuse` the run writes its
+  `-FixIni` keys into the installed `OblivionPerfFix.ini`, reads them back and waits 2.5 s (the fix re-reads its ini
+  every second). Until now a reused game only got a warning that `-FixIni` was not applied, and the key had to be written
+  by hand. The run's warnings name the keys written; a key the fix reads only at start-up still needs a new game.
+  `-Close` puts the ini back as it was before the first live write.
+
 ## 1.6.0-beta
 2026-11-21. For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Numbers marked "ours" are from our
 test PC (Ryzen 7 5800X, RX 9070 XT: one PC with an AMD graphics card; nothing here was tested on an NVIDIA card).

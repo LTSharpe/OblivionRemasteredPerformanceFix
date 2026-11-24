@@ -44,6 +44,7 @@ param(
     [hashtable]$Cvars = @{},                             # console variables set after loading (the change under test)
     [hashtable]$IniCvars = @{},                          # variables that must be in Engine.ini [SystemSettings] at start-up
     [hashtable]$FixIni = @{},                            # OblivionPerfFix.ini keys for this run
+    [switch]$LiveFixIni,                                 # in a reused game: write -FixIni into the installed OblivionPerfFix.ini (the fix re-reads it every second), read it back, wait 2.5 s; keys read only at start-up keep the game's value; -Close restores the ini
     [hashtable]$Ini = @{},                               # other config: @{ 'Altar.ini|/Script/Module.Class' = @{ Key = 'Value' } } (files in Saved\Config\Windows)
     [int]$Runs = 1,                                      # repeat the whole thing (separate result folders)
     # Which game process: auto = reuse a healthy game this benchmark started if its start-up settings (-IniCvars,
@@ -124,6 +125,7 @@ function Read-SharedLines([string]$path) {
 # value differs from the installed OblivionPerfFix.ini's [Fixes] (missing keys count as different), and any -IniCvars / -Ini
 # (Engine.ini and the game's config are read at start-up only). Only meaningful when the running game is reused.
 $script:ReuseIgnored = $null
+$script:LiveFixNote = $null
 function Get-ReuseIgnoredWarning {
     $parts = @()
     if ($FixIni.Count) {
@@ -141,7 +143,35 @@ function Get-ReuseIgnoredWarning {
     if ($IniCvars.Count) { $parts += "-IniCvars NOT applied ($(ConvertTo-SortedText $IniCvars))" }
     if ($Ini.Count) { $parts += "-Ini NOT applied ($(($Ini.Keys | Sort-Object) -join ', '))" }
     if (-not $parts.Count) { return $null }
-    "reused game (-Session $Session): start-up settings are applied only when the runner starts a game, so this run measured the installed ones: $($parts -join '; '). Write live keys into the installed ini (shared-open, read back) or use -Session fresh/auto."
+    "reused game (-Session $Session): start-up settings are applied only when the runner starts a game, so this run measured the installed ones: $($parts -join '; '). Write live keys into the installed ini (-LiveFixIni) or use -Session fresh/auto."
+}
+
+# -LiveFixIni (2026-11-23): an A-B-B-A in one kept game with the key switched by the run itself. The ini as it was before
+# the first live write is put on record once (as Set-RunConfig does), so -Close or the next restoring run puts it back.
+# Returns the note for the run's warnings: the runner cannot tell a live key from one read only at start-up.
+function Set-LiveFixIni {
+    if (-not (Test-Path -LiteralPath $fixIniPath)) { throw 'OblivionPerfFix is not installed (tools\Install-PerfFix.ps1), so -FixIni has nothing to configure.' }
+    $list = @(Get-PendingConfig)
+    if (-not @($list | Where-Object { $_.target -eq $fixIniPath }).Count) {
+        $dir = Join-Path $script:BenchRun 'live-fixini'
+        New-Item -ItemType Directory -Force $dir | Out-Null
+        Copy-Item -LiteralPath $fixIniPath -Destination $dir -Force
+        $list += [pscustomobject]@{ backup = (Join-Path $dir 'OblivionPerfFix.ini'); target = $fixIniPath }
+        Save-PendingConfig $list
+    }
+    Set-IniValues $fixIniPath 'Fixes' $FixIni
+    $have = @{}
+    $inFixes = $false
+    foreach ($l in Read-SharedLines $fixIniPath) {
+        if ($l -match '^\s*\[(.+?)\]') { $inFixes = ($Matches[1] -eq 'Fixes'); continue }
+        if ($inFixes -and $l -match '^\s*(\w+)\s*=\s*([^;\s]*)') { $have[$Matches[1]] = $Matches[2] }
+    }
+    $bad = @($FixIni.Keys | Where-Object { "$($have[$_])" -ne "$($FixIni[$_])" })
+    if ($bad.Count) { throw "-LiveFixIni: $($bad -join ', ') did not read back from $fixIniPath" }
+    Start-Sleep -Milliseconds 2500       # the fix's monitor thread re-reads the ini every second
+    $text = ConvertTo-SortedText $FixIni
+    Step "-LiveFixIni: $text written into the reused game's OblivionPerfFix.ini"
+    "-LiveFixIni: $text written into the reused game's OblivionPerfFix.ini (read back); a key the fix reads only at start-up still has the value this game started with (each key's comment in the ini says which)"
 }
 
 function Step([string]$msg) {
@@ -2173,6 +2203,17 @@ $sceneList = @($scn.scenes | Where-Object {
     $s = $_; $sceneTags = Get-SceneTags $s
     (-not $Scenes -or @($Scenes | Where-Object { $s.id -like $_ }).Count) -and (-not $Tags -or @($Tags | Where-Object { $sceneTags -contains $_ }).Count)
 })
+# -Scenes in the order given (2026-11-23): a scene goes where its first matching name or pattern is, in the scenario's
+# order within one pattern (canal-*). Until then every selection ran in the scenario's order, so
+# -Scenes ic-waterfront-pass,brindle-control-hold,brindle-corral-hold measured the corral before the control spot.
+if ($Scenes) {
+    $order = @($scn.scenes | ForEach-Object { $_.id })
+    $sceneList = @($sceneList | ForEach-Object {
+        $s = $_; $p = 0
+        while ($p -lt $Scenes.Count -and $s.id -notlike $Scenes[$p]) { $p++ }
+        [pscustomobject]@{ scene = $s; key = $p * 100000 + [array]::IndexOf($order, $s.id) }
+    } | Sort-Object key | ForEach-Object { $_.scene })
+}
 
 if ($List) {
     $sceneList | ForEach-Object {
@@ -2294,7 +2335,8 @@ for ($run = 1; $run -le $Runs; $run++) {
                 Step "reusing the running game (started $([math]::Round(((Get-Date) - $game.StartTime).TotalMinutes)) min ago)"
                 # -FixIni (and -IniCvars, -Ini) are applied only when the runner starts a game (Set-RunConfig in
                 # Start-BenchGame). A reused game (-Session reuse) keeps the installed ini: say so when that ini differs
-                # (2026-10-26, worker brumaburst; the behaviour is unchanged).
+                # (2026-10-26, worker brumaburst; the behaviour is unchanged). -LiveFixIni writes -FixIni in first.
+                if ($LiveFixIni -and $FixIni.Count) { $script:LiveFixNote = Set-LiveFixIni }
                 $script:ReuseIgnored = Get-ReuseIgnoredWarning
                 if ($script:ReuseIgnored) { Write-Warning $script:ReuseIgnored }
                 Show-SavedSizeWarning
@@ -2348,6 +2390,7 @@ for ($run = 1; $run -le $Runs; $run++) {
         if (Test-Path -LiteralPath $fixIniPath) { $result.perfFix.ini = @(Read-SharedLines $fixIniPath | Where-Object { $_ -match '^\s*\w+\s*=' }) }
         # -FixIni / -IniCvars / -Ini asked for but not in effect in a reused game (Get-ReuseIgnoredWarning)
         if ($script:ReuseIgnored -and $sessions.Count) { [void]$sessions[0].warnings.Add($script:ReuseIgnored) }
+        if ($script:LiveFixNote -and $sessions.Count) { [void]$sessions[0].warnings.Add($script:LiveFixNote) }
         if ($script:SavedSizeWarning -and $sessions.Count) { [void]$sessions[0].warnings.Add($script:SavedSizeWarning) }
         # the game's command-line arguments as the game process has them (-FixedSeed since 2026-10-20)
         if (-not $SelfTest -and ($gNow = Get-Game)) {

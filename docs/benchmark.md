@@ -264,13 +264,21 @@ results.
 ## Mini-scenarios: iterate on one problem spot
 Full scenarios are for confirming; while working on one problem, run a scene that reproduces just that spot in 30-60 s
 and keep the game open between runs (`-Session reuse`), switching the fix's ini key between runs (A-B-B-A).
+`-LiveFixIni` writes a run's `-FixIni` into the reused game's ini for you, reads it back and waits for the fix to
+re-read it; this works only for keys the fix reads while the game runs, and each key's comment in the ini says whether
+it is one. `-Close` puts the ini back.
 `tools/slice_flight.py` cuts such scenes out of a timed `fly` scene, with the original's waypoints, speeds, hour, weather
 and timescale, starting a few seconds before each spot so its cells and characters load during the measured part:
 
 ```
 py -3 tools\slice_flight.py --src showcase --scene rumare-loop-flight --out my-spots --spot waterfront:23.9:26.5:"the Waterfront"
 .\tools\Run-Benchmark.ps1 -Scenario my-spots -Scenes waterfront -Runs 2
+# A-B-B-A in one game kept in the world: key on, off, off, on
+.\tools\Run-Benchmark.ps1 -Scenario my-spots -Scenes waterfront -Label a1 -Session fresh -After keep
+.\tools\Run-Benchmark.ps1 -Scenario my-spots -Scenes waterfront -Label b1 -Session reuse -KeepWorld -After keep -LiveFixIni -FixIni @{ RigTraceReuse = 0 }
 ```
+
+`-Scenes` runs the scenes in the order given (`-Scenes waterfront,control`: the waterfront first).
 
 Spot times are seconds into the full flight (the plots' time axis). Check once that the slice shows the problem before
 you iterate on it. Runs are made comparable by default (pinned conditions, a fixed random seed: below); start each pass from a fresh
