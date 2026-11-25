@@ -3266,6 +3266,34 @@ with exactly the recorded crash; with the guard it carried on, and the log count
 
 ---
 
+<a id="horsefadecrashguard"></a>
+
+### The camera forgets a faded horse that is gone (`HorseFadeCrashGuard`, game bug)
+
+[Issue #38](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/38).
+
+**The problem.** A crash in the game's own code, not a slowdown. In third person, the camera fades you (and the horse you
+ride) when it comes very close, for example zoomed in or pushed in by a wall or a tree. To fade the horse back in after you
+get off, the camera keeps the horse's address. It lets go of it when the fade-in has finished, when you are in first
+person while still mounted, and when the player is removed, but not when the horse is removed. So: ride with the camera
+close enough to fade, get off and be in first person before the horse has faded back in, then let the horse go from memory
+(load a save, start a new game). The next time you switch to third person on foot, the camera tries to fade in a horse
+whose memory has been given back, and the game crashes. It also happens without OblivionPerfFix.
+
+*Analogy:* a stage hand told to bring the lights back up on a performer after the scene, who is never told that the
+performer has gone home. When the next show starts, he reaches for someone who is not there.
+
+**What we did.** Every object of the old engine that is placed in the world (a horse, a character, a door) ends its
+removal in one function of the game. The DLL looks there first: if the object being removed is the horse the camera is
+waiting to fade in, the camera's note is cleared, as it is when the fade-in has finished. Then the game's removal runs
+unchanged.
+
+**Why the image can't change.** A horse that still exists is never touched, so every fade-in you can see is the game's.
+The only change is for a horse that no longer exists: the camera no longer tries to fade it in. The log says how often
+that happened.
+
+---
+
 <a id="bow-sneak-1x"></a>
 
 ### Bow sneak attacks hit once, with the bow's multiplier (`BowSneakAttackFix`, game bug)

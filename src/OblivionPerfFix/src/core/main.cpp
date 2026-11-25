@@ -166,6 +166,7 @@ DWORD WINAPI MonitorThread(LPVOID)
         if (g_collisionHooked) SetCollisionPrepareEnabled(cfg.prepareCollisionBehindLoadingScreen);
         SetEditorIdLookupGuardEnabled(cfg.editorIdLookupGuard);
         SetTrapTargetGuardEnabled(cfg.trapCrashGuard);
+        SetHorseFadeGuardEnabled(cfg.horseFadeCrashGuard);  // HorseFadeCrashGuard: no-op unless installed at start-up
         SetBowSneakAttackFixEnabled(cfg.bowSneakAttackFix);  // BowSneakAttackFix: no-op unless installed at start-up
         SetStuckEffectLookFix(cfg.stuckEffectLookFix);  // StuckEffectLookFix: no-op unless installed at start-up
         SetWorldSoundPositionFix(cfg.worldSoundPositionFix);  // WorldSoundPositionFix: no-op unless installed at start-up
@@ -365,6 +366,7 @@ DWORD WINAPI MonitorThread(LPVOID)
             if (g_navLinkHooked) LogNavLinkFastStats();
             LogEditorIdLookupGuardStats();
             LogTrapTargetGuardStats();
+            LogHorseFadeGuardStats();
             LogBowSneakAttackFixStats();
             LogStuckEffectLookStats();
             LogWorldSoundPositionStats();
@@ -595,6 +597,12 @@ void Init(const char* loadedVia, bool proxyOk, LoadStage requested)
     // TrapCrashGuard (a crash guard, not a speed-up): installed only if enabled at startup; afterwards the ini switches it live.
     if (cfg.trapCrashGuard) ApplyTrapTargetGuard();
     else Log("[trap] disabled in OblivionPerfFix.ini (takes a restart to switch on)");
+    // HorseFadeCrashGuard (a crash guard for a game bug, not a speed-up): an entry jump in the reference destructor, written
+    // only before game code runs and only if on at start-up; afterwards the ini switches it live.
+    if (cfg.horseFadeCrashGuard) {
+        if (!beforeGameCode) Log("[horsefade] crash guard: can only be installed at start-up (loaded late here), not installed");
+        else ApplyHorseFadeGuard();
+    } else Log("[horsefade] disabled in OblivionPerfFix.ini (takes a restart to switch on)");
     // BowSneakAttackFix (a game bug fix that changes damage back to the intended value): two calls in the OblivionThread's
     // code, written only before game code runs and only if on at start-up; afterwards the ini switches it live.
     if (cfg.bowSneakAttackFix) {

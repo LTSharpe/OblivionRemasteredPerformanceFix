@@ -2700,6 +2700,63 @@ int wmain(int argc, wchar_t** argv)
         }
     }
 
+    // HorseFadeCrashGuard: the third-person camera's faded-horse pointer is cleared when that horse is destroyed (issue #38).
+    {
+        Check(ApplyHorseFadeGuard(), "horse fade crash guard installed");
+        HorseFadeGuardInfo hf{};
+        uint64_t cleared = 0;
+        if (Installed(HorseFadeGuardState(&hf, &cleared), "HorseFadeCrashGuard (faded-horse pointer guard)")) {
+            Check(hf.fade == game.base + 0x660C347, "camera fade's horse branch at exe+0x660C347");
+            Check(reinterpret_cast<uint8_t*>(hf.faded) == game.base + 0x947FB08, "faded-horse pointer exe+0x947FB08");
+            Check(hf.dtor == game.base + 0x65785C0, "TESObjectREFR destructor at exe+0x65785C0");
+            Check(hf.dtor[0] == 0xE9, "the destructor's entry is a jump");
+            const uint8_t* const stub = hf.dtor + 5 + *reinterpret_cast<const int32_t*>(hf.dtor + 1);
+            Check(stub == hf.trampoline + 32, "the entry jump goes to the guard's stub");
+            static const uint8_t first[5] = {0x48, 0x89, 0x5C, 0x24, 0x08};
+            Check(memcmp(hf.trampoline, first, 5) == 0, "the trampoline starts with the destructor's own first 5 bytes");
+            Check(*reinterpret_cast<uint8_t* const*>(hf.trampoline + 5 + 6) == hf.dtor + 5, "the trampoline jumps back to exe+0x65785C5");
+            Check(ApplyHorseFadeGuard(), "second installation finds the guard in place");
+
+            // The guard with a test pointer and a fake destructor (the game's is not run here).
+            static void* faded = nullptr;
+            static void* lastDestroyed = nullptr;
+            static void* lastArgs[3];
+            static int destroyed = 0;
+            struct Fakes {
+                static void* Dtor(void* ref, void* a2, void* a3, void* a4)
+                {
+                    ++destroyed;
+                    lastDestroyed = ref;
+                    lastArgs[0] = a2; lastArgs[1] = a3; lastArgs[2] = a4;
+                    return reinterpret_cast<void*>(0x1234);
+                }
+            };
+            HorseFadeGuardTestRedirect(&faded, reinterpret_cast<void*>(&Fakes::Dtor));
+            using DtorFn = void* (*)(void*, void*, void*, void*);
+            const auto guarded = reinterpret_cast<DtorFn>(hf.hook);
+            static uintptr_t horse[8], other[8];
+            faded = horse;
+            void* r = guarded(other, reinterpret_cast<void*>(2), reinterpret_cast<void*>(3), reinterpret_cast<void*>(4));
+            Check(faded == horse && destroyed == 1 && lastDestroyed == other, "another reference destroyed: the faded horse is kept");
+            Check(r == reinterpret_cast<void*>(0x1234) && lastArgs[0] == reinterpret_cast<void*>(2) &&
+                      lastArgs[1] == reinterpret_cast<void*>(3) && lastArgs[2] == reinterpret_cast<void*>(4),
+                  "the game's destructor gets the same arguments and its result is returned");
+            SetHorseFadeGuardEnabled(false);
+            guarded(horse, nullptr, nullptr, nullptr);
+            Check(faded == horse && destroyed == 2, "switched off: the pointer is left as the game leaves it");
+            SetHorseFadeGuardEnabled(true);
+            guarded(horse, nullptr, nullptr, nullptr);
+            Check(faded == nullptr && destroyed == 3 && lastDestroyed == horse, "the faded horse destroyed: pointer cleared, destructor run");
+            guarded(horse, nullptr, nullptr, nullptr);
+            Check(faded == nullptr && destroyed == 4, "nothing faded: the destructor runs as before");
+            guarded(nullptr, nullptr, nullptr, nullptr);
+            Check(destroyed == 5, "a null reference passes through");
+            HorseFadeGuardState(&hf, &cleared);
+            Check(cleared == 1, "one clear counted");
+            LogHorseFadeGuardStats();
+        }
+    }
+
     // BowSneakAttackFix: a player's arrow hits the old engine's hit function once, the old engine's own impact with the
     // Unreal side's sneak multiplier instead of its fixed 1.0.
     {

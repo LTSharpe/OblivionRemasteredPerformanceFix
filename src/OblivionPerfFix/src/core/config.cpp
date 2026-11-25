@@ -26,6 +26,7 @@ Config LoadConfig(const wchar_t* iniPath)
         get(L"Fixes", L"PrepareCollisionBehindLoadingScreen", c.prepareCollisionBehindLoadingScreen) != 0;
     c.editorIdLookupGuard = get(L"Fixes", L"NameLookupCrashGuard", c.editorIdLookupGuard) != 0;
     c.trapCrashGuard = get(L"Fixes", L"TrapCrashGuard", c.trapCrashGuard) != 0;
+    c.horseFadeCrashGuard = get(L"Fixes", L"HorseFadeCrashGuard", c.horseFadeCrashGuard) != 0;
     c.bowSneakAttackFix = get(L"Fixes", L"BowSneakAttackFix", c.bowSneakAttackFix) != 0;
     c.stuckEffectLookFix = get(L"Fixes", L"StuckEffectLookFix", c.stuckEffectLookFix) != 0;
     c.worldSoundPositionFix = get(L"Fixes", L"WorldSoundPositionFix", c.worldSoundPositionFix) != 0;

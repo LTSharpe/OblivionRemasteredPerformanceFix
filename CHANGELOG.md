@@ -9,6 +9,15 @@ Downloads, checksums and build attestations: https://github.com/LTSharpe/Oblivio
 Bug fixes say whose bug it was: **game bug** = also happens without OblivionPerfFix (in the game, its engine or a
 driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 
+## Unreleased
+
+### Game bug fixes
+- **HorseFadeCrashGuard** (on, game bug, issue #38): a crash after a ride, the first time the camera went to third person on
+  foot after a save was loaded or a new game started (`exe+0x65CEC86` on the OblivionThread). If the camera had faded you
+  and your horse and you got off in first person before the horse had faded back in, the camera kept the horse's address;
+  once that horse was gone it faded in freed memory. The camera now forgets the horse when the horse is removed, as after a
+  finished fade-in. `[horsefade]` in the log.
+
 ## 1.6.0-beta
 2026-11-21. For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Numbers marked "ours" are from our
 test PC (Ryzen 7 5800X, RX 9070 XT: one PC with an AMD graphics card; nothing here was tested on an NVIDIA card).
