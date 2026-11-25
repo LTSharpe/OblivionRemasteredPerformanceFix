@@ -96,6 +96,7 @@ struct Config {
     bool prepareCollisionBehindLoadingScreen = true;   // PrepareCollisionBehindLoadingScreen: hand a transition's new area to physics while still frozen (A-B clean, 2026-10-05)
     bool editorIdLookupGuard = true;   // NameLookupCrashGuard: name lookups skip freed name-table entries instead of crashing (game bug)
     bool trapCrashGuard = true;        // TrapCrashGuard: traps drop actors that no longer exist instead of crashing (game bug)
+    bool horseFadeCrashGuard = true;   // HorseFadeCrashGuard: the camera forgets a faded horse that was destroyed (game bug, #38)
     int pairReleaseOnce = 1;           // PairReleaseOnce (game bug fix, on; findings crash4590f5c): guards/pair_race.cpp, a pairing
                                        // session's buffer ids released once (the destructor's), not twice; start-up only
     bool bowSneakAttackFix = true;     // BowSneakAttackFix (game bug fix, on; user 2026-10-31): one hit per player arrow, the old engine's with the Unreal side's sneak
@@ -1071,6 +1072,24 @@ void HavokPickWarningGuardTestFunctions(void* fakeHandler, const void* returnAdd
 bool TrapTargetGuardInfo(TrapGuardInfo* out);
 void TrapTargetGuardTestFunctions(void* fakeUpdate, void* fakeRemove);  // self-test only
 bool TrapTargetGuardTestIsActor(const void* object);                   // self-test only: the guard's liveness check
+// horse_fade_guard.cpp (HorseFadeCrashGuard: the third-person camera's faded-horse pointer is cleared when that horse is
+// destroyed, so the camera no longer fades back a freed horse after a ride; game bug, issue #38)
+struct GameModule;
+struct HorseFadeGuardInfo {
+    uint8_t* fade;              // the camera fade's horse branch (pattern start)
+    void** faded;               // the camera's faded-horse pointer (a global in .data)
+    uint8_t* alphaUpdate;       // the alpha update both camera calls go to
+    uint8_t* dtor;              // TESObjectREFR's destructor (its entry jumps to the guard once installed)
+    const void* const* vtable;  // TESObjectREFR's vtable (stored by the destructor, checked through RTTI)
+    void* hook;                 // the guard (installed state only)
+    uint8_t* trampoline;        // the destructor's first bytes and a jump back (installed state only)
+};
+bool HorseFadeGuardDiscover(const GameModule& game, HorseFadeGuardInfo* out);  // patterns and checks only, nothing written
+bool ApplyHorseFadeGuard();                        // start-up only (an entry jump in a destructor every reference runs)
+void SetHorseFadeGuardEnabled(bool enabled);       // switchable live; off = the game's pointer is left as it is
+void LogHorseFadeGuardStats();
+bool HorseFadeGuardState(HorseFadeGuardInfo* out, uint64_t* cleared);
+void HorseFadeGuardTestRedirect(void** faded, void* fakeDtor);  // self-test only: a test pointer and a fake destructor
 // bow_sneak.cpp (BowSneakAttackFix: a player's arrow hits the old engine's hit function once, the old engine's own
 // impact with the Unreal side's sneak multiplier instead of a fixed 1.0)
 struct BowSneakInfo {
