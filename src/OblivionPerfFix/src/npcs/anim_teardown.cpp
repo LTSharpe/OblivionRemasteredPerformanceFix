@@ -552,7 +552,8 @@ bool FindAnimTeardownParallel()
         return Fail("the animation data's destruction is not as expected");
     if (!FindVtables()) return Fail("the classes' vtables (RTTI) not found");
     {
-        const auto* gs = *reinterpret_cast<uint8_t* const*>(s.vt[cGroupSeq]);
+        // RiderBindGuard may hold slot 0 (installed later at start-up, earlier in the self-test): the game's destructor
+        const auto* gs = static_cast<const uint8_t*>(RiderBindGuardGroupSeqDtor(reinterpret_cast<void* const*>(s.vt[cGroupSeq])));
         if (!g_game->text.Contains(gs) || !MatchesAt(gs, ParsePattern(kGroupSeqDtor)) || CallTarget(gs + kGroupSeqCall) != seq)
             return Fail("BSAnimGroupSequence's destructor does not call the destructor body found");
     }

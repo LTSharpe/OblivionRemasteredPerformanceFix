@@ -302,6 +302,8 @@ namespace {
 constexpr int kOwnMax = 1024;
 SRWLOCK g_ownLock = SRWLOCK_INIT;
 const void* g_own[kOwnMax];
+const char* g_ownOwner[kOwnMax];  // CrashReport's owner registry: the key whose install made the region (nullptr: not known)
+uint32_t g_ownBy[kOwnMax];        // ... and the installing function's address in our DLL (RVA; 0: not known)
 int g_ownCount = 0;
 bool g_ownFullLogged = false;
 
@@ -311,8 +313,16 @@ constexpr int kWrittenMax = 4096;
 SRWLOCK g_writtenLock = SRWLOCK_INIT;
 struct Range { const uint8_t* begin; const uint8_t* end; };
 Range g_written[kWrittenMax];
+const char* g_writtenOwner[kWrittenMax];
+uint32_t g_writtenBy[kWrittenMax];
 int g_writtenCount = 0;
 bool g_writtenFullLogged = false;
+
+// CrashReport's owner registry (2026-11-28): the key being installed (OPF_INSTALL in main.cpp sets it around each install
+// call) and the function of ours that asked for the write, so that a crash or hang report can say which key's code is on a
+// stack. Read with try-locks only (TryOwnerOf): a stopped or crashed thread holding a lock never blocks a report.
+thread_local const char* g_installOwner = nullptr;  // per thread: a live install on the monitor thread does not label another thread's
+uint32_t InstallerRva();
 }  // namespace
 
 void* RegisterOwnCode(void* p)
@@ -322,12 +332,22 @@ void* RegisterOwnCode(void* p)
     AcquireSRWLockExclusive(&g_ownLock);
     bool known = false, full = false;
     for (int i = 0; i < g_ownCount; ++i) known = known || g_own[i] == mbi.AllocationBase;
-    if (!known && g_ownCount < kOwnMax) g_own[g_ownCount++] = mbi.AllocationBase;
-    else if (!known && !g_ownFullLogged) full = g_ownFullLogged = true;
+    if (!known && g_ownCount < kOwnMax) {
+        g_ownOwner[g_ownCount] = g_installOwner;
+        g_ownBy[g_ownCount] = 0;  // filled below, outside the lock
+        g_own[g_ownCount++] = mbi.AllocationBase;
+    } else if (!known && !g_ownFullLogged) full = g_ownFullLogged = true;
     ReleaseSRWLockExclusive(&g_ownLock);
     if (full)
         Log("[hook] more than %d code regions of ours: later ones count as not ours (a write next to a jump into one is refused)",
             kOwnMax);
+    if (!known) {
+        const uint32_t by = InstallerRva();
+        AcquireSRWLockExclusive(&g_ownLock);
+        for (int i = 0; i < g_ownCount; ++i)
+            if (g_own[i] == mbi.AllocationBase && !g_ownBy[i]) g_ownBy[i] = by;
+        ReleaseSRWLockExclusive(&g_ownLock);
+    }
     return p;
 }
 
@@ -336,7 +356,10 @@ void UnregisterOwnCode(const void* base)
     AcquireSRWLockExclusive(&g_ownLock);
     for (int i = 0; i < g_ownCount; ++i)
         if (g_own[i] == base) {
-            g_own[i] = g_own[--g_ownCount];
+            --g_ownCount;
+            g_own[i] = g_own[g_ownCount];
+            g_ownOwner[i] = g_ownOwner[g_ownCount];
+            g_ownBy[i] = g_ownBy[g_ownCount];
             break;
         }
     ReleaseSRWLockExclusive(&g_ownLock);
@@ -352,12 +375,22 @@ void RecordOwnWrite(const void* at, size_t size)
 {
     const auto* const b = static_cast<const uint8_t*>(at);
     bool full = false;
+    AcquireSRWLockShared(&g_writtenLock);
+    bool seen = false;
+    for (int i = 0; i < g_writtenCount && !seen; ++i)
+        if (g_written[i].begin <= b && b + size <= g_written[i].end) seen = true;
+    ReleaseSRWLockShared(&g_writtenLock);
+    if (seen) return;
+    const uint32_t by = InstallerRva();
     AcquireSRWLockExclusive(&g_writtenLock);
     bool known = false;
     for (int i = 0; i < g_writtenCount && !known; ++i)
         if (g_written[i].begin <= b && b + size <= g_written[i].end) known = true;
-    if (!known && g_writtenCount < kWrittenMax) g_written[g_writtenCount++] = {b, b + size};
-    else if (!known && !g_writtenFullLogged) full = g_writtenFullLogged = true;
+    if (!known && g_writtenCount < kWrittenMax) {
+        g_writtenOwner[g_writtenCount] = g_installOwner;
+        g_writtenBy[g_writtenCount] = by;
+        g_written[g_writtenCount++] = {b, b + size};
+    } else if (!known && !g_writtenFullLogged) full = g_writtenFullLogged = true;
     ReleaseSRWLockExclusive(&g_writtenLock);
     if (full) Log("[hook] more than %d code sites written: later ones are checked again when written back", kWrittenMax);
 }
@@ -388,6 +421,84 @@ bool IsOwnCode(const void* p)
     for (int i = 0; i < g_ownCount; ++i) known = known || g_own[i] == mbi.AllocationBase;
     ReleaseSRWLockShared(&g_ownLock);
     return known;
+}
+
+// ---- CrashReport's owner registry (2026-11-28) ----
+InstallOwnerScope::InstallOwnerScope(const char* name) : prev_(g_installOwner) { g_installOwner = name; }
+InstallOwnerScope::~InstallOwnerScope() { g_installOwner = prev_; }
+const char* CurrentInstallOwner() { return g_installOwner; }
+
+namespace {
+bool InSelf(uintptr_t a, uintptr_t* rva)
+{
+    static uintptr_t s_base = 0, s_end = 0;
+    if (!s_base) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery(reinterpret_cast<const void*>(&InSelf), &mbi, sizeof mbi) || !mbi.AllocationBase) return false;
+        const auto* b = static_cast<const uint8_t*>(mbi.AllocationBase);
+        const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(b + reinterpret_cast<const IMAGE_DOS_HEADER*>(b)->e_lfanew);
+        s_end = reinterpret_cast<uintptr_t>(b) + nt->OptionalHeader.SizeOfImage;
+        s_base = reinterpret_cast<uintptr_t>(b);
+    }
+    if (a < s_base || a >= s_end) return false;
+    *rva = a - s_base;
+    return true;
+}
+
+// The first caller frame in our DLL that is not one of the write helpers (start-up and live installs only: not a hot path).
+uint32_t InstallerRva()
+{
+    void* frames[8] = {};
+    const USHORT n = RtlCaptureStackBackTrace(1, 8, frames, nullptr);
+    const uintptr_t helpers[] = {reinterpret_cast<uintptr_t>(&WriteCode), reinterpret_cast<uintptr_t>(&WriteCodeAtomic),
+                                 reinterpret_cast<uintptr_t>(&CodeSiteProtect), reinterpret_cast<uintptr_t>(&AllocNear),
+                                 reinterpret_cast<uintptr_t>(&AllocNearGame), reinterpret_cast<uintptr_t>(&RegisterOwnCode),
+                                 reinterpret_cast<uintptr_t>(&RecordOwnWrite)};
+    for (USHORT i = 0; i < n; ++i) {
+        uintptr_t rva = 0;
+        const uintptr_t a = reinterpret_cast<uintptr_t>(frames[i]);
+        if (!InSelf(a, &rva)) continue;
+        DWORD64 image = 0;
+        const PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(a, &image, nullptr);
+        const uintptr_t begin = fe ? static_cast<uintptr_t>(image + fe->BeginAddress) : 0;
+        bool helper = false;
+        for (uintptr_t h : helpers) helper = helper || h == begin;
+        if (!helper) return static_cast<uint32_t>(rva);
+    }
+    return 0;
+}
+}  // namespace
+
+int TryOwnerOf(const void* p, const char** owner, uint32_t* installerRva, const void** rangeBegin, bool returnAddress)
+{
+    *owner = nullptr;
+    *installerRva = 0;
+    if (rangeBegin) *rangeBegin = nullptr;
+    const auto* const b = static_cast<const uint8_t*>(p);
+    int kind = 0;
+    if (!TryAcquireSRWLockShared(&g_writtenLock)) return -1;
+    // a return address points just past the call it returns from: the range's end counts too (only for return addresses)
+    for (int i = 0; i < g_writtenCount && !kind; ++i)
+        if (g_written[i].begin <= b && (b < g_written[i].end || (returnAddress && b == g_written[i].end))) {
+            kind = 1;
+            *owner = g_writtenOwner[i];
+            *installerRva = g_writtenBy[i];
+            if (rangeBegin) *rangeBegin = g_written[i].begin;
+        }
+    ReleaseSRWLockShared(&g_writtenLock);
+    if (kind) return kind;
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!p || !VirtualQuery(p, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT || mbi.Type != MEM_PRIVATE) return 0;
+    if (!TryAcquireSRWLockShared(&g_ownLock)) return -1;
+    for (int i = 0; i < g_ownCount && !kind; ++i)
+        if (g_own[i] == mbi.AllocationBase) {
+            kind = 2;
+            *owner = g_ownOwner[i];
+            *installerRva = g_ownBy[i];
+            if (rangeBegin) *rangeBegin = g_own[i];
+        }
+    ReleaseSRWLockShared(&g_ownLock);
+    return kind;
 }
 
 BOOL CodeSiteProtect(void* at, size_t size, DWORD* old)

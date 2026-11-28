@@ -235,6 +235,7 @@ struct State {
     PlatformFeaturesGetFn platformGet = nullptr;  // IPlatformFeaturesModule::Get (nullptr: save loads keep the door hold)
     LoadGameFn origLoadGame = nullptr;
     bool loadHookTried = false;
+    bool tradeOffs = false;  // UnfreezeBehindLoadingScreen was on at start-up (the fast-travel thunk is only then redirected)
     std::atomic<uint64_t> saveReadUs{0};
     uint64_t doneUs = 0;
     std::atomic<uint32_t> saveLoads{0};
@@ -868,14 +869,16 @@ bool InstallStreamBehindLoading(bool beforeGameCode, bool tradeOffs)
         Log("[streamload] could not detour the gate-arming function at exe+0x%X: not installed", Rva(g.arm));
         return false;
     }
-    // The trade-off's redirections (the gate delegate's two slots, the fast-travel thunk's call, and on the first frame
-    // the save system's LoadGame slot) only when UnfreezeBehindLoadingScreen is on at start-up: with the default the
-    // only change to the game's code is the gate-arming detour above.
-    g.loadHookTried = !tradeOffs;
+    // The trade-off's redirections (the gate delegate's two slots and the fast-travel thunk's call) only when
+    // UnfreezeBehindLoadingScreen is on at start-up: with the default the changes to the game's code are the gate-arming
+    // detour above and, on the first frame, the save system's LoadGame slot (it only notes the time of a save's read, so
+    // the log's count of save loads is right in play; it used to come with the trade-off, so the count stayed 0).
+    g.tradeOffs = tradeOffs;
+    g.loadHookTried = false;
     if (!tradeOffs) {
         g.installed = true;
         Log("[streamload] installed: textures of a new area stream behind the loading screen once its loading is done "
-            "(UnfreezeBehindLoadingScreen 0 at start-up: its hooks not installed; takes a restart to switch on)");
+            "(UnfreezeBehindLoadingScreen 0 at start-up: its other hooks not installed; takes a restart to switch on)");
         return true;
     }
     if (g.drawFound) {  // pass-through until UnfreezeBehindLoadingScreen holds a tick
@@ -1049,8 +1052,11 @@ void LogStreamBehindLoadingStats()
 {
     if (!g.installed) return;
     const uint32_t n = g.streamed.load();
-    Log("[streamload] %s: %u transitions (%u fast travels, %u save loads), streamed early in %u (%.0f ms before the fade-in "
-        "on average)", g.on.load() ? "on" : "off", g.transitions.load(), g.fastTravels.load(), g.saveLoads.load(), n,
+    char ft[48];
+    if (g.tradeOffs) snprintf(ft, sizeof ft, "%u fast travels", g.fastTravels.load());
+    else snprintf(ft, sizeof ft, "fast travels not counted");  // the thunk that sees them is redirected only with the trade-off
+    Log("[streamload] %s: %u transitions (%s, %u save loads), streamed early in %u (%.0f ms before the fade-in "
+        "on average)", g.on.load() ? "on" : "off", g.transitions.load(), ft, g.saveLoads.load(), n,
         n ? g.leadUs.load() / 1000.0 / n : 0.0);
     if (g.drawBehind.load() || g.drawOnlyTransitions.load())
         Log("[streamload] DrawBehindLoadingScreen %d: frozen world drawn behind %u loading screens (hidden again by us %u, shown by "

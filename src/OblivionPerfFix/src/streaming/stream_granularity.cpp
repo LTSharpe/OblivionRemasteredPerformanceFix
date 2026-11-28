@@ -45,6 +45,7 @@
 // The monitor thread only passes the key (SetStreamRegisterGranularity); all reads and writes are on the game thread.
 #include "common.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -240,6 +241,9 @@ void BudgetApply(int key, bool loading)
 uint64_t AddHook(uint64_t world, uint64_t level, uint64_t xform, uint64_t a4, uint64_t a5, uint64_t a6, uint64_t a7, uint64_t a8)
 {
     StreamGranBeforeAdd((a4 & 0xFF) != 0);
+    // StreamInHeavySkipMs: the frame is already long; the level being made visible goes on next frame (AddToWorld returns void)
+    if (StreamHeavySkipBeforeAdd(reinterpret_cast<const void*>(world), reinterpret_cast<const void*>(level), (a4 & 0xFF) != 0))
+        return 0;
     GcPrepAheadNoteAdd(reinterpret_cast<const void*>(level));  // GcPrepAhead's "wanted again" counter (no-op unless it prepared levels)
     const bool gc = GcPassAfterBusyWatching(), water = WaterCrossingWatching();
     if (!gc && !water) return g_add(world, level, xform, a4, a5, a6, a7, a8);
@@ -322,6 +326,7 @@ bool InstallStreamRegisterGranularity(bool beforeGameCode, const uint8_t* probeA
     if (!beforeGameCode) { Log("[streamgran] StreamRegisterGranularity: start-up only (loaded late here), not installed"); return false; }
     uint8_t* const fn = FindAddToWorld(probeAdd == nullptr);
     if (!fn) return false;
+    StreamHeavySkipInstallFields(fn);  // StreamInHeavySkipMs: UWorld's fields from AddToWorld's code (before the entry is patched)
     if (probeAdd) {
         if (probeAdd != fn) { Log("[streamgran] BodyAddProbe hooked another function than AddToWorld: not installed"); return false; }
         g_active = true;
@@ -484,9 +489,331 @@ void StreamBudgetTestSetup(void* slice, void* async)
     g_budgetFindTries = 0;
 }
 
+// StreamInHeavySkipMs (worker heavyskip 2026-11-23, design: option B of the ismdesign study; review fixes S1/S2/N1-N8
+// the same day; S-028; [Fixes] StreamInHeavySkipMs, public default 0, live; hidden
+// StreamInHeavySkipMax 8). A streaming cell is made visible by UWorld::AddToWorld, called again every frame while the level is
+// in MakingVisible (UE 5.3 LevelStreaming.cpp UpdateStreamingState), each call doing one time slice (StreamInBudget: 1 or 2
+// ms). The slice does not know how long the frame already is: after a big physics step (the acceleration-structure swap, the
+// push of the last call's statics) the next slice (a foliage component's ~2000 bodies, a nav chunk attach, render proxies)
+// lands on a frame already past 17 ms.
+// The rule: only the call for the level that is ALREADY being made visible (UWorld::CurrentLevelPendingVisibility, set by an
+// earlier call: "begin making visible", World.cpp 3150-3166) can be left for the next frame, and only its first call in a
+// frame, when the game thread is already >= max(key, median of recent such frames' values + 4) ms into the frame. A call
+// while no level is pending (it may begin one) and a call for any other level (a no-op in stock while one is pending,
+// World.cpp 3107) go to the game unchanged. Limits: never two such frames in a row; at most StreamInHeavySkipMax skipped
+// frames for one pending level (the count starts afresh whenever another level, or none, is seen pending at a call); never
+// a call whose time limit stock turns off (bConsiderTimeLimit false, or !bMatchStarted, or not a game world: World.cpp
+// 3121, read as AddToWorld itself reads them), never in Altar's loading mode (s.LevelStreamingActorsUpdateTimeLimit >=
+// 1000 ms, as above); a second call for the pending level in the same frame (the engine's FlushLevelStreaming /
+// BlockTillLevelStreamingCompleted loops call UpdateLevelStreaming again within one frame) goes on.
+// Why the blocking loops are unchanged: a level stays pending while it is skipped, so IsVisibilityRequestPending() stays
+// true (World.cpp 4606) and every loop that tests it runs its next pass, in which the pending level's call is the repeat
+// and goes to the game. BlockTillLevelStreamingCompleted (World.cpp 4155-4171, also the path of World Partition's
+// wp.Runtime.BlockOnSlowStreaming via bRequestedBlockOnAsyncLoading, GameEngine.cpp 1808): its first pass may be the
+// skipped call; bWorkToDo is then true (a level pending), so it enters FlushLevelStreaming(Full), as stock does whenever the
+// pending level needs more than that one call or anything is async-loading; FlushAsyncLoading there has nothing to wait for
+// if nothing is loading, and its visibility loop gives the pending level its calls until nothing is pending: the block's
+// end state (nothing pending, check at World.cpp 4593) is stock's. FlushLevelStreaming(Visibility) (travel, teardown): its
+// first TickLevelStreaming may be the skip, its while(IsVisibilityRequestPending) loop then runs the repeat. A block at
+// match start (UWorldPartition::OnWorldMatchStarting) runs with bMatchStarted false: never skipped.
+// Why equivalent (not identical): stock never gives the pending level a call without progress (each step runs before its
+// time check, World.cpp 3176-3186); a skip is a one-frame pause of that level's add. Everything else in the skip frame is
+// what stock does while that level is pending (other levels wait, incremental removals wait: World.cpp 3529); the same
+// components are created by the game's own code in the game's order, the level finishes 1..Max frames later (more with
+// StreamInBudget 2: FAdaptiveAddToWorld restarts its slice from TimeSliceMin after a frame without registered work,
+// World.cpp 297-300); the next level is picked by the game when this one finishes (WP re-sorts every frame, so it may be
+// another one than without the pause, as with a slower slice in stock). UWorld's three fields (the pending level, bMatchStarted's
+// bit, WorldType) are read from AddToWorld's own instructions (byte patterns, each found exactly once; else the skip is not
+// available, one log line). Frame clock: NpcCreationPacing's frame edge (NpcPacingFrameClock); without it, off (one log
+// line). Only while StreamInBudget is 1 or 2 (one log line otherwise).
+namespace {
+constexpr int kHsRing = 64;
+constexpr size_t kHsSearch = 0x300;  // AddToWorld's entry block (the three reads are at +0x69 .. +0x12C on Steam 19115871)
+// The step runs only when the pending level is this level or none (World.cpp 3107): the
+// field's load (mov rcx,[r13+disp32]), StartTime's conversion, then cmp rcx,r14 / je / test rcx,rcx / je / xor bl,bl / mov bl,1
+constexpr const char* kHsPending = "49 8B 8D ?? ?? ?? ?? 45 0F 57 C0 F2 44 0F 10 15 ?? ?? ?? ?? F2 4C 0F 2A 45 ?? F2 44 0F 59 05 "
+                                   "?? ?? ?? ?? F2 45 0F 58 C2 49 3B CE 74 ?? 48 85 C9 74 ?? 32 DB EB 02 B3 01";
+// bIsGameWorld = IsGameWorld(): movzx eax,byte [r13+WorldType]; cmp al,6; ja; mov edx,0x6A (Game, PIE, GamePreview, GameRPC); bt
+constexpr const char* kHsType = "41 0F B6 85 ?? ?? ?? ?? 3C 06 77 ?? BA 6A 00 00 00 0F A3 C2 73 ?? 40 B6 01";
+// bConsiderTimeLimit &= bMatchStarted && bIsGameWorld (World.cpp 3121): test byte [r13+x],bit; je; test sil,sil; jne; xor r15b,r15b
+constexpr const char* kHsMatch = "41 F6 85 ?? ?? ?? ?? ?? 74 ?? 40 84 F6 75 ?? 45 32 FF";
+
+struct HsState {
+    int keyMs = 0, maxPerLevel = 8;
+    const void* pending = nullptr;  // the level pending visibility as last seen at a call's entry
+    int pendingSkips = 0;           // frames this pending level's add was paused (= frames of delay)
+    uint64_t frameStart = 0;        // the frame of the last decision (its start, us)
+    bool frameDecided = false, frameSkipped = false, frameRepeatNoted = false, prevSkipped = false;
+    float ring[kHsRing] = {};
+    int ringN = 0, ringNext = 0;
+    bool noClockLogged = false, noBudgetLogged = false, noLimitLogged = false;
+    unsigned noClockLogs = 0;
+};
+HsState hs;
+// counters: written on the game thread, read by the stats line on the monitor thread (atomics, relaxed)
+struct HsStats {
+    std::atomic<unsigned> skipFrames{0}, declinedInRow{0}, declinedCap{0}, declinedRepeat{0}, fromMedian{0}, levels{0};
+    std::atomic<int> maxPerLevel{0};          // since the last report (the monitor exchanges it to 0)
+    std::atomic<uint64_t> elapsedSumUs{0};    // since the last report: elapsed at the skips, for the mean
+    std::atomic<unsigned> elapsedN{0};
+};
+HsStats hst;
+std::atomic<int> g_hsKey{0}, g_hsMax{8};
+StreamHeavySkipFields g_hsf;  // found at install (InstallStreamRegisterGranularity)
+
+void HsStatsReset()
+{
+    for (std::atomic<unsigned>* a : {&hst.skipFrames, &hst.declinedInRow, &hst.declinedCap, &hst.declinedRepeat, &hst.fromMedian,
+                                     &hst.levels, &hst.elapsedN})
+        a->store(0, std::memory_order_relaxed);
+    hst.maxPerLevel.store(0, std::memory_order_relaxed);
+    hst.elapsedSumUs.store(0, std::memory_order_relaxed);
+}
+
+void HsAdd(std::atomic<unsigned>& a) { a.store(a.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed); }  // one writer
+
+float HsMedian()
+{
+    if (hs.ringN == 0) return 0.0f;
+    float v[kHsRing];
+    memcpy(v, hs.ring, sizeof(float) * hs.ringN);
+    std::nth_element(v, v + hs.ringN / 2, v + hs.ringN);
+    return v[hs.ringN / 2];
+}
+
+// The rule (game thread; the self-test drives it directly). pending = UWorld::CurrentLevelPendingVisibility at the call's
+// entry; timeLimit = the call's bConsiderTimeLimit after stock's own "&= bMatchStarted && bIsGameWorld".
+bool HsDecide(const void* level, const void* pending, bool timeLimit, bool loading, bool clockOk, uint64_t frameStartUs,
+              double elapsedMs)
+{
+    if (pending != hs.pending) {  // another level (or none) in progress: a fresh count (pointer reuse can only inherit
+        hs.pending = pending;     // skips when the observing calls were filtered: then it skips less)
+        hs.pendingSkips = 0;
+    }
+    if (hs.keyMs <= 0 || !timeLimit || loading) return false;
+    if (!pending || pending != level) return false;  // S1: may begin a level / a no-op in stock: the game's way
+    if (!clockOk) {
+        if (!hs.noClockLogged) {
+            hs.noClockLogged = true;
+            ++hs.noClockLogs;
+            Log("[streambudget] heavy-frame skip off: no frame clock (needs NpcCreationPacing)");
+        }
+        return false;
+    }
+    if (frameStartUs != hs.frameStart) {  // a new frame: the last one's decision becomes "the previous frame"
+        hs.prevSkipped = hs.frameSkipped;
+        hs.frameStart = frameStartUs;
+        hs.frameDecided = hs.frameSkipped = hs.frameRepeatNoted = false;
+    } else if (hs.frameDecided) {  // the pending level called again in this frame (a flush / block loop's next pass): goes on
+        if (hs.frameSkipped && !hs.frameRepeatNoted) {
+            hs.frameRepeatNoted = true;
+            HsAdd(hst.declinedRepeat);
+        }
+        return false;
+    }
+    hs.frameDecided = true;
+    const float median = HsMedian();
+    const float threshold = std::max(static_cast<float>(hs.keyMs), hs.ringN ? median + 4.0f : 0.0f);
+    hs.ring[hs.ringNext] = static_cast<float>(elapsedMs);
+    hs.ringNext = (hs.ringNext + 1) % kHsRing;
+    if (hs.ringN < kHsRing) ++hs.ringN;
+    if (elapsedMs < threshold) return false;
+    if (hs.prevSkipped) { HsAdd(hst.declinedInRow); return false; }
+    if (hs.pendingSkips >= hs.maxPerLevel) { HsAdd(hst.declinedCap); return false; }
+    hs.frameSkipped = true;
+    if (hs.pendingSkips++ == 0) HsAdd(hst.levels);
+    if (hs.pendingSkips > hst.maxPerLevel.load(std::memory_order_relaxed))
+        hst.maxPerLevel.store(hs.pendingSkips, std::memory_order_relaxed);
+    HsAdd(hst.skipFrames);
+    if (threshold > static_cast<float>(hs.keyMs)) HsAdd(hst.fromMedian);
+    hst.elapsedSumUs.fetch_add(static_cast<uint64_t>(elapsedMs * 1000.0), std::memory_order_relaxed);
+    HsAdd(hst.elapsedN);
+    return true;
+}
+
+// Stats interval (monitor thread): the heavy-frame skip's line, only when something changed
+void StreamHeavySkipLogStats()
+{
+    static unsigned lastFrames = 0, lastInRow = 0, lastCap = 0, lastRepeat = 0, lastLevels = 0, lastMedian = 0;
+    const unsigned frames = hst.skipFrames.load(std::memory_order_relaxed), inRow = hst.declinedInRow.load(std::memory_order_relaxed),
+                   cap = hst.declinedCap.load(std::memory_order_relaxed), repeat = hst.declinedRepeat.load(std::memory_order_relaxed),
+                   levels = hst.levels.load(std::memory_order_relaxed), median = hst.fromMedian.load(std::memory_order_relaxed);
+    if (frames == lastFrames && inRow == lastInRow && cap == lastCap && repeat == lastRepeat) return;
+    const int maxPer = hst.maxPerLevel.exchange(0, std::memory_order_relaxed);
+    const uint64_t sumUs = hst.elapsedSumUs.exchange(0, std::memory_order_relaxed);
+    const unsigned n = hst.elapsedN.exchange(0, std::memory_order_relaxed);
+    Log("[streambudget] heavy-frame skips since last report: %u frames (one call each, the level being made visible; levels %u, "
+        "most skips of one level %d; elapsed at skip mean %.1f ms; threshold from the median + 4 in %u); heavy but not skipped: "
+        "%u after a skip, %u at the per-level cap; %u blocking-loop passes went on after a skip", frames - lastFrames,
+        levels - lastLevels, maxPer, n ? sumUs / 1000.0 / n : 0.0, median - lastMedian, inRow - lastInRow, cap - lastCap,
+        repeat - lastRepeat);
+    lastFrames = frames;
+    lastInRow = inRow;
+    lastCap = cap;
+    lastRepeat = repeat;
+    lastLevels = levels;
+    lastMedian = median;
+}
+
+uint32_t Disp32(const uint8_t* p) { uint32_t v; memcpy(&v, p, 4); return v; }
+
+// The call's world as AddToWorld reads it at its entry: the pending level, and bConsiderTimeLimit's "&= bMatchStarted &&
+// bIsGameWorld" (World.cpp 3121; IsGameWorld = WorldType Game, PIE, GamePreview or GameRPC, AddToWorld's own bit mask 0x6A).
+// false = the read faulted (no skip).
+bool HsReadWorld(const void* world, const void** pending, bool* matchAndGame)
+{
+    __try {
+        const uint8_t* const w = static_cast<const uint8_t*>(world);
+        *pending = *reinterpret_cast<const void* const*>(w + g_hsf.pending);
+        const uint8_t type = w[g_hsf.worldType];
+        *matchAndGame = type <= 6 && ((0x6Au >> type) & 1u) && (w[g_hsf.matchStarted] & g_hsf.matchMask) != 0;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+}  // namespace
+
+// UWorld's three fields from AddToWorld's own instructions (install; the self-test on the mapped exe). Each pattern must be
+// found exactly once in the function's first kHsSearch bytes, and the pending field is cross-checked against the "begin
+// making visible" block (cmp [r13+pending],0 / cmp [r13+pending+8],r14 = CurrentLevelPendingInvisibility / mov [r13+pending],r14).
+bool StreamHeavySkipFindFields(const uint8_t* addToWorld, size_t searchBytes, StreamHeavySkipFields* out)
+{
+    *out = StreamHeavySkipFields{};
+    if (!addToWorld) return false;
+    const size_t n = std::min(searchBytes, kHsSearch);
+    auto once = [&](const char* text, const uint8_t** at) {
+        const Pattern p = ParsePattern(text);
+        int hits = 0;
+        for (size_t i = 0; i + p.size() <= n; ++i)
+            if (MatchesAt(addToWorld + i, p)) { *at = addToWorld + i; ++hits; }
+        return hits == 1;
+    };
+    const uint8_t *pend = nullptr, *type = nullptr, *match = nullptr;
+    if (!once(kHsPending, &pend) || !once(kHsType, &type) || !once(kHsMatch, &match)) return false;
+    const uint32_t pending = Disp32(pend + 3), worldType = Disp32(type + 4), matchByte = Disp32(match + 3);
+    const uint8_t mask = match[7];
+    if (pending < 0x28 || pending > 0x1000 || worldType > 0x2000 || matchByte > 0x2000 || !mask || (mask & (mask - 1))) return false;
+    // the begin block's reads and write of the same field
+    uint8_t cmp0[8] = {0x49, 0x83, 0xBD, 0, 0, 0, 0, 0x00}, cmpInv[7] = {0x4D, 0x39, 0xB5}, store[7] = {0x4D, 0x89, 0xB5};
+    memcpy(cmp0 + 3, &pending, 4);
+    const uint32_t inv = pending + 8;
+    memcpy(cmpInv + 3, &inv, 4);
+    memcpy(store + 3, &pending, 4);
+    bool c1 = false, c2 = false, c3 = false;
+    for (size_t i = 0; i + 8 <= n; ++i) {
+        c1 = c1 || memcmp(addToWorld + i, cmp0, 8) == 0;
+        c2 = c2 || memcmp(addToWorld + i, cmpInv, 7) == 0;
+        c3 = c3 || memcmp(addToWorld + i, store, 7) == 0;
+    }
+    if (!c1 || !c2 || !c3) return false;
+    out->pending = pending;
+    out->worldType = worldType;
+    out->matchStarted = matchByte;
+    out->matchMask = mask;
+    out->ok = true;
+    return true;
+}
+
+// Install (game thread not running yet): find the fields once; StreamInHeavySkipMs is not available without them.
+void StreamHeavySkipInstallFields(const uint8_t* addToWorld)
+{
+    if (StreamHeavySkipFindFields(addToWorld, kHsSearch, &g_hsf))
+        Log("[streambudget] StreamInHeavySkipMs: UWorld fields from AddToWorld's code: CurrentLevelPendingVisibility +0x%X, "
+            "WorldType +0x%X, bMatchStarted +0x%X bit 0x%X", g_hsf.pending, g_hsf.worldType, g_hsf.matchStarted, g_hsf.matchMask);
+    else
+        Log("[streambudget] StreamInHeavySkipMs: UWorld's pending-visibility field not found in AddToWorld (code not as "
+            "expected): the heavy-frame skip is not available (the key does nothing)");
+}
+
+// Monitor thread, once per second: the key (live). 0 off, 10..100 ms; out of range = off. Max 1..30 (else 8).
+void SetStreamInHeavySkip(int ms, int maxPerLevel)
+{
+    if (ms != 0 && (ms < 10 || ms > 100)) ms = 0;
+    if (maxPerLevel < 1 || maxPerLevel > 30) maxPerLevel = 8;
+    const int before = g_hsKey.exchange(ms, std::memory_order_relaxed);
+    g_hsMax.store(maxPerLevel, std::memory_order_relaxed);
+    if (ms != before)
+        Log("[streambudget] StreamInHeavySkipMs=%d (max %d skipped frames per level)%s", ms, maxPerLevel,
+            ms && !g_active ? ": not active (needs the AddToWorld hook, installed at start-up with StreamInBudget on)"
+            : ms && !g_hsf.ok ? ": not active (UWorld's pending-visibility field was not found)" : "");
+}
+
+// Game thread, every AddToWorld call (after StreamGranBeforeAdd, which applies StreamInBudget and finds the loading mode's
+// variable): true = return without calling the game. world = the call's UWorld (this).
+bool StreamHeavySkipBeforeAdd(const void* world, const void* level, bool considerTimeLimit)
+{
+    const int key = g_hsKey.load(std::memory_order_relaxed);
+    if (key != hs.keyMs) {
+        hs.keyMs = key;
+        hs.noBudgetLogged = hs.noLimitLogged = false;
+    }
+    hs.maxPerLevel = g_hsMax.load(std::memory_order_relaxed);
+    if (key == 0 || !g_active || !g_hsf.ok || !considerTimeLimit || !world) return false;
+    const int budget = g_budgetKey.load(std::memory_order_relaxed);
+    if (budget != 1 && budget != 2) {
+        if (!hs.noBudgetLogged) {
+            hs.noBudgetLogged = true;
+            Log("[streambudget] heavy-frame skip off: needs StreamInBudget 1 or 2 (it is %d)", budget);
+        }
+        return false;
+    }
+    if (!g_limit) {  // the loading mode cannot be read (yet): never skip
+        if (!hs.noLimitLogged) {
+            hs.noLimitLogged = true;
+            Log("[streambudget] heavy-frame skip: s.LevelStreamingActorsUpdateTimeLimit not found (yet): no skip until it is");
+        }
+        return false;
+    }
+    bool loading = true, timeLimit = false;
+    const void* pending = nullptr;
+    __try {
+        loading = CvarFloat(g_limit) >= kLoadingLimitMs;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if (!HsReadWorld(world, &pending, &timeLimit)) return false;
+    uint64_t startUs = 0, elapsedUs = 0;
+    const bool clock = NpcPacingFrameClock(&startUs, &elapsedUs);
+    const bool skip = HsDecide(level, pending, timeLimit, loading, clock, startUs, elapsedUs / 1000.0);
+    if (!skip) return false;
+    // a paused add is still a cell being added (GcPassAfterBusy and WaterInfoAfterCrossing count it as streaming)
+    if (GcPassAfterBusyWatching()) GcPassAfterBusyNoteStream(0);
+    if (WaterCrossingWatching()) WaterCrossingNoteStream();
+    return true;
+}
+
+void StreamHeavySkipTestReset(int ms, int maxPerLevel)
+{
+    hs = HsState{};
+    hs.keyMs = ms;
+    hs.maxPerLevel = maxPerLevel;
+    HsStatsReset();
+}
+
+bool StreamHeavySkipTestCall(const void* level, const void* pending, bool timeLimit, bool loading, bool clockOk,
+                             uint64_t frameStartUs, double elapsedMs)
+{
+    return HsDecide(level, pending, timeLimit, loading, clockOk, frameStartUs, elapsedMs);
+}
+
+// self-test: set (or clear, nullptr) the fields as if found at install; the entry's world read
+void StreamHeavySkipTestFields(const StreamHeavySkipFields* f) { g_hsf = f ? *f : StreamHeavySkipFields{}; }
+bool StreamHeavySkipTestReadWorld(const void* world, const void** pending, bool* timeLimit)
+{
+    return HsReadWorld(world, pending, timeLimit);
+}
+
+StreamHeavySkipTestStats StreamHeavySkipTestRead()
+{
+    return {hst.skipFrames.load(), hst.declinedInRow.load(), hst.declinedCap.load(), hst.declinedRepeat.load(), hs.noClockLogs,
+            hst.fromMedian.load(), static_cast<unsigned>(hst.maxPerLevel.load()), static_cast<unsigned>(hs.pendingSkips)};
+}
+
 void StreamGranLogStats()
 {
     if (!g_active) return;
+    StreamHeavySkipLogStats();  // StreamInHeavySkipMs: only when something changed
     {   // StreamInBudget: only when its sets changed
         static unsigned lastBudgetSets = 0;
         if (g_budgetSets != lastBudgetSets) {

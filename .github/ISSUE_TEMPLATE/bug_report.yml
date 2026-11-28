@@ -7,6 +7,8 @@ body:
       value: |
         Thanks for reporting! First, please check whether the problem also happens **without** the fix: set every switch in
         `OblivionPerfFix.ini` to 0 (or remove `version.dll`) and try again. That tells us whether it's the fix or the game.
+
+        Did the game **crash or hang**? Please use the "Crash or hang" form instead: it has a report tool that collects the details for you.
   - type: textarea
     id: what
     attributes:
@@ -78,4 +80,4 @@ body:
     id: crash
     attributes:
       label: Crash details (if it crashed)
-      description: The error message, and if there is one, the newest folder in `Documents\My Games\Oblivion Remastered\Saved\Crashes\` zipped and attached.
+      description: The error message. For crashes and hangs please use the "Crash or hang" form (run `OblivionPerfFix-CollectReport.bat`; it makes the zip to attach).

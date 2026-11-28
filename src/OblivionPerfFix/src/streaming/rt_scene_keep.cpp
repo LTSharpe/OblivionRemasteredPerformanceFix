@@ -10,7 +10,32 @@
 // docs/research.md). Mode 1 removes the "less than half" re-creation: a buffer that is big enough stays. The TLAS built
 // into it is the same (it is built at the start of the buffer it is given; the layers' views use the scene's own offsets),
 // so the picture is identical; only the buffer's capacity differs (at most the largest size this session already needed).
-// Growth re-creates it as before.
+// Growth re-creates it as before (see RtSceneBufferGrowToPeak below for the lab variant).
+//
+// Growth.
+//
+// RtSceneBufferGrowToPeak (worker s001load 2026-11-25, ported to the public tree by s001port 2026-11-26, S-001; default 0 until the
+// release, live; needs RtSceneBufferKeep=1): each world
+// change gives the scene a new TLAS buffer from nothing (an Oblivion-plane entry re-creates it at 16 MiB, "was 112"), and the next
+// world then grows it in 16 MiB steps again (64 inside the loading screen, then 80, 96, 112 in play 30-60 s later). After a load
+// near the video-memory budget each such creation is the render thread waiting 100-155 ms on its own residency step (findings
+// s001load: bench c2-ride 154 / 149 / 152 ms, in play 102.5 ms). With the key on, a creation that grows the buffer
+// (need above the last created size) WHILE A LOADING SCREEN IS UP is made at the largest size this session has already needed,
+// at most twice the need: one creation inside the loading screen instead of one per step in play. In play a growth is the
+// game's own step (review revgrowpeak S2-1: a peak-size creation in a play frame could cost more than the one step it replaces).
+// The loading state is LoadingScreenNow (memory/load_peak_keeps.cpp: written each game-thread frame by NpcCreationPacing's frame
+// hook with the hitch ledger's rule; -1 unknown = the key does nothing; on the render thread it lags by up to a frame). The growths land in the loading screen because DrawBehindLoadingScreen renders frames there; without it the
+// first growth is the first play frame and stays a stock step.
+// Same argument as the keep (shipped; UE 5.3 RayTracingScene.cpp / D3D12RayTracing.cpp BindBuffer `<=` check, AS views =
+// GPU VA + offset, no size): the TLAS is built at the start of the buffer it is given and the layers' views use the scene's own
+// offsets, so the picture is identical; only the capacity differs. Bound (S2-2): min(this session's largest need, 2 x need), so
+// the extra capacity is at most the need itself (64 needed -> 112 made: +48 MiB; 32 -> 64: +32), held until the scene drops its
+// buffer (the next world change or a frame without ray tracing) or the world's own need reaches it. A need above the peak is made
+// at the need, as before. The RDG desc keeps the need while the RHI buffer is larger (review s001rev: after a grow to 112 for 64,
+// needs of 80-112 keep the buffer while the RDG desc says 64; no Shipping consumer reads that size for a TLAS: views and
+// BindBuffer's `<=` check use the RHI buffer, UE 5.3 RHIResources.cpp FRHIViewDesc::GetViewInfo). It adds up to +need MiB in the
+// load's peak second, against LoadPeakKeepsBack's 0.26-0.46 GB given back there (the first thing to drop if a play shows a
+// peak second within ~50 MB over the budget).
 //
 // How: the check "need > size: re-create; need < size / 2: re-create" is
 //   48 3B C8 (cmp rcx,rax) | 77 0C (ja re-create) | 48 D1 E8 (shr rax,1) | 48 3B C8 (cmp rcx,rax) | 0F 83 rel32 (jae keep)
@@ -57,7 +82,7 @@ struct Sites {
 };
 Sites g;
 bool g_installed = false;
-int g_mode = 0;
+std::atomic<int> g_mode{0};  // written on the monitor thread, read on the render thread (review S3-1)
 // The stub's data (read-write, near the game's code): [0] keep flag (byte), [8] kept count, [16] shrinks re-created count.
 uint8_t* g_data = nullptr;
 uint8_t* g_stub = nullptr;
@@ -65,7 +90,14 @@ uint8_t* g_slots = nullptr;  // three hook pointers for call [rip+disp32]
 
 std::atomic<uint64_t> s_creates[kSites], s_us[kSites], s_maxUs[kSites], s_slow[kSites];
 std::atomic<uint32_t> s_lastSize[kSites];
-uint64_t s_keptLogged = 0, s_shrinkLogged = 0;
+std::atomic<bool> g_growPeak{false};  // s001load: RtSceneBufferGrowToPeak
+std::atomic<uint64_t> s_peakNeed{0};    // the largest NEED (never a created size) of any SceneBuffer creation this session
+std::atomic<uint64_t> s_grown{0};       // growths made larger than the need
+std::atomic<uint64_t> s_grownReplaced{0};  // a grown buffer re-created smaller right after (review S3-4: watch in play)
+std::atomic<uint32_t> s_lastGrown{0};   // size of the last grown creation (0: the last creation was not grown)
+uint64_t s_keptLogged = 0, s_shrinkLogged = 0, s_grownLogged = ~0ull, s_replacedLogged = ~0ull;
+constexpr int kNoTest = -100;
+std::atomic<int> g_testLoading{kNoTest};  // self-test only: the loading state the hook sees
 
 uint64_t NowUs()
 {
@@ -86,11 +118,35 @@ template <int N>
 void** CreateHook(void* rhi, void** out, uint8_t* cmdList, const BufferDesc* desc, uint32_t access, uint8_t* createInfo)
 {
     const CreateFn create = reinterpret_cast<CreateFn>((*reinterpret_cast<void***>(rhi))[g.slot / 8]);
+    // s001load: RtSceneBufferGrowToPeak (needs the keep on, else a larger buffer could be re-created smaller at once)
+    BufferDesc grown{};  // FRHIBufferDesc {Size, Stride, Usage}, 12 bytes (RHIResources.h:1147); RHICreateBuffer copies it (no pointer kept)
+    const BufferDesc* use = desc;
+    const uint32_t need = desc ? desc->size : 0;
+    if constexpr (N == kScene) {
+        if (desc && g_mode.load(std::memory_order_relaxed) == 1 && g_growPeak.load(std::memory_order_relaxed)) {
+            const int forced = g_testLoading.load(std::memory_order_relaxed);
+            const int loading = forced != kNoTest ? forced : LoadingScreenNow();
+            const uint32_t to = RtSceneGrowSize(need, s_lastSize[N].load(std::memory_order_relaxed),
+                                                static_cast<uint32_t>(s_peakNeed.load(std::memory_order_relaxed)), loading);
+            if (to != need) {
+                memcpy(&grown, desc, sizeof grown);
+                grown.size = to;
+                use = &grown;
+                s_grown.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        Max(s_peakNeed, need);  // review S3-2 (a second Create caller cannot lose a peak)
+    }
     const uint64_t t0 = NowUs();
-    void** const r = create(rhi, out, cmdList, desc, access, createInfo);
+    void** const r = create(rhi, out, cmdList, use, access, createInfo);
     const uint64_t us = NowUs() - t0;
-    const uint32_t size = desc ? desc->size : 0;
+    const uint32_t size = use ? use->size : 0;
+    if (use != desc) Log("[rtscene] SceneBuffer grown to this session's peak: %.1f MiB (needed %.1f MiB)", size / 1048576.0, need / 1048576.0);
     const uint32_t was = s_lastSize[N].exchange(size);
+    if constexpr (N == kScene) {
+        const uint32_t lastGrown = s_lastGrown.exchange(use != desc ? size : 0);
+        if (lastGrown && was == lastGrown && size < was) s_grownReplaced.fetch_add(1, std::memory_order_relaxed);
+    }
     s_creates[N].fetch_add(1, std::memory_order_relaxed);
     s_us[N].fetch_add(us, std::memory_order_relaxed);
     Max(s_maxUs[N], us);
@@ -149,6 +205,30 @@ bool BuildStub(uint8_t* code, const uint8_t* data, const uint8_t* shrBytes, cons
 }
 
 }  // namespace
+
+uint32_t RtSceneGrowSize(uint32_t need, uint32_t last, uint32_t peak, int loading)
+{
+    if (loading != 1 || need <= last || peak <= need) return need;
+    const uint64_t cap = 2ull * need;
+    return static_cast<uint32_t>(peak < cap ? peak : cap);
+}
+
+void SetRtSceneGrowPeak(bool on)
+{
+    // effective state (review S3-5): 0 off, 1 on, 2 the keep is not installed, 3 the keep is not in mode 1
+    const int eff = !on ? 0 : !g_installed ? 2 : g_mode.load(std::memory_order_relaxed) != 1 ? 3 : 1;
+    g_growPeak.store(eff == 1, std::memory_order_relaxed);
+    static int logged = 0;
+    if (eff == logged) return;
+    logged = eff;
+    static const char* const kMsg[4] = {
+        "[rtscene] RtSceneBufferGrowToPeak off: the TLAS buffer grows in the game's steps",
+        "[rtscene] RtSceneBufferGrowToPeak on: a TLAS buffer growth while a loading screen is up is made at this session's largest need, "
+        "at most twice the need",
+        "[rtscene] RtSceneBufferGrowToPeak asked for but RtSceneBufferKeep is not installed: does nothing",
+        "[rtscene] RtSceneBufferGrowToPeak asked for but RtSceneBufferKeep is not in mode 1: does nothing"};
+    Log("%s", kMsg[eff]);
+}
 
 bool RtSceneLogCreate(int site, uint32_t size, uint32_t was, uint64_t us)
 {
@@ -298,6 +378,12 @@ void LogRtSceneKeepStats()
         total += creates[k];
     }
     if (!total && kept == s_keptLogged && shrinks == s_shrinkLogged) return;
+    if (g_growPeak.load(std::memory_order_relaxed) && (s_grown.load() != s_grownLogged || s_grownReplaced.load() != s_replacedLogged)) {
+        s_grownLogged = s_grown.load();
+        s_replacedLogged = s_grownReplaced.load();
+        Log("[rtscene] RtSceneBufferGrowToPeak: %llu growths made larger than the need (session peak %.0f MiB), %llu of them re-created smaller right after",
+            static_cast<unsigned long long>(s_grown.load()), s_peakNeed.load() / 1048576.0, static_cast<unsigned long long>(s_grownReplaced.load()));
+    }
     Log("[rtscene] since last report: TLAS buffer kept instead of shrinking in %llu frames, re-created smaller %llu times; creations "
         "SceneBuffer %llu (%.1f ms, longest %.1f, %llu >= 5 ms; now %.0f MiB), InstanceUpload %llu (%.1f ms, longest %.1f), TransformUpload "
         "%llu (%.1f ms, longest %.1f)",
@@ -342,6 +428,41 @@ bool RtSceneKeepTestPatched()
         if (g.call[k] && (g.call[k][0] != 0xFF || g.call[k][1] != 0x15 || *reinterpret_cast<void**>(RipTarget(g.call[k], 2, 6)) == nullptr))
             return false;
     return g.call[kInstanceUpload] && g.call[kTransformUpload];
+}
+
+// Self-test: one SceneBuffer creation through the hook with a fake RHI whose create slot records the desc it was given.
+namespace {
+uint32_t g_testSeen[3] = {};
+void* g_testOut = nullptr;
+void** FakeCreate(void*, void** out, uint8_t*, const BufferDesc* desc, uint32_t, uint8_t*)
+{
+    if (desc) { g_testSeen[0] = desc->size; g_testSeen[1] = desc->stride; g_testSeen[2] = desc->usage; }
+    *out = &g_testOut;
+    return out;
+}
+}  // namespace
+
+int64_t RtSceneTestGrowCreate(uint32_t size, uint32_t stride, uint32_t usage, int loading, uint32_t* seen)
+{
+    if (!g_installed || !g.slot) return -1;
+    static void* vtable[0x800 / 8 + 1] = {};
+    vtable[g.slot / 8] = reinterpret_cast<void*>(&FakeCreate);
+    void* rhi[1] = {vtable};
+    g_testSeen[0] = g_testSeen[1] = g_testSeen[2] = 0;
+    g_testLoading.store(loading, std::memory_order_relaxed);
+    const BufferDesc d{size, stride, usage};
+    void* out = nullptr;
+    CreateHook<kScene>(rhi, &out, nullptr, &d, 0, nullptr);
+    g_testLoading.store(kNoTest, std::memory_order_relaxed);
+    if (seen) memcpy(seen, g_testSeen, sizeof g_testSeen);
+    return g_testSeen[0];
+}
+
+void RtSceneTestGrowReset()
+{
+    s_peakNeed = 0;
+    s_lastSize[kScene] = 0;
+    s_lastGrown = 0;
 }
 
 }  // namespace opf

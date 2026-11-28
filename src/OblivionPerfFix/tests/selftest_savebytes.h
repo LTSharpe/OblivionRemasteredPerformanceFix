@@ -20,24 +20,90 @@ struct Archive {
     void* customList;      // +0x60
     uint8_t pad68[8];
     void* serializedProp;  // +0x70
-    uint8_t pad78[0x80];
+    uint8_t pad78[0x18];
+    size_t off = 0;        // +0x90: the read position (Tell / Seek are machine-code stubs that read / write it, as FMemoryArchive's)
+    uint8_t pad98[0x60];
     std::vector<uint8_t> bytes;
     std::vector<int64_t> calls;  // Serialize lengths
     size_t countNum = 0, countMax = 0;
     int pushes = 0, pops = 0, unexpected = 0;
+    // A loading memory archive (FMemoryReader's rules): the data, the offset, TotalSize; Serialize copies all or nothing and
+    // sets the error bit (+0x29 bit 1) when it would run past the end. totalKnown false = TotalSize answers -1 (the default).
+    bool readMode = false, totalKnown = true;
+    std::vector<uint8_t> src;
+    size_t off2 = 0;  // a second cursor, for the archive whose Serialize does not move the member Tell reads
 };
 static_assert(offsetof(Archive, flags) == 0x28 && offsetof(Archive, ueVer) == 0x40 && offsetof(Archive, customList) == 0x60 &&
-                  offsetof(Archive, serializedProp) == 0x70, "archive layout");
+                  offsetof(Archive, serializedProp) == 0x70 && offsetof(Archive, off) == 0x90, "archive layout");
 
 void Unexpected(Archive* a) { ++a->unexpected; }
 void CountBytes(Archive* a, size_t num, size_t max) { a->countNum += num; a->countMax += max; }
-int64_t Tell(Archive* a) { return static_cast<int64_t>(a->bytes.size()); }
-void Serialize(Archive* a, const uint8_t* data, int64_t n)
+int64_t TotalSize(Archive* a) { return a->readMode && a->totalKnown ? static_cast<int64_t>(a->src.size()) : -1; }
+void Serialize(Archive* a, uint8_t* data, int64_t n)
 {
     a->calls.push_back(n);
+    if (a->readMode) {
+        if (n <= 0 || (a->flags[1] & 2)) return;
+        if (a->off + static_cast<size_t>(n) > a->src.size()) { a->flags[1] |= 2; return; }
+        memcpy(data, a->src.data() + a->off, static_cast<size_t>(n));
+        a->off += static_cast<size_t>(n);
+        return;
+    }
     a->bytes.insert(a->bytes.end(), data, data + n);
 }
-void Seek(Archive*, int64_t) {}
+// Seeks the archive's code check must not accept (C++, so not the plain store): one that does nothing, one that only goes forward.
+void SeekNoop(Archive* a, int64_t) { ++a->pops; --a->pops; }
+void SeekForward(Archive* a, int64_t pos)
+{
+    if (pos > static_cast<int64_t>(a->off)) a->off = static_cast<size_t>(pos);
+}
+// Serialize that reads from off2 and leaves off (the member Tell / Seek use) alone: an archive the code check accepts but whose
+// Tell does not move over the peek (the post-peek check's case).
+void SerializeOwnCursor(Archive* a, uint8_t* data, int64_t n)
+{
+    a->calls.push_back(n);
+    if (n <= 0 || a->off2 + static_cast<size_t>(n) > a->src.size()) return;
+    memcpy(data, a->src.data() + a->off2, static_cast<size_t>(n));
+    a->off2 += static_cast<size_t>(n);
+}
+// A proxy (FArchiveProxy's layout here: the inner archive pointer at +0x90, in the off member): Tell / Seek are forwarder stubs;
+// TotalSize and Serialize forward in C++ (the code check does not look at them).
+Archive* InnerOf(Archive* a) { return reinterpret_cast<Archive*>(a->off); }
+int64_t TotalSize(Archive* a);
+void Serialize(Archive* a, uint8_t* data, int64_t n);
+int64_t ProxyTotal(Archive* a) { return TotalSize(InnerOf(a)); }
+void ProxySerialize(Archive* a, uint8_t* data, int64_t n) { a->calls.push_back(n); Serialize(InnerOf(a), data, n); }
+
+// Machine-code stubs (an executable page): the shapes the hook accepts, and some it must refuse.
+constexpr uint8_t kStubLeafTell[] = {0x48, 0x8B, 0x81, 0x90, 0, 0, 0, 0xC3};          // mov rax,[rcx+90h]; ret
+constexpr uint8_t kStubLeafSeek[] = {0x48, 0x89, 0x91, 0x90, 0, 0, 0, 0xC3};          // mov [rcx+90h],rdx; ret
+constexpr uint8_t kStubFwdTell[] = {0x48, 0x8B, 0x89, 0x90, 0, 0, 0, 0x48, 0x8B, 0x01, 0x48, 0xFF, 0x60, 0x28};               // jmp [rax+28h]
+constexpr uint8_t kStubFwdSeek[] = {0x48, 0x8B, 0x89, 0x90, 0, 0, 0, 0x48, 0x8B, 0x01, 0x48, 0xFF, 0xA0, 0xA0, 0x01, 0, 0};  // jmp [rax+1A0h]
+constexpr uint8_t kStubTell8[] = {0x48, 0x8B, 0x41, 0x10, 0xC3};                      // mov rax,[rcx+10h]; ret
+constexpr uint8_t kStubSeek8[] = {0x48, 0x89, 0x51, 0x10, 0xC3};                      // mov [rcx+10h],rdx; ret
+constexpr uint8_t kStubSeek98[] = {0x48, 0x89, 0x91, 0x98, 0, 0, 0, 0xC3};            // another member than Tell's
+constexpr uint8_t kStubRet[] = {0xC3};
+constexpr uint8_t kStubFwdSeekToTell[] = {0x48, 0x8B, 0x89, 0x90, 0, 0, 0, 0x48, 0x8B, 0x01, 0x48, 0xFF, 0x60, 0x28};  // a "Seek" that forwards to Tell's slot
+enum StubId { kLeafTell, kLeafSeek, kFwdTell, kFwdSeek, kTell8, kSeek8, kSeek98, kRet, kFwdSeekToTell, kStubCount };
+uint8_t* g_stubs = nullptr;
+void* Stub(int id) { return g_stubs ? g_stubs + 32 * id : nullptr; }
+bool MakeStubs()
+{
+    if (g_stubs) return true;
+    uint8_t* const page = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    if (!page) return false;
+    memset(page, 0xCC, 4096);
+    const std::pair<const uint8_t*, size_t> code[kStubCount] = {
+        {kStubLeafTell, sizeof kStubLeafTell}, {kStubLeafSeek, sizeof kStubLeafSeek}, {kStubFwdTell, sizeof kStubFwdTell},
+        {kStubFwdSeek, sizeof kStubFwdSeek},   {kStubTell8, sizeof kStubTell8},       {kStubSeek8, sizeof kStubSeek8},
+        {kStubSeek98, sizeof kStubSeek98},     {kStubRet, sizeof kStubRet},           {kStubFwdSeekToTell, sizeof kStubFwdSeekToTell}};
+    for (int i = 0; i < kStubCount; ++i) memcpy(page + 32 * i, code[i].first, code[i].second);
+    DWORD old = 0;
+    if (!VirtualProtect(page, 4096, PAGE_EXECUTE_READ, &old)) return false;
+    FlushInstructionCache(GetCurrentProcess(), page, 4096);
+    g_stubs = page;
+    return true;
+}
 void Push(Archive* a, void*, bool) { ++a->pushes; }
 void Pop(Archive* a, void*, bool) { ++a->pops; }
 
@@ -45,7 +111,14 @@ void* g_archiveVtable[80];
 void* g_innerVtable[48];
 int g_fakeOrigCalls = 0;
 int MinAlignment() { return 1; }
-void FakeOriginal(void*, void*, void*, const void*) { ++g_fakeOrigCalls; }
+Archive* g_fakeAr = nullptr;     // read-side tests: the archive FakeOriginal reports on
+uint8_t g_fakeSeenFlags = 0xFF;  // its flag byte as FakeOriginal saw it
+void FakeOriginal(void*, void*, void*, const void*)
+{
+    ++g_fakeOrigCalls;
+    if (g_fakeAr) g_fakeSeenFlags = g_fakeAr->flags[0];
+}
+void* MemsetForGame(void* d, int v, size_t n) { return memset(d, v, n); }
 
 struct Fakes {
     alignas(16) uint8_t cls[0x40] = {};
@@ -62,6 +135,7 @@ struct Fakes {
         *reinterpret_cast<void***>(inner) = g_innerVtable;
         *reinterpret_cast<uint8_t**>(inner + 0x08) = cls;
         *reinterpret_cast<int32_t*>(inner + 0x34) = 1;
+        *reinterpret_cast<uint64_t*>(inner + 0x38) = 0x1040000200ull;  // PropertyFlags: ZeroConstructor | no destructor (the read side)
         *reinterpret_cast<void**>(array + 0x78) = inner;
         ar.vtable = g_archiveVtable;
         ar.fplb = fplb;
@@ -76,11 +150,15 @@ struct Fakes {
 inline void SaveBytesSelfTest(const opf::GameModule& game)
 {
     using namespace opf;
+    const bool stubs = MakeStubs();
+    Check(stubs, "savebytesread: the machine-code Tell / Seek stubs (an executable page)");
+    if (!stubs) return;
     for (auto& v : g_archiveVtable) v = reinterpret_cast<void*>(&Unexpected);
     g_archiveVtable[0x10 / 8] = reinterpret_cast<void*>(&CountBytes);
-    g_archiveVtable[0x28 / 8] = reinterpret_cast<void*>(&Tell);
+    g_archiveVtable[0x28 / 8] = Stub(kLeafTell);
+    g_archiveVtable[0x30 / 8] = reinterpret_cast<void*>(&TotalSize);
     g_archiveVtable[0x170 / 8] = reinterpret_cast<void*>(&Serialize);
-    g_archiveVtable[0x1A0 / 8] = reinterpret_cast<void*>(&Seek);
+    g_archiveVtable[0x1A0 / 8] = Stub(kLeafSeek);
     g_archiveVtable[0x228 / 8] = reinterpret_cast<void*>(&Push);
     g_archiveVtable[0x230 / 8] = reinterpret_cast<void*>(&Pop);
     uint8_t* const arrayFn = game.base + 0x10BB690;
@@ -92,8 +170,9 @@ inline void SaveBytesSelfTest(const opf::GameModule& game)
     void** const slotA = reinterpret_cast<void**>(game.base + 0x6E84060);
     void** const slotB = reinterpret_cast<void**>(game.base + 0x6E94C08);
     Check(*slotA == arrayFn && *slotB == arrayFn, "savebytes: FArrayProperty::SerializeItem in both vtables at +0xB8 (exe+0x6E84060, +0x6E94C08)");
-    Check(!InstallSaveBytes(false, true, true), "savebytes: refuses to install after game code started");
-    Check(!InstallSaveBytes(true, false, false), "savebytes: nothing installed with both keys off");
+    Check(!InstallSaveBytes(false, true, true, true), "savebytes: refuses to install after game code started");
+    Check(!InstallSaveBytes(true, false, false, false), "savebytes: nothing installed with all keys off");
+    Check(!SaveBytesReadInstalled(), "savebytesread: not installed yet");
     Check(*slotA == arrayFn && *slotB == arrayFn, "savebytes: the vtable slots untouched while not installed");
     // The scan's hit check: the four call sites pass; an E8 call not followed by test al,al and a copy outside the code fail.
     {
@@ -108,7 +187,8 @@ inline void SaveBytesSelfTest(const opf::GameModule& game)
         memcpy(copy, game.base + 0x31BF6B6, sizeof copy);
         Check(!SaveCallSiteValid(game, copy), "savebytes: the same bytes outside the game's code are refused");
     }
-    Check(InstallSaveBytes(true, true, true), "savebytes: array/byte SerializeItem, SaveGameToMemory and its calls found, installed");
+    Check(InstallSaveBytes(true, true, true, true), "savebytes: array/byte SerializeItem, SaveGameToMemory and its calls found, installed");
+    Check(SaveBytesReadInstalled(), "savebytesread: the bulk branch's four byte checks held, installed with the same vtable slots");
     Check(*slotA != arrayFn && *slotB != arrayFn, "savebytes: both vtable slots now point to the hook");
     {
         int32_t rel;
@@ -239,6 +319,306 @@ inline void SaveBytesSelfTest(const opf::GameModule& game)
     static uint8_t buf[16];
     Check(falls([](Fakes& f) { f.fplb[0] = reinterpret_cast<uintptr_t>(buf); f.fplb[1] = reinterpret_cast<uintptr_t>(buf + 16); }),
           "savebytes: a fast-path load buffer with room: the game's function");
+
+    // ---- SaveBytesBulkRead: the game's own function with its bulk branch switched on for one call, against the per-element read ----
+    {
+        using ArrFn = void (*)(void*, void*, void*, const void*);
+        // 1. The four byte checks of the branch, and a copy of the function with one byte changed.
+        Check(SaveBytesReadBranchOk(arrayFn), "savebytesread: the bulk branch's four byte checks (+0x66 / +0xA7 / +0xB9 / +0x221) hold in the game's function");
+        {
+            uint8_t copy[0x240];
+            memcpy(copy, arrayFn, sizeof copy);
+            bool all = true;
+            for (size_t off : {size_t{0x66}, size_t{0x68}, size_t{0xA7}, size_t{0xAB}, size_t{0xB9}, size_t{0xBD}, size_t{0x221}, size_t{0x225}}) {
+                copy[off] ^= 1;
+                all &= !SaveBytesReadBranchOk(copy);
+                copy[off] ^= 1;
+            }
+            Check(all && SaveBytesReadBranchOk(copy), "savebytesread: one changed byte in any of the four places turns the key off (a copy of the function)");
+        }
+        // 2. The game's zero-construct (AddValues) calls memset through an import thunk of the mapped exe: point its slot at this CRT's.
+        void** const memsetSlot = reinterpret_cast<void**>(game.base + 0x6D97750);
+        int32_t thunkRel = 0;
+        memcpy(&thunkRel, game.base + 0x6BFC464 + 2, 4);
+        const bool thunkOk = game.base[0x6BFC464] == 0xFF && game.base[0x6BFC465] == 0x25 &&
+                             reinterpret_cast<void**>(game.base + 0x6BFC464 + 6 + thunkRel) == memsetSlot;
+        Check(thunkOk, "savebytesread: the memset import thunk exe+0x6BFC464 reads the slot exe+0x6D97750");
+        void* const savedMemset = *memsetSlot;
+        DWORD oldProt = 0;
+        const bool writable = thunkOk && VirtualProtect(memsetSlot, sizeof(void*), PAGE_READWRITE, &oldProt);
+        if (writable) *memsetSlot = reinterpret_cast<void*>(&MemsetForGame);
+
+        struct SArr { uint8_t* data; int32_t num, max; };
+        struct Result {
+            std::vector<uint8_t> data;
+            int32_t num = 0, max = 0;
+            size_t off = 0;
+            bool err = false;
+            size_t cNum = 0, cMax = 0;
+            std::vector<int64_t> calls;
+            int unexpected = 0, pushes = 0, pops = 0;
+            uint8_t flags0 = 0;
+        };
+        // Source stream: prefix bytes, the int32 count, payload bytes (random), trailing bytes.
+        std::mt19937 rr(11);
+        auto makeSrc = [&](size_t prefix, int32_t count, size_t payload, size_t trailing) {
+            std::vector<uint8_t> s(prefix + 4 + payload + trailing);
+            for (auto& b : s) b = static_cast<uint8_t>(rr());
+            memcpy(s.data() + prefix, &count, 4);
+            return s;
+        };
+        int hookMode = 1;  // the key's value for hook runs (lab: 2 = verify)
+        // One run: the game's function alone, or through the hook (the key on), on a fresh fake loading archive.
+        // vt: another vtable for the archive (nullptr = the plain memory reader); proxy: f.ar forwards to a second archive that
+        // holds the data (the position, error bit and data are read from it).
+        auto run = [&](bool hook, const std::vector<uint8_t>& src, size_t start, int32_t destMax, int32_t destNum, bool prop,
+                       void** vt = nullptr, bool proxy = false) {
+            Fakes f;
+            Archive inner{};
+            Archive& data = proxy ? inner : f.ar;
+            f.ar.readMode = true;
+            f.ar.flags[0] = 0x01;
+            data.readMode = true;
+            data.flags[0] = 0x01;
+            data.vtable = g_archiveVtable;
+            data.src = src;
+            data.off = start;
+            if (vt) f.ar.vtable = vt;
+            if (proxy) f.ar.off = reinterpret_cast<size_t>(&inner);
+            if (prop) f.ar.serializedProp = f.array;
+            std::vector<uint8_t> dbuf(static_cast<size_t>(destMax > 0 ? destMax : 1), 0xCD);
+            SArr arr{dbuf.data(), destNum, destMax};
+            SaveBytesTestSetup(arrayFn, getArchive, byteFn, false, hook ? hookMode : 0);
+            SaveBytesTestCall(f.array, f.slot, &arr, false);
+            Result r;
+            r.data.assign(dbuf.begin(), dbuf.begin() + std::min<size_t>(dbuf.size(), static_cast<size_t>(std::max(arr.num, 0))));
+            r.num = arr.num; r.max = arr.max; r.off = data.off; r.err = (data.flags[1] & 2) != 0;
+            r.cNum = f.ar.countNum; r.cMax = f.ar.countMax; r.calls = f.ar.calls;
+            r.unexpected = f.ar.unexpected; r.pushes = f.ar.pushes; r.pops = f.ar.pops; r.flags0 = f.ar.flags[0];
+            return r;
+        };
+        auto sameResult = [](const Result& a, const Result& b) {
+            return a.data == b.data && a.num == b.num && a.max == b.max && a.off == b.off && a.err == b.err && a.cNum == b.cNum &&
+                   a.cMax == b.cMax && a.flags0 == b.flags0;
+        };
+        if (writable) {
+            // 3. Equivalence matrix: the same array, final offset, error bit, CountBytes and flag byte; the call lists differ as intended.
+            bool rsame = true, calls = true, rclean = true, restored = true;
+            int runs = 0;
+            for (int32_t n : {512, 513, 4096, 100003, (1 << 20) + 5}) {
+                for (int prop = 0; prop < 2; ++prop) {
+                    for (int pre = 0; pre < 2; ++pre) {
+                        const size_t prefix = pre ? 13 : 0;
+                        const auto src = makeSrc(prefix, n, static_cast<size_t>(n), pre ? 5 : 0);
+                        // destination Max == n (the game's resize is then skipped: the mapped exe has no allocator); Num 0, or 7 (the destruct call)
+                        for (int32_t destNum : {0, 7}) {
+                            const Result g = run(false, src, prefix, n, destNum, prop != 0);
+                            const Result h = run(true, src, prefix, n, destNum, prop != 0);
+                            ++runs;
+                            rsame &= sameResult(g, h) && g.num == n && !g.err && g.off == prefix + 4 + static_cast<size_t>(n) &&
+                                    std::equal(g.data.begin(), g.data.end(), src.begin() + static_cast<std::ptrdiff_t>(prefix + 4));
+                            calls &= g.calls.size() == 1u + static_cast<size_t>(n) && h.calls.size() == 3u && h.calls[0] == 4 && h.calls[1] == 4 &&
+                                     h.calls[2] == n;
+                            rclean &= g.unexpected == 0 && h.unexpected == 0 && g.pushes == g.pops && h.pushes == h.pops;
+                            restored &= h.flags0 == 0x01 && g.flags0 == 0x01;
+                        }
+                    }
+                }
+            }
+            Check(rsame, "savebytesread: the hook reads the same array (bytes, Num, Max), error bit, final offset and CountBytes as the game's per-element loop (512 to 1M+5 bytes, with and without a prefix, a serialized property, an old Num)");
+            Check(calls, "savebytesread: the game reads the count and one call per byte; the hook peeks the count, the game's function reads it again, then ONE call of n bytes");
+            Check(rclean, "savebytesread: no other archive function used; pushes and pops balanced");
+            Check(restored, "savebytesread: the archive's flag byte is back to 0x01 after the call");
+            if (!rsame || !calls) Log("[selftest] savebytesread: %d runs", runs);
+
+            // 4. Short data: count 700, 600 bytes after it: the game copies what is there and sets the error; the hook leaves it to the game.
+            {
+                const auto src = makeSrc(0, 700, 600, 0);
+                const Result g = run(false, src, 0, 700, 0, false), h = run(true, src, 0, 700, 0, false);
+                Check(sameResult(g, h) && g.err && g.off == 4 + 600, "savebytesread: short data (count 700, 600 bytes left): the same partial array and error as the game's loop");
+                // the last property of a file: n == the bytes left exactly: read in one piece, no error
+                const auto exact = makeSrc(9, 2000, 2000, 0);
+                const Result ge = run(false, exact, 9, 2000, 0, false), he = run(true, exact, 9, 2000, 0, false);
+                Check(sameResult(ge, he) && !he.err && he.off == exact.size() && he.calls.size() == 3u,
+                      "savebytesread: n equal to the bytes left (a file that ends with the array): read in one piece, no error, same result");
+                const auto over = makeSrc(9, 2001, 2000, 0);
+                const Result go = run(false, over, 9, 2001, 0, false), ho = run(true, over, 9, 2001, 0, false);
+                Check(sameResult(go, ho) && ho.err && ho.calls.size() == go.calls.size() + 1u,
+                      "savebytesread: n one more than the bytes left: the game's way (partial array, error), the hook's peek left no trace");
+            }
+        }
+
+        // 4b. Archives whose Seek cannot go back (review S2-1): refused BEFORE anything is read, so the game's own function gives the
+        // same array, position, error bit and CountBytes as without the hook; the hook made no call of its own (no peek). Then a
+        // proxy over a memory reader (FObjectAndNameAsStringProxyArchive over FMemoryReader, as LoadGameFromMemory builds it): taken.
+        if (writable) {
+            static void* noopVt[80];
+            static void* fwdVt[80];
+            static void* proxyVt[80];
+            memcpy(noopVt, g_archiveVtable, sizeof noopVt);
+            memcpy(fwdVt, g_archiveVtable, sizeof fwdVt);
+            memcpy(proxyVt, g_archiveVtable, sizeof proxyVt);
+            noopVt[0x1A0 / 8] = reinterpret_cast<void*>(&SeekNoop);
+            fwdVt[0x1A0 / 8] = reinterpret_cast<void*>(&SeekForward);
+            proxyVt[0x28 / 8] = Stub(kFwdTell);
+            proxyVt[0x30 / 8] = reinterpret_cast<void*>(&ProxyTotal);
+            proxyVt[0x170 / 8] = reinterpret_cast<void*>(&ProxySerialize);
+            proxyVt[0x1A0 / 8] = Stub(kFwdSeek);
+            bool noop = true, fwd = true, prx = true;
+            for (int32_t n : {512, 4096, 100003}) {
+                for (int pre = 0; pre < 2; ++pre) {
+                    const size_t prefix = pre ? 13 : 0;
+                    const auto src = makeSrc(prefix, n, static_cast<size_t>(n), pre ? 5 : 0);
+                    const size_t end = prefix + 4 + static_cast<size_t>(n);
+                    auto okData = [&](const Result& r) {
+                        return r.num == n && !r.err && r.off == end && std::equal(r.data.begin(), r.data.end(), src.begin() + static_cast<std::ptrdiff_t>(prefix + 4));
+                    };
+                    {
+                        const Result g = run(false, src, prefix, n, 0, false, noopVt), h = run(true, src, prefix, n, 0, false, noopVt);
+                        noop &= sameResult(g, h) && okData(h) && h.calls == g.calls;
+                    }
+                    {
+                        const Result g = run(false, src, prefix, n, 0, false, fwdVt), h = run(true, src, prefix, n, 0, false, fwdVt);
+                        fwd &= sameResult(g, h) && okData(h) && h.calls == g.calls;
+                    }
+                    {
+                        const Result g = run(false, src, prefix, n, 0, false, proxyVt, true), h = run(true, src, prefix, n, 0, false, proxyVt, true);
+                        prx &= sameResult(g, h) && okData(h) && h.calls.size() == 3u && h.calls[2] == n;
+                    }
+                }
+            }
+            Check(noop, "savebytesread: an archive whose Seek does nothing: refused before any read; array, position, error bit, CountBytes and calls as the game's own read");
+            Check(fwd, "savebytesread: an archive whose Seek only goes forward: refused before any read; array, position, error bit, CountBytes and calls as the game's own read");
+            Check(prx, "savebytesread: a proxy over a memory reader (forwarder Tell / Seek): read in one piece, the same array, position and CountBytes as the game's read");
+        }
+        // 4c. The code check alone (nothing is called): shapes accepted and refused, and the census archive type of the game.
+        {
+            struct Obj { void** vt; uint8_t pad[0x88]; void* inner; uint8_t pad2[0x40]; };
+            static_assert(offsetof(Obj, inner) == 0x90, "proxy layout");
+            static void* v[6][80];
+            for (auto& t : v) memcpy(t, g_archiveVtable, sizeof t);
+            v[0][0x28 / 8] = Stub(kTell8);    v[0][0x1A0 / 8] = Stub(kSeek8);     // disp8 forms, same member: accepted
+            v[1][0x28 / 8] = Stub(kLeafTell); v[1][0x1A0 / 8] = Stub(kSeek98);    // another member: refused
+            v[2][0x28 / 8] = Stub(kLeafTell); v[2][0x1A0 / 8] = Stub(kRet);       // ret: refused
+            v[3][0x28 / 8] = Stub(kFwdTell);  v[3][0x1A0 / 8] = Stub(kFwdSeek);   // proxy
+            v[4][0x28 / 8] = Stub(kFwdTell);  v[4][0x1A0 / 8] = Stub(kFwdSeekToTell);  // a Seek that forwards to another slot: refused
+            v[5][0x28 / 8] = Stub(kLeafTell); v[5][0x1A0 / 8] = Stub(kFwdSeek);   // leaf Tell, forwarding Seek: refused
+            Obj leaf8{v[0]}, other{v[1]}, ret{v[2]}, leaf{g_archiveVtable};
+            Obj p1{v[3]}, p2{v[3]}, p3{v[3]}, p4{v[3]}, pNull{v[3]}, pSlot{v[4]}, mixed{v[5]};
+            p1.inner = &leaf; p2.inner = &p1; p3.inner = &p2; p4.inner = &p3;
+            pSlot.inner = &leaf; mixed.inner = &leaf;
+            Obj pRet{v[3]};
+            pRet.inner = &ret;
+            const bool shapes = SaveBytesSeekableTest(&leaf) && SaveBytesSeekableTest(&leaf8) && !SaveBytesSeekableTest(&other) &&
+                                !SaveBytesSeekableTest(&ret) && SaveBytesSeekableTest(&p1) && SaveBytesSeekableTest(&p3) &&
+                                !SaveBytesSeekableTest(&p4) && !SaveBytesSeekableTest(&pNull) && !SaveBytesSeekableTest(&pSlot) &&
+                                !SaveBytesSeekableTest(&mixed) && !SaveBytesSeekableTest(&pRet);
+            Check(shapes, "savebytesread: the code check: plain member Tell / Seek (disp8 / disp32) and up to 3 proxies accepted; another member, ret, "
+                          "a null inner, 4 proxies, a forward to another slot, a mixed pair and a proxy over a ret Seek refused");
+            // the game's own: the census type (exe+0x75CB5B8, forwarders over +0x90) over an FMemoryArchive-family vtable (exe+0x75CBB50,
+            // Seek exe+0xD8B970 / Tell exe+0xD8CF50), build 19115871
+            Obj gLeaf{reinterpret_cast<void**>(game.base + 0x75CBB50)}, gProxy{reinterpret_cast<void**>(game.base + 0x75CB5B8)};
+            gProxy.inner = &gLeaf;
+            Check(SaveBytesSeekableTest(&gProxy) && SaveBytesSeekableTest(&gLeaf),
+                  "savebytesread: the game's save-load archive type (proxy exe+0x75CB5B8 over a memory reader exe+0x75CBB50) passes the code check");
+        }
+
+        // 5. Every condition that must leave the array to the game's function (a fake original sees the flag byte and counts calls).
+        {
+            auto rfalls = [&](auto change, int mode = 1, int32_t count = 1000, size_t payload = 1000) {
+                Fakes f;
+                f.ar.readMode = true;
+                f.ar.flags[0] = 0x01;
+                f.ar.src = makeSrc(0, count, payload, 0);
+                change(f);
+                uint8_t one = 1;
+                SArr arr{&one, 1, 1};
+                const uint8_t flagsBefore0 = f.ar.flags[0], flags1 = f.ar.flags[1];
+                SaveBytesTestSetup(reinterpret_cast<void*>(&FakeOriginal), getArchive, byteFn, false, mode);
+                g_fakeOrigCalls = 0;
+                g_fakeSeenFlags = 0xFF;
+                g_fakeAr = &f.ar;
+                const size_t off0 = f.ar.off;
+                SaveBytesTestCall(f.array, f.slot, &arr, false);
+                g_fakeAr = nullptr;
+                const bool untouched = f.ar.off == off0 && f.ar.flags[0] == flagsBefore0 && f.ar.flags[1] == flags1 && arr.num == 1 && arr.data == &one &&
+                                       f.ar.countNum == 0;
+                return g_fakeOrigCalls == 1 && g_fakeSeenFlags == flagsBefore0 && untouched;  // the game's function, flag byte as it was
+            };
+            auto rnone = [](Fakes&) {};
+            // control: the plain case is taken: the original sees the unversioned bit, the flag byte is restored, CountBytes called
+            {
+                Fakes f;
+                f.ar.readMode = true;
+                f.ar.flags[0] = 0x01;
+                f.ar.src = makeSrc(0, 1000, 1000, 0);
+                uint8_t one = 1;
+                SArr arr{&one, 1, 1};
+                SaveBytesTestSetup(reinterpret_cast<void*>(&FakeOriginal), getArchive, byteFn, false, 1);
+                g_fakeOrigCalls = 0;
+                g_fakeSeenFlags = 0xFF;
+                g_fakeAr = &f.ar;
+                SaveBytesTestCall(f.array, f.slot, &arr, false);
+                g_fakeAr = nullptr;
+                Check(g_fakeOrigCalls == 1 && g_fakeSeenFlags == 0x41 && f.ar.flags[0] == 0x01 && f.ar.countNum == 1 && f.ar.countMax == 1 && f.ar.off == 0,
+                      "savebytesread: a plain byte array in a loading archive: the game's function runs once with the unversioned bit set, the bit is put back, CountBytes called, the offset restored by the peek");
+            }
+            Check(rfalls(rnone, 0), "savebytesread: key off: the game's function");
+            Check(rfalls([](Fakes& f) { f.ar.flags[0] = 0x00; }), "savebytesread: an archive that is not loading: the game's function");
+            Check(rfalls([](Fakes& f) { f.ar.flags[0] = 0x05; }), "savebytesread: saving (and loading): the game's function");
+            Check(rfalls([](Fakes& f) { f.ar.flags[0] = 0x11; }), "savebytesread: a text archive: the game's function");
+            Check(rfalls([](Fakes& f) { f.ar.flags[0] = 0x41; }), "savebytesread: unversioned serialization: the game's function (its bulk path is already on)");
+            Check(rfalls([](Fakes& f) { f.ar.flags[0] = 0x09; }), "savebytesread: a transacting archive: the game's function");
+            Check(rfalls([](Fakes& f) { f.ar.flags[1] = 0x02; }), "savebytesread: an archive with the error bit set: the game's function");
+            Check(rfalls([](Fakes& f) { f.ar.flags[2] = 0x01; }), "savebytesread: byte swapping: the game's function");
+            Check(rfalls([](Fakes& f) { f.ar.flags[3] = 0x80; }), "savebytesread: a custom property list: the game's function");
+            Check(rfalls([](Fakes& f) { f.ar.flags[3] = 0x04; }), "savebytesread: a counting-memory archive: the game's function");
+            static uint8_t fbuf[16];
+            Check(rfalls([](Fakes& f) { f.fplb[0] = reinterpret_cast<uintptr_t>(fbuf); f.fplb[1] = reinterpret_cast<uintptr_t>(fbuf + 16); }),
+                  "savebytesread: a fast-path load buffer with room: the game's function");
+            Check(rfalls([](Fakes& f) { f.ar.totalKnown = false; }), "savebytesread: TotalSize unknown (-1): the game's function");
+            Check(rfalls([](Fakes& f) { f.ar.src.resize(3); }), "savebytesread: fewer than 4 bytes left: the game's function");
+            // an archive whose Tell / Seek are recognised but whose Serialize does not move the member Tell reads: the post-peek
+            // check finds it, the game's function runs without the bit, the type is remembered (no peek the second time)
+            {
+                static void* liarVt[80];
+                memcpy(liarVt, g_archiveVtable, sizeof liarVt);
+                liarVt[0x170 / 8] = reinterpret_cast<void*>(&SerializeOwnCursor);
+                Fakes f;
+                f.ar.readMode = true;
+                f.ar.flags[0] = 0x01;
+                f.ar.src = makeSrc(0, 1000, 1000, 0);
+                f.ar.vtable = liarVt;
+                uint8_t one = 1;
+                SArr arr{&one, 1, 1};
+                SaveBytesTestSetup(reinterpret_cast<void*>(&FakeOriginal), getArchive, byteFn, false, 1);
+                g_fakeOrigCalls = 0;
+                g_fakeSeenFlags = 0xFF;
+                g_fakeAr = &f.ar;
+                SaveBytesTestCall(f.array, f.slot, &arr, false);
+                const size_t peekCalls = f.ar.calls.size();
+                SaveBytesTestCall(f.array, f.slot, &arr, false);
+                g_fakeAr = nullptr;
+                Check(g_fakeOrigCalls == 2 && g_fakeSeenFlags == 0x01 && peekCalls == 1 && f.ar.calls.size() == 1 && f.ar.off == 0,
+                      "savebytesread: an archive whose Tell does not move over the peek: found after it, the game's function runs without the bit, the type is remembered (no peek the second time)");
+            }
+            Check(rfalls(rnone, 1, 511, 511), "savebytesread: 511 bytes: the game's function (below the threshold)");
+            Check(rfalls(rnone, 1, -7, 1000), "savebytesread: a negative count: the game's function");
+            Check(rfalls(rnone, 1, 1001, 1000), "savebytesread: a count one longer than the data left: the game's function");
+            Check(rfalls(rnone, 1, 0x7FFFFFF0, 1000), "savebytesread: a huge count: the game's function");
+            Check(rfalls([](Fakes& f) { *reinterpret_cast<void**>(f.inner + 0x70) = f.cls; }), "savebytesread: a byte property with an enum: the game's function");
+            Check(rfalls([](Fakes& f) { *reinterpret_cast<int32_t*>(f.inner + 0x34) = 2; }), "savebytesread: element size 2: the game's function");
+            Check(rfalls([](Fakes& f) { *reinterpret_cast<uint64_t*>(f.cls + 0x10) = 0x40; }), "savebytesread: byte property that is not numeric: the game's function");
+            Check(rfalls([](Fakes& f) { *reinterpret_cast<uint64_t*>(f.cls + 0x10) = 0x1000000; }), "savebytesread: numeric but not a byte property: the game's function");
+            Check(rfalls([](Fakes& f) { *reinterpret_cast<void***>(f.inner) = g_archiveVtable; }), "savebytesread: an inner property with another SerializeItem: the game's function");
+            Check(rfalls([](Fakes& f) { f.array[0x70] = 1; }), "savebytesread: an array with the memory-image allocator: the game's function");
+        }
+        if (writable) {
+            *memsetSlot = savedMemset;
+            DWORD tmp = 0;
+            VirtualProtect(memsetSlot, sizeof(void*), oldProt, &tmp);
+        }
+    }
     SaveBytesTestSetup(arrayFn, getArchive, byteFn, false);
     LogSaveBytesStats();
 }

@@ -1638,6 +1638,30 @@ function V.activate()
     return "ok" .. fix
 end
 
+-- "press <Folder/IA_Name>" (2026-11-23, riding): one frame of any of the game's input actions under
+-- /Game/Dev/Input/GamePlay/InputActions/, e.g. "press Movement/IA_Game_Movement_Gallop" (on a horse a toggle: one press
+-- gallops, the next one stops it). Like "activate": the key's own action, so it works with the window in the background.
+function V.press(rest)
+    local rel = rest:match("^([%w_/]+)$")
+    if not rel then error("usage: press <Folder/IA_Name>") end
+    local fix = EnsureGameInput()
+    Inject(IA .. rel .. "." .. rel:match("([%w_]+)$"))
+    return "ok" .. fix
+end
+
+-- "pawn" (2026-11-23, riding): the class of the pawn the player controls (BP_Horse_*_C while mounted, the player
+-- character otherwise) and, on a horse, its rider.
+function V.pawn()
+    local pawn = Pawn()
+    if not pawn then return "pawn=none" end
+    local out = "pawn=" .. pawn:GetClass():GetFName():ToString()
+    pcall(function()
+        local r = pawn.Rider
+        if r and r:IsValid() then out = out .. " rider=" .. r:GetClass():GetFName():ToString() end
+    end)
+    return out
+end
+
 -- "walk <mode> <timeoutSec> <x,y> <x,y> ...": mode = inject (default) | input | auto. "EV walk=done" when over.
 function V.walk(rest)
     local mode, timeout, pts = rest:match("^(%S+)%s+(%S+)%s+(.+)$")

@@ -244,6 +244,7 @@ void NoteCapacity(int site, const void* array)
     while (max > seen && !g_lumenCapacity[site].compare_exchange_weak(seen, max, std::memory_order_relaxed)) {}
 }
 std::atomic<uint32_t> g_uploadLag{0};      // 0 = the game's 20 frames
+std::atomic<uint32_t> g_uploadGateLag{0};  // LoadPeakKeepsBack: the lag kept in frames that are not a loading screen (0 = none)
 std::atomic<LONG> g_uploadPages{0};        // 0 = the game's MinPagesToRetain
 std::atomic<uint64_t> g_uploadCleanups{0};
 std::atomic<uint32_t> g_uploadFrames{0};      // big-block clean-ups so far (one per frame, from FD3D12Adapter::EndFrame)
@@ -486,6 +487,9 @@ uint64_t UploadLag(uint64_t gameLag)
 {
     const uint32_t keep = g_uploadLag.load(std::memory_order_relaxed);
     if (keep) return keep;
+    // LoadPeakKeepsBack: handed back only while the game-thread state is a loading screen (else kept as configured)
+    const uint32_t gate = g_uploadGateLag.load(std::memory_order_relaxed);
+    if (gate && !LoadPeakHandBackNow()) return gate;
     const uint32_t start = g_uploadRampStart.load(std::memory_order_relaxed);
     const uint32_t frames = g_uploadRampFrames.load(std::memory_order_relaxed);
     if (!start) return gameLag;
@@ -983,11 +987,28 @@ bool ApplyUploadMemoryKeepFix(bool beforeGameCode)
     return true;
 }
 
-void SetUploadMemoryKeep(bool enabled, int keepFrames, int keepPages, int releaseRampFrames)
+uint32_t UploadKeepLagFor(int keepFrames)
 {
     // keepFrames <= 0: for the rest of the session (a frame lag no fence count reaches); 1..20: the game's 20.
-    const uint32_t lag = !enabled ? 0 : keepFrames <= 0 ? kKeepForSession : keepFrames > 20 ? static_cast<uint32_t>(keepFrames) : 0;
-    const LONG pages = enabled && g.minPages && keepPages > g.minPagesOriginal ? keepPages : 0;
+    return keepFrames <= 0 ? kKeepForSession : keepFrames > 20 ? static_cast<uint32_t>(keepFrames) : 0;
+}
+
+uint64_t UploadLagTest(uint64_t gameLag) { return UploadLag(gameLag); }
+
+uint32_t UploadCleanupFrames() { return g_uploadFrames.load(std::memory_order_relaxed); }
+
+// UploadPagePreGrow (s083build): the fast allocator's page floor now (d3d12.FastAllocator.MinPagesToRetain; -1 = not found), and
+// whether UploadMemoryKeep's page floor is ours now (0 = the game's: key off, MemoryRelief)
+int UploadMinPagesNow() { return g.minPages ? static_cast<int>(*g.minPages) : -1; }
+int UploadPagesKeptNow() { return static_cast<int>(g_uploadPages.load(std::memory_order_relaxed)); }
+const volatile LONG* UploadMinPagesCell() { return g.minPages; }
+
+void SetUploadMemoryKeep(bool enabled, int keepFrames, int keepPages, int releaseRampFrames, uint32_t gateLag)
+{
+    const uint32_t lag = !enabled ? 0 : UploadKeepLagFor(keepFrames);
+    g_uploadGateLag.store(enabled ? 0 : gateLag, std::memory_order_relaxed);
+    // LoadPeakKeepsBack (gateLag != 0): the page floor stays (S-083: the first burst after the screen finds the pages it found before)
+    const LONG pages = (enabled || gateLag) && g.minPages && keepPages > g.minPagesOriginal ? keepPages : 0;
     g_uploadRampFrames = releaseRampFrames > 0 ? static_cast<uint32_t>(releaseRampFrames) : 0;
     const uint32_t oldLag = g_uploadLag.load();
     if (lag) g_uploadRampStart = 0;

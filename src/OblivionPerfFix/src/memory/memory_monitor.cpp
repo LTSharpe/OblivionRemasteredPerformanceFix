@@ -230,6 +230,19 @@ void OpenAdapter()
         char name[128];
         WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, name, sizeof name, nullptr, nullptr);
         Log("[mem] the game's GPU: %s, %.1f GB video memory", name, desc.DedicatedVideoMemory / kGB);
+        // CrashReport's summary: the GPU, its video memory and its user-mode driver's version, kept as text (no call at a crash)
+        LARGE_INTEGER umd{};
+        const bool umdOk = SUCCEEDED(best->CheckInterfaceSupport(__uuidof(IDXGIDevice), &umd));
+        char line[256];
+        sprintf_s(line, "GPU: %s, %.1f GB video memory, vendor %04X device %04X, driver (UMD) %s", name, desc.DedicatedVideoMemory / kGB,
+                  desc.VendorId, desc.DeviceId, "?");
+        if (umdOk)
+            sprintf_s(line, "GPU: %s, %.1f GB video memory, vendor %04X device %04X, driver (UMD) %u.%u.%u.%u", name,
+                      desc.DedicatedVideoMemory / kGB, desc.VendorId, desc.DeviceId, static_cast<unsigned>(umd.HighPart >> 16),
+                      static_cast<unsigned>(umd.HighPart & 0xFFFF), static_cast<unsigned>(umd.LowPart >> 16),
+                      static_cast<unsigned>(umd.LowPart & 0xFFFF));
+        CrashReportSetGpuLine(line);
+        Log("[crash] %s", line);
     } else if (best) best->Release();
 }
 
@@ -918,6 +931,23 @@ void LastMarkers(const D3D12_AUTO_BREADCRUMB_NODE1* n, UINT end, int count, char
 // Per queue (3D, compute, copy): how many lists the GPU finished, stopped in and never started; for each list it stopped
 // in, the open markers (the pass it was in) and the next operations; where a finished list meets a never-started one on
 // the same queue (the GPU stopped between lists), how the one ended and how the other begins.
+// The facts CrashReport's summary prints (filled while DRED is read; the last report's)
+GpuCrashFacts g_facts;
+uint64_t g_testFaultVa = 0;  // self-test only: a page-fault VA when DRED has none
+// The 0x8000 handler's report as written to the log (for the crash file): "  line\n" each, the "[gpucrash] " prefix dropped
+constexpr size_t kGpuText = 48u << 10;
+char g_gpuText[kGpuText];
+size_t g_gpuTextLen = 0;
+std::atomic<int> g_gpuTextState{0};
+std::atomic<DWORD> g_gpuTextTid{0};
+void TeeLine(const char* line)
+{
+    if (strncmp(line, "[gpucrash] ", 11) == 0) line += 11;
+    if (g_gpuTextLen >= kGpuText - 4) return;
+    const int n = snprintf(g_gpuText + g_gpuTextLen, kGpuText - g_gpuTextLen, "  %s\n", line);
+    if (n > 0) g_gpuTextLen += static_cast<size_t>(n) < kGpuText - g_gpuTextLen ? static_cast<size_t>(n) : kGpuText - g_gpuTextLen - 1;
+}
+
 void LogBreadcrumbs(const D3D12_AUTO_BREADCRUMB_NODE1* head)
 {
     struct Queue {
@@ -961,6 +991,12 @@ void LogBreadcrumbs(const D3D12_AUTO_BREADCRUMB_NODE1* head)
                 DescribeOps(n, last, count, 6, next, sizeof next);
                 Log("[gpucrash]   %s, list %u of %u (%s): %u of %u operations done; open: %s; next: %s", q.name, index + 1, total, list,
                     last, count, open, next);
+                if (g_facts.passKind != 1) {
+                    g_facts.passKind = 1;
+                    snprintf(g_facts.passQueue, sizeof g_facts.passQueue, "%s list %u of %u (%s)", q.name, index + 1, total, list);
+                    snprintf(g_facts.passDone, sizeof g_facts.passDone, "%u of %u operations done, inside: %s", last, count, open);
+                    snprintf(g_facts.passNext, sizeof g_facts.passNext, "%s", next);
+                }
             }
         }
         // a finished list next to a never-started one on the same queue: the GPU stopped between the two
@@ -974,6 +1010,12 @@ void LogBreadcrumbs(const D3D12_AUTO_BREADCRUMB_NODE1* head)
             DescribeOps(nst, 0, nst->BreadcrumbCount, 5, next, sizeof next);
             Log("[gpucrash]   %s: list %u of %u finished (its end: %s), list %u never started (its start: %s)", q.name, finIndex + 1,
                 total, open, nstIndex + 1, next);
+            if (!g_facts.passKind) {
+                g_facts.passKind = 2;
+                snprintf(g_facts.passQueue, sizeof g_facts.passQueue, "%s", q.name);
+                snprintf(g_facts.passDone, sizeof g_facts.passDone, "list %u (its end: %s)", finIndex + 1, open);
+                snprintf(g_facts.passNext, sizeof g_facts.passNext, "list %u (its start: %s)", nstIndex + 1, next);
+            }
         }
         q.lastState = state;
         q.lastNode = n;
@@ -984,6 +1026,9 @@ void LogBreadcrumbs(const D3D12_AUTO_BREADCRUMB_NODE1* head)
             queues[i].done, queues[i].part, queues[i].notStarted);
     Log("[gpucrash] DRED command lists: %u stopped part-way (%u shown above), %u not started, %u finished", inFlight, shown,
         notStarted, done);
+    g_facts.lists = total;
+    g_facts.partWay = inFlight;
+    g_facts.notStarted = notStarted;
 }
 
 const char* AllocationTypeName(D3D12_DRED_ALLOCATION_TYPE t)
@@ -1043,19 +1088,39 @@ void LogAllocations(const char* what, const D3D12_DRED_ALLOCATION_NODE1* n, uint
     if (!i) Log("[gpucrash]   %s: none", what);
 }
 
+// the first name of a DRED allocation list ("none")
+void FirstAllocation(const D3D12_DRED_ALLOCATION_NODE1* n, char* out, size_t size)
+{
+    if (!n) {
+        strcpy_s(out, size, "none");
+        return;
+    }
+    char name[100];
+    Narrow(n->ObjectNameW, n->ObjectNameA, name, sizeof name);
+    unsigned more = 0;
+    for (const auto* m = n->pNext; m && more < 1000; m = m->pNext) ++more;
+    snprintf(out, size, "%s (%s)%s", name[0] ? name : "(no name)", AllocationTypeName(n->AllocationType), more ? " and more" : "");
+}
+
 void LogDred(ID3D12Device* device)
 {
     const HRESULT reason = device->GetDeviceRemovedReason();
     Log("[gpucrash] device removed reason 0x%08X %s", static_cast<uint32_t>(reason), RemovedReasonName(reason));
+    g_facts = GpuCrashFacts{};
+    g_facts.valid = true;
+    g_facts.reason = static_cast<uint32_t>(reason);
+    snprintf(g_facts.reasonName, sizeof g_facts.reasonName, "%s", RemovedReasonName(reason));
     ID3D12DeviceRemovedExtendedData2* dred2 = nullptr;
     ID3D12DeviceRemovedExtendedData1* dred1 = nullptr;
     if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&dred2))) && dred2) {
         Log("[gpucrash] DRED device state: %s", DeviceStateName(dred2->GetDeviceState()));
+        snprintf(g_facts.state, sizeof g_facts.state, "%s", DeviceStateName(dred2->GetDeviceState()));
         dred1 = dred2;
     } else if (FAILED(device->QueryInterface(IID_PPV_ARGS(&dred1))) || !dred1) {
         Log("[gpucrash] no DRED interface (DRED off?)");
         return;
     }
+    uint64_t faultVa = 0;  // GpuMemoryRecord: the recorded allocations around it
     D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 crumbs{};
     const HRESULT hrCrumbs = dred1->GetAutoBreadcrumbsOutput1(&crumbs);
     if (SUCCEEDED(hrCrumbs)) LogBreadcrumbs(crumbs.pHeadAutoBreadcrumbNode);
@@ -1067,6 +1132,9 @@ void LogDred(ID3D12Device* device)
                 static_cast<unsigned>(pf.PageFaultFlags));
             LogAllocations("allocation there", pf.pHeadExistingAllocationNode, pf.PageFaultVA);
             LogAllocations("recently freed there", pf.pHeadRecentFreedAllocationNode, pf.PageFaultVA);
+            faultVa = pf.PageFaultVA;
+            FirstAllocation(pf.pHeadExistingAllocationNode, g_facts.dredThere, sizeof g_facts.dredThere);
+            FirstAllocation(pf.pHeadRecentFreedAllocationNode, g_facts.dredFreed, sizeof g_facts.dredFreed);
         } else Log("[gpucrash] no GPU page fault recorded");
     } else {
         D3D12_DRED_PAGE_FAULT_OUTPUT1 pf{};
@@ -1074,9 +1142,22 @@ void LogDred(ID3D12Device* device)
             Log("[gpucrash] GPU page fault at VA 0x%llX", static_cast<unsigned long long>(pf.PageFaultVA));
             LogAllocations("allocation there", pf.pHeadExistingAllocationNode, pf.PageFaultVA);
             LogAllocations("recently freed there", pf.pHeadRecentFreedAllocationNode, pf.PageFaultVA);
+            faultVa = pf.PageFaultVA;
+            FirstAllocation(pf.pHeadExistingAllocationNode, g_facts.dredThere, sizeof g_facts.dredThere);
+            FirstAllocation(pf.pHeadRecentFreedAllocationNode, g_facts.dredFreed, sizeof g_facts.dredFreed);
         } else Log("[gpucrash] no GPU page fault recorded");
     }
     dred1->Release();
+    if (!faultVa && g_testFaultVa) {
+        faultVa = g_testFaultVa;
+        Log("[gpucrash] self-test: page fault at VA 0x%llX injected (WARP's removed device has none)", static_cast<unsigned long long>(faultVa));
+        strcpy_s(g_facts.dredThere, "none (self-test)");
+        strcpy_s(g_facts.dredFreed, "none (self-test)");
+    }
+    g_facts.va = faultVa;
+    g_facts.pageFault = faultVa != 0;
+    GpuMemoryRecordReport(faultVa);
+    if (faultVa) GpuMemoryRecordOwner(faultVa, g_facts.owner, sizeof g_facts.owner);
 }
 
 bool LogDredGuarded(ID3D12Device* device)
@@ -1167,6 +1248,7 @@ void LogHistory(ULONGLONG now)
     while (n < kRing && n < next && now - g_ring[(next - 1 - n) % kRing].tick <= 61000) ++n;
     uint64_t ramMin = UINT64_MAX, commitMin = UINT64_MAX, vramMax = 0, budgetAtMax = 0, budgetMin = UINT64_MAX, budgetMax = 0;
     unsigned over = 0, worstUs = 0;
+    bool framesKnown = false;
     for (unsigned k = n; k-- > 0;) {
         const Sample& s = g_ring[(next - 1 - k) % kRing];
         char frames[96] = "";
@@ -1183,12 +1265,15 @@ void LogHistory(ULONGLONG now)
         if (s.vramBudget > budgetMax) budgetMax = s.vramBudget;
         if (s.vramBudget && s.vram > s.vramBudget) ++over;
         if (s.framesKnown && s.worstFrameUs > worstUs) worstUs = s.worstFrameUs;
+        framesKnown = framesKnown || s.framesKnown;
     }
+    char longest[48] = "longest frame not known";
+    if (framesKnown) sprintf_s(longest, "longest frame %.1f ms", worstUs / 1000.0);
     if (n)
         Log("[gpucrash] last %u s: RAM free min %.2f GB, commit free min %.2f GB, VRAM max %.2f of %.2f GB, budget %.2f-%.2f GB, %u s over "
-            "budget, longest frame %.1f ms",
+            "budget, %s",
             n, ramMin / kGB, commitMin / kGB, vramMax / kGB, budgetAtMax / kGB, budgetMin == UINT64_MAX ? 0.0 : budgetMin / kGB,
-            budgetMax / kGB, over, worstUs / 1000.0);
+            budgetMax / kGB, over, longest);
 }
 
 void LogKeys()
@@ -1248,7 +1333,15 @@ LONG CALLBACK GpuCrashHandler(EXCEPTION_POINTERS* info)
     if (info->ExceptionRecord->ExceptionCode != kUeGpuCrashException || g_reported.exchange(true))
         return EXCEPTION_CONTINUE_SEARCH;
     LogCrashMode();  // the log's queued lines first; the report's lines are then written as they come
+    // the same lines also go to a buffer: CrashReport's record (OblivionPerfFix-crash.txt) prints them (pubdiagD)
+    g_gpuTextLen = 0;
+    g_gpuTextTid.store(GetCurrentThreadId());
+    g_gpuTextState.store(1, std::memory_order_release);
+    LogSetTee(&TeeLine);
     WriteGpuCrashReport(info->ContextRecord);
+    LogSetTee(nullptr);
+    g_gpuTextState.store(2, std::memory_order_release);
+    CrashEvent(kEvGpu, 2, g_facts.reason, g_facts.va);
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -1274,7 +1367,9 @@ void UpdateMemory(const Config& cfg, MemoryRelief* relief)
     Sample s = TakeSample();
     {
         uint32_t frames = 0, maxUs = 0;
-        if (LedgerFrameStats(&frames, &maxUs)) {  // HitchLedger installed (its GGPUFrameTime search ran at start-up)
+        // HitchLedger installed (its GGPUFrameTime search ran at start-up), else NpcCreationPacing's frame hook through
+        // CrashReport's frame clock (without either, the report says "longest frame not known"; it printed 0.0 ms before)
+        if (LedgerFrameStats(&frames, &maxUs) || CrashReportFrameStats(&frames, &maxUs)) {
             s.framesKnown = true;
             s.frames = frames;
             s.worstFrameUs = maxUs;
@@ -1409,6 +1504,25 @@ void* GpuCrashReportTestFind(const void* words, size_t count)
 
 bool GpuCrashReportTestDred(void* device) { return LogDredGuarded(static_cast<ID3D12Device*>(device)); }
 
+// Self-test: the 0x8000 handler's report (buffer, facts, ring event) on a known removed device, with a page-fault VA injected
+// when DRED has none (WARP)
+bool GpuCrashReportTestRecord(void* device, uint64_t injectVa)
+{
+    g_gpuTextLen = 0;
+    g_gpuTextTid.store(GetCurrentThreadId());
+    g_gpuTextState.store(1, std::memory_order_release);
+    g_testFaultVa = injectVa;
+    LogSetTee(&TeeLine);
+    Log("[gpucrash] the game reports a GPU crash (self-test, thread %lu)", GetCurrentThreadId());
+    const bool ok = LogDredGuarded(static_cast<ID3D12Device*>(device));
+    Log("[gpucrash] end of the report");
+    LogSetTee(nullptr);
+    g_testFaultVa = 0;
+    g_gpuTextState.store(2, std::memory_order_release);
+    CrashEvent(kEvGpu, 2, g_facts.reason, g_facts.va);
+    return ok;
+}
+
 // Self-test: the relief a detected GPU kind gives with SharedMemoryGpu = mode, Windows itself roomy (the live state's
 // kind is put back afterwards). Same rule as UpdateMemory.
 void MemoryReliefTestSharedGpu(GpuMemoryKind kind, int mode, bool wine, uint64_t ramMB, MemoryRelief* relief)
@@ -1417,6 +1531,41 @@ void MemoryReliefTestSharedGpu(GpuMemoryKind kind, int mode, bool wine, uint64_t
     *relief = MemoryRelief{};
     ApplySharedGpu(SharedMemoryGpuWanted(mode, GameGpuMemoryKind(), wine, ramMB), relief);
     g_gpuKind = was;
+}
+
+// ---- for CrashReport / HangReport (crash_report.cpp): the GPU report's parts, printed through the log's sink ----
+const GpuCrashFacts& GpuCrashFactsNow() { return g_facts; }
+const char* GpuCrashReportText(size_t* len, DWORD* tid, int* state)
+{
+    *state = g_gpuTextState.load(std::memory_order_acquire);
+    *tid = g_gpuTextTid.load();
+    *len = g_gpuTextLen;
+    return g_gpuText;
+}
+void GpuReportHistoryLines() { LogHistory(GetTickCount64()); }
+void GpuReportKeyLines() { LogKeys(); }
+void GpuReportContextLines() { LogCrashContext(GetTickCount64()); }
+
+// The game's device (D3D12CreateDevice on its adapter returns it, AddRef'd) and its removed reason; DRED when removed. Runs on
+// HangReport's helper thread (a stuck driver call blocks only that thread). False: the adapter or the device is not known.
+bool GpuReportDeviceState()
+{
+    if (!g_adapter) return false;
+    HMODULE d3d12 = GetModuleHandleW(L"d3d12.dll");
+    auto create = d3d12 ? reinterpret_cast<PFN_D3D12_CREATE_DEVICE>(GetProcAddress(d3d12, "D3D12CreateDevice")) : nullptr;
+    ID3D12Device* d = nullptr;
+    if (!create || FAILED(create(g_adapter, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&d))) || !d) return false;
+    const ULONG refs = d->AddRef();
+    d->Release();
+    if (refs <= 2) {  // only our reference: a new device, not the game's
+        d->Release();
+        return false;
+    }
+    const HRESULT reason = d->GetDeviceRemovedReason();
+    if (reason == S_OK) Log("[gpucrash] the game's D3D12 device is not removed (GetDeviceRemovedReason S_OK)");
+    else if (!LogDredGuarded(d)) Log("[gpucrash] the game's D3D12 device is removed (0x%08X); reading DRED faulted", static_cast<uint32_t>(reason));
+    d->Release();
+    return true;
 }
 
 }  // namespace opf

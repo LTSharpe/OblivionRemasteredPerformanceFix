@@ -44,6 +44,7 @@ param(
     [hashtable]$Cvars = @{},                             # console variables set after loading (the change under test)
     [hashtable]$IniCvars = @{},                          # variables that must be in Engine.ini [SystemSettings] at start-up
     [hashtable]$FixIni = @{},                            # OblivionPerfFix.ini keys for this run
+    [switch]$LiveFixIni,                                 # in a reused game: write -FixIni into the installed OblivionPerfFix.ini (the fix re-reads it every second), read it back, wait 2.5 s; keys read only at start-up keep the game's value; -Close restores the ini
     [hashtable]$Ini = @{},                               # other config: @{ 'Altar.ini|/Script/Module.Class' = @{ Key = 'Value' } } (files in Saved\Config\Windows)
     [int]$Runs = 1,                                      # repeat the whole thing (separate result folders)
     # Which game process: auto = reuse a healthy game this benchmark started if its start-up settings (-IniCvars,
@@ -124,6 +125,7 @@ function Read-SharedLines([string]$path) {
 # value differs from the installed OblivionPerfFix.ini's [Fixes] (missing keys count as different), and any -IniCvars / -Ini
 # (Engine.ini and the game's config are read at start-up only). Only meaningful when the running game is reused.
 $script:ReuseIgnored = $null
+$script:LiveFixNote = $null
 function Get-ReuseIgnoredWarning {
     $parts = @()
     if ($FixIni.Count) {
@@ -141,7 +143,35 @@ function Get-ReuseIgnoredWarning {
     if ($IniCvars.Count) { $parts += "-IniCvars NOT applied ($(ConvertTo-SortedText $IniCvars))" }
     if ($Ini.Count) { $parts += "-Ini NOT applied ($(($Ini.Keys | Sort-Object) -join ', '))" }
     if (-not $parts.Count) { return $null }
-    "reused game (-Session $Session): start-up settings are applied only when the runner starts a game, so this run measured the installed ones: $($parts -join '; '). Write live keys into the installed ini (shared-open, read back) or use -Session fresh/auto."
+    "reused game (-Session $Session): start-up settings are applied only when the runner starts a game, so this run measured the installed ones: $($parts -join '; '). Write live keys into the installed ini (-LiveFixIni) or use -Session fresh/auto."
+}
+
+# -LiveFixIni (2026-11-23): an A-B-B-A in one kept game with the key switched by the run itself. The ini as it was before
+# the first live write is put on record once (as Set-RunConfig does), so -Close or the next restoring run puts it back.
+# Returns the note for the run's warnings: the runner cannot tell a live key from one read only at start-up.
+function Set-LiveFixIni {
+    if (-not (Test-Path -LiteralPath $fixIniPath)) { throw 'OblivionPerfFix is not installed (tools\Install-PerfFix.ps1), so -FixIni has nothing to configure.' }
+    $list = @(Get-PendingConfig)
+    if (-not @($list | Where-Object { $_.target -eq $fixIniPath }).Count) {
+        $dir = Join-Path $script:BenchRun 'live-fixini'
+        New-Item -ItemType Directory -Force $dir | Out-Null
+        Copy-Item -LiteralPath $fixIniPath -Destination $dir -Force
+        $list += [pscustomobject]@{ backup = (Join-Path $dir 'OblivionPerfFix.ini'); target = $fixIniPath }
+        Save-PendingConfig $list
+    }
+    Set-IniValues $fixIniPath 'Fixes' $FixIni
+    $have = @{}
+    $inFixes = $false
+    foreach ($l in Read-SharedLines $fixIniPath) {
+        if ($l -match '^\s*\[(.+?)\]') { $inFixes = ($Matches[1] -eq 'Fixes'); continue }
+        if ($inFixes -and $l -match '^\s*(\w+)\s*=\s*([^;\s]*)') { $have[$Matches[1]] = $Matches[2] }
+    }
+    $bad = @($FixIni.Keys | Where-Object { "$($have[$_])" -ne "$($FixIni[$_])" })
+    if ($bad.Count) { throw "-LiveFixIni: $($bad -join ', ') did not read back from $fixIniPath" }
+    Start-Sleep -Milliseconds 2500       # the fix's monitor thread re-reads the ini every second
+    $text = ConvertTo-SortedText $FixIni
+    Step "-LiveFixIni: $text written into the reused game's OblivionPerfFix.ini"
+    "-LiveFixIni: $text written into the reused game's OblivionPerfFix.ini (read back); a key the fix reads only at start-up still has the value this game started with (each key's comment in the ini says which)"
 }
 
 function Step([string]$msg) {
@@ -1414,6 +1444,51 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
             $script:sceneCond = $c
         }
 
+        # A walk scene's "mount" (2026-11-23, the galloping challenge): { "id": "<horse base form>", "pattern": "Horse" }.
+        # After the teleport (a mounted player cannot be teleported: the old engine leaves the horse behind, the player
+        # stays put), placeatme puts a new horse 300 units away, the camera turns to it and the activate key mounts it,
+        # as a player does; the controller then drives the horse (its pawn class says so). A spawned horse starts to
+        # wander within seconds, so this happens at once, with up to four tries.
+        function Mount-Horse($scene) {
+            $m = $scene.mount
+            $pattern = "$(Opt $m 'pattern' 'Horse')"
+            Send-Bench "obv player.placeatme $($m.id) 1 300 0" | Out-Null
+            Wait-Game 3
+            for ($try = 1; $try -le 4; $try++) {
+                if ($try -gt 1) { Send-Bench "obv player.placeatme $($m.id) 1 300 0" | Out-Null; Wait-Game 1.5 }   # the first horse may have wandered off
+                Send-Bench "aim 1000 $pattern front" | Out-Null
+                Wait-Game 1
+                Send-Bench "aim 1000 $pattern" | Out-Null
+                Send-Bench 'activate' | Out-Null
+                Wait-Game 4
+                $p = Send-Bench 'pawn' -NoThrow
+                if ($p -match 'pawn=BP_Horse') { Step "$($scene.id): mounted ($p, try $try)"; $script:mounted = $true; return $true }
+            }
+            Warn "$($scene.id): the player did not mount the horse in 4 tries ($p); the scene runs on foot"
+            $false
+        }
+        # Off the horse again (the activate key while riding), so that the next scene's teleport moves the player.
+        function Dismount-Horse([string]$id) {
+            if (-not $script:mounted) { return }
+            $script:mounted = $false
+            for ($try = 1; $try -le 3; $try++) {
+                Send-Bench 'activate' -NoThrow | Out-Null
+                Wait-Game 3
+                if ((Send-Bench 'pawn' -NoThrow) -notmatch 'pawn=BP_Horse') {
+                    Step "${id}: dismounted (try $try)"
+                    # A game bug (the game's own third-person camera, also without OblivionPerfFix): while the camera is close
+                    # to the rider it keeps a raw pointer to the horse that only a third-person camera frame clears, after
+                    # the dismount. If the horse is deleted first (the next run's new world) and a third-person frame comes
+                    # later, the game crashes. One second of third person right after the dismount clears the pointer
+                    # while the horse still exists; the next scene's set-up goes back to its own camera.
+                    Send-Bench 'lua local pc = FindFirstOf("PlayerController"); pc:SwitchPOV(1, true); return "pov=1"' -NoThrow | Out-Null
+                    Wait-Game 1
+                    return
+                }
+            }
+            Warn "${id}: still on the horse after three dismount tries"
+        }
+
         function Set-Conditions($scene) {
             $script:sceneCond = $null
             if ($pinOn) { Set-PinnedConditions $scene; return }
@@ -1749,6 +1824,7 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
                 'walk' {
                     Step "scene $index/$($sceneList.Count): $($scene.id) (walk)"
                     Move-To $scene.at; Set-Conditions $scene
+                    if ($scene.PSObject.Properties['mount']) { [void](Mount-Horse $scene) }
                     Wait-Game $settle
                     $measure = [double](Opt $scene 'measure' $scn.defaults.measure)
                     $pts = (@($scene.waypoints) | ForEach-Object { "$($_[0]),$($_[1])" }) -join ' '
@@ -1764,6 +1840,11 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
                         $t0 = Get-QpcMs
                         $answer = Send-Bench "walk $(Opt $scene 'mode' 'inject') $measure $pts"
                         $clock0 = if ($answer -match 'clock=([\d.]+)') { [double]$Matches[1] } else { $null }
+                        # "press": input actions pressed once as the walk starts (e.g. the gallop toggle on a horse)
+                        # not when a "mount" failed: the action's meaning on foot is another one
+                        if (-not $scene.PSObject.Properties['mount'] -or $script:mounted) {
+                            foreach ($act in @(Opt $scene 'press' @())) { Wait-Game 0.5; Send-Bench "press $act" | Out-Null }
+                        }
                         $sw = [Diagnostics.Stopwatch]::StartNew(); $done = $null
                         while (-not $done -and $sw.Elapsed.TotalSeconds -lt $measure + 5) {
                             $done = @(Get-BenchEvents $logPos | Where-Object { $_.Text -match '^walk=done' })[0]
@@ -1778,6 +1859,7 @@ function Invoke-Session([string]$kind, [string]$runDir, [object[]]$sceneList, [i
                     } finally {
                         Send-Bench 'walkstop' -NoThrow | Out-Null
                         Send-Bench 'watch 0' -NoThrow | Out-Null
+                        Dismount-Horse $scene.id
                         $script:place = $null
                     }
                 }
@@ -2159,7 +2241,7 @@ function Get-SceneSeconds($s) {
             foreach ($l in $legs) { $t += [double](Opt $l 'hold' $h) + 8 + $(if (Opt $l 'at' $null) { $settle + 4 } else { 0 }) }
             $t
         }
-        'walk'   { $settle + [double](Opt $s 'measure' $scn.defaults.measure) + 8 }
+        'walk'   { $settle + [double](Opt $s 'measure' $scn.defaults.measure) + 8 + $(if ($s.PSObject.Properties['mount']) { 15 } else { 0 }) }
         'fly'    {
             $len = 0; $p = @($s.path)
             for ($i = 1; $i -lt $p.Count; $i++) { $len += [math]::Sqrt([math]::Pow($p[$i][0] - $p[$i - 1][0], 2) + [math]::Pow($p[$i][1] - $p[$i - 1][1], 2) + [math]::Pow($p[$i][2] - $p[$i - 1][2], 2)) }
@@ -2173,6 +2255,17 @@ $sceneList = @($scn.scenes | Where-Object {
     $s = $_; $sceneTags = Get-SceneTags $s
     (-not $Scenes -or @($Scenes | Where-Object { $s.id -like $_ }).Count) -and (-not $Tags -or @($Tags | Where-Object { $sceneTags -contains $_ }).Count)
 })
+# -Scenes in the order given (2026-11-23): a scene goes where its first matching name or pattern is, in the scenario's
+# order within one pattern (canal-*). Until then every selection ran in the scenario's order, so
+# -Scenes ic-waterfront-pass,brindle-control-hold,brindle-corral-hold measured the corral before the control spot.
+if ($Scenes) {
+    $order = @($scn.scenes | ForEach-Object { $_.id })
+    $sceneList = @($sceneList | ForEach-Object {
+        $s = $_; $p = 0
+        while ($p -lt $Scenes.Count -and $s.id -notlike $Scenes[$p]) { $p++ }
+        [pscustomobject]@{ scene = $s; key = $p * 100000 + [array]::IndexOf($order, $s.id) }
+    } | Sort-Object key | ForEach-Object { $_.scene })
+}
 
 if ($List) {
     $sceneList | ForEach-Object {
@@ -2294,7 +2387,8 @@ for ($run = 1; $run -le $Runs; $run++) {
                 Step "reusing the running game (started $([math]::Round(((Get-Date) - $game.StartTime).TotalMinutes)) min ago)"
                 # -FixIni (and -IniCvars, -Ini) are applied only when the runner starts a game (Set-RunConfig in
                 # Start-BenchGame). A reused game (-Session reuse) keeps the installed ini: say so when that ini differs
-                # (2026-10-26, worker brumaburst; the behaviour is unchanged).
+                # (2026-10-26, worker brumaburst; the behaviour is unchanged). -LiveFixIni writes -FixIni in first.
+                if ($LiveFixIni -and $FixIni.Count) { $script:LiveFixNote = Set-LiveFixIni }
                 $script:ReuseIgnored = Get-ReuseIgnoredWarning
                 if ($script:ReuseIgnored) { Write-Warning $script:ReuseIgnored }
                 Show-SavedSizeWarning
@@ -2348,6 +2442,7 @@ for ($run = 1; $run -le $Runs; $run++) {
         if (Test-Path -LiteralPath $fixIniPath) { $result.perfFix.ini = @(Read-SharedLines $fixIniPath | Where-Object { $_ -match '^\s*\w+\s*=' }) }
         # -FixIni / -IniCvars / -Ini asked for but not in effect in a reused game (Get-ReuseIgnoredWarning)
         if ($script:ReuseIgnored -and $sessions.Count) { [void]$sessions[0].warnings.Add($script:ReuseIgnored) }
+        if ($script:LiveFixNote -and $sessions.Count) { [void]$sessions[0].warnings.Add($script:LiveFixNote) }
         if ($script:SavedSizeWarning -and $sessions.Count) { [void]$sessions[0].warnings.Add($script:SavedSizeWarning) }
         # the game's command-line arguments as the game process has them (-FixedSeed since 2026-10-20)
         if (-not $SelfTest -and ($gNow = Get-Game)) {

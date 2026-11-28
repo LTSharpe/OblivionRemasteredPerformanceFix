@@ -33,6 +33,18 @@
 //    character create of this session; only a parameter set with no template, owner, instigator, level or parent component
 //    is taken), at the reference's place 500 m lower (a spare: under the player), identity rotation, the noted scale. The
 //    actor stays in UE's deferred-spawn state: FinishSpawning is not called, so no BeginPlay, no tick, no controller.
+//    CreateAheadDueMs (gateahead 2026-11-27, S-005; 0 = off, 18-33 = target ms, live): before some crossings no frame
+//    sleeps in the cap for 6-10 s (Anvil gate, 4K at the 60 cap: 17-18 ms frames after the main gate's arrivals), so the
+//    references noted ~5 s ahead were never built. With the key, after a frame WITHOUT slack while pacing holds nothing,
+//    the oldest ready reference (never a spare) noted within kDueWindowS is built by the same Build() when the largest
+//    work of the last kDueHist frames + the build's estimate stays within the target, at most one per kDueGapS and
+//    kDueGapFrames, not within kDueAfterCreateS of a character create or kDueAfterShiftS of a grid shift (RowPreload's
+//    count), not when the player crosses a cell-middle line (where the grid can shift) within kDueEdgeS at his current
+//    velocity (unknown = no), not when the coming frame is known to carry the timer GC pass or level streaming
+//    (GcPassAfterBusy's prediction), only with a frame cap, with room in the pool (and at most kDueMaxHeld due builds
+//    held) and no GC purge pending. Held actors whose time is up may also be destroyed after a frame without slack under
+//    the same guards (one per frame, as after a slack frame), so a long ride without slack does not fill the pool. Identical to a slack build of the same reference: only the frame that
+//    pays for it moves (DuePick / DueTrack below).
 //    UWorld::SpawnActor's two broadcasts (OnActorPreSpawnInitialization, OnActorSpawned; their two call sites inside
 //    SpawnActor are redirected to a hook that passes everything on except on the thread that is inside a build) are held
 //    back: nobody is told of an actor built ahead. (Found the hard way, chain c1 of 2026-11-16: a world subsystem of the
@@ -177,6 +189,27 @@ constexpr int kRoomForRefs = 4;  // spares are only built while fewer than kMaxH
 // another base form (not created for kSpareIdleS, and longer ago than the base form that wants a spare) makes room
 constexpr int kPoolMin = 12, kPoolMax = 32;
 constexpr double kSpareIdleS = 20.0;
+// CreateAheadDueMs (gateahead 2026-11-27, S-005; 0 = off, 18-33 = the target in ms): a noted reference may also be built after a
+// frame WITHOUT cap slack ("due build"), when the next frame stays within the target with the build in it. Bounds: one due
+// build per kDueGapS and per kDueGapFrames frames; only references noted within kDueWindowS (the row ahead, 1-6 s before its
+// crossing); never within kDueAfterCreateS of a character create, within kDueAfterShiftS of a grid shift, or when the player
+// crosses a cell-middle line (where the grid shifts) within kDueEdgeS; see DueGuard.
+constexpr int kDueHist = 4;                // the fit takes the largest work of the last 4 frames
+constexpr int kDueBuildHist = 8;           // a build's estimate: the upper quartile of the last 8 builds' SpawnActor times
+constexpr double kDueGapS = 0.25;
+constexpr uint64_t kDueGapFrames = 10;
+constexpr double kDueWindowS = 6.0;
+constexpr double kDueAfterCreateS = 1.0;
+constexpr double kDueAfterShiftS = 2.5;
+constexpr double kDueEdgeS = 0.6;
+constexpr double kDueBuildFloorMs = 3.0;   // the estimate is never below this
+constexpr double kDueBuildFirstMs = 4.0;   // before any build was timed
+constexpr double kCellOld = 4096.0;        // an exterior cell's side in old-engine units
+constexpr int kDueMaxHeld = 8;             // at most this many due-built actors held at once (gateaheadrev S3)
+constexpr double kDueDestroyMs = 1.0;      // a held actor's destroy, as an estimate for the guards (0.1-0.4 ms measured)
+constexpr int kDueLabLines = 400;          // lab: per-frame due lines per session
+constexpr double kDueVelMinS = 0.1, kDueVelMaxS = 1.0;  // the player's velocity from two samples 0.1-1 s apart
+constexpr double kDueJumpOld = 2048.0;     // a sample further than this from the last: a jump, the velocity is not known
 constexpr int kMaxQueue = 256, kMaxTable = 256, kMaxLearned = 256, kMaxBases = 32, kMaxDropped = 64;
 
 using SpawnFn = uint8_t* (*)(uint8_t* world, uint8_t* cls, const uint8_t* xf, const uint8_t* params);
@@ -207,6 +240,7 @@ struct Entry {
     Handle actor;
     double tSeen, tBuilt;
     float buildMs;
+    bool due;  // built by CreateAheadDueMs's rule (after a frame without slack)
 };
 
 struct State {
@@ -215,6 +249,7 @@ struct State {
     std::atomic<int> slackUs{4000};
     std::atomic<int> pool{0};  // CreateAheadPool (0 = kMaxHeld, no eviction of idle spares)
     std::atomic<int> levelled{0};  // CreateAheadLevelled (1: run-time references already made, found in the cells ahead)
+    std::atomic<int> dueUs{0};     // CreateAheadDueMs (gateahead) in us; 0 = off
     uint8_t *gameBase = nullptr, *textBegin = nullptr, *textEnd = nullptr;
     SpawnFn spawn = nullptr;
     size_t destroySlot = 0;
@@ -280,6 +315,33 @@ struct State {
     // crash1118: slack frames that built nothing because a GC purge was pending; builds whose class the build frame's lookup
     // gave anew (another object now) or no longer found
     std::atomic<uint64_t> purgeWait{0}, classRenewed{0}, classLost{0};
+    // CreateAheadDueMs (gateahead; game thread). The frame's work = the time between two frame-end calls minus the cap's sleep
+    // and minus the build(s) of the earlier call (a build runs after the call's clock read: it belongs to the next frame)
+    double dueCallS = 0.0;              // the last call's clock (0: none since a menu / loading screen)
+    double dueBuildMsThisCall = 0.0;    // SpawnActor time spent in the current call (subtracted from the next frame's work)
+    float dueWork[kDueHist]{};
+    int dueWorkN = 0, dueWorkAt = 0;
+    float dueBuild[kDueBuildHist]{};
+    int dueBuildN = 0, dueBuildAt = 0;
+    uint64_t dueFrame = 0, dueLastFrame = 0;
+    double dueLastS = -1e300;           // the last due build or due expiry (the gap)
+    double dueLastBuildS = -1e300;      // the last due build only (MISSED, dueShiftsAfter; review re-check R2)
+    uint64_t dueCreatesSeen = 0, dueShiftsSeen = 0;
+    double dueCreateS = -1e300, dueShiftS = -1e300;
+    double duePos[2]{}, duePosS = 0.0, dueVel[2]{};
+    bool duePosOk = false, dueVelOk = false;
+    bool buildDue = false;              // the Build() under way is a due build
+    double duePredMs = 0, dueEstMs = 0, dueEdgeS = 0, dueLastEdgeS = 0;  // the last due build's fit (lab log, the shift line)
+    std::atomic<uint64_t> dueBuilt{0}, dueAdopted{0}, dueNever{0}, dueSkipFit{0}, dueSkipGap{0}, dueSkipCreate{0}, dueSkipShift{0},
+        dueSkipEdge{0}, dueSkipPos{0}, dueSkipRoom{0}, dueSkipOld{0}, dueShiftsAfter{0}, dueSkipCap{0}, dueSkipStream{0},
+        dueExpired{0};
+    std::atomic<int> dueHeld{0};        // due-built actors held now (game thread writes; the stats line reads)
+    int dueLabLines = 0;
+    std::atomic<uint64_t> dueBuiltUs{0};
+    // the frames that carried a due build (its build included; measured at the next call): how many came out at or over the
+    // target, their total and largest time (the measuring step's (b)); wasted = due builds dropped without an adoption ((d))
+    bool dueLastCall = false;           // the last call made a due build: the frame now ending carried it
+    std::atomic<uint64_t> dueFrames{0}, dueFramesOver{0}, dueFramesUs{0}, dueFrameMaxUs{0}, dueWasted{0};
     uint64_t statsSeen = 0;
 } g;
 
@@ -404,6 +466,10 @@ void Release(Entry& en, const char* why, std::atomic<uint64_t>* counter)
     const bool wasHeld = en.state == kHeld;
     en.state = kFree;
     if (!wasHeld) return;
+    if (en.due) {  // CreateAheadDueMs: a due build that no create took
+        g.dueWasted.fetch_add(1, std::memory_order_relaxed);
+        g.dueHeld.fetch_sub(1, std::memory_order_relaxed);
+    }
     --g.held;
     const Handle h = en.actor;
     const bool live = HeldLive(en);
@@ -440,6 +506,7 @@ void ReleaseAll(const char* why, std::atomic<uint64_t>* counter)
         }
     }
     g.held = 0;
+    g.dueHeld.store(0, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lock(g.mu);
     g.nq = 0;
 }
@@ -747,6 +814,10 @@ uint8_t* SpawnCallHook(uint8_t* world, uint8_t* cls, const uint8_t* xf, const ui
             uint8_t* const a = en->actor.obj;
             if (en->spare) g.spareAdopted.fetch_add(1, std::memory_order_relaxed);
             else if (dyn) g.runtimeTook.fetch_add(1, std::memory_order_relaxed);
+            if (en->due) {  // CreateAheadDueMs
+                g.dueAdopted.fetch_add(1, std::memory_order_relaxed);
+                g.dueHeld.fetch_sub(1, std::memory_order_relaxed);
+            }
             en->actor = {};
             en->state = kFree;
             --g.held;
@@ -856,6 +927,7 @@ void Build(Entry* pick, uint64_t sleepUs, double now)
     uint8_t* const a = GuardedSpawn(g.world.obj, pick->cls, reinterpret_cast<const uint8_t*>(xf), params, &fault);
     g.quietThread.store(0, std::memory_order_relaxed);
     const double ms = (NowS() - t0) * 1000.0;
+    g.dueBuildMsThisCall += ms;
     if (fault) {
         Log("[createahead] SpawnActor faulted while building ahead: switched off for this session (an ini change does not switch it "
             "back on)");
@@ -874,9 +946,19 @@ void Build(Entry* pick, uint64_t sleepUs, double now)
     memcpy(pick->at, xf + 4, sizeof pick->at);
     pick->tBuilt = now;
     pick->buildMs = static_cast<float>(ms);
+    pick->due = g.buildDue;
     ++g.held;
     g.built.fetch_add(1, std::memory_order_relaxed);
     g.builtUs.fetch_add(static_cast<uint64_t>(ms * 1000.0), std::memory_order_relaxed);
+    // CreateAheadDueMs: every build's SpawnActor time feeds the due rule's estimate (and is not the next frame's own work)
+    g.dueBuild[g.dueBuildAt] = static_cast<float>(ms);
+    g.dueBuildAt = (g.dueBuildAt + 1) % kDueBuildHist;
+    if (g.dueBuildN < kDueBuildHist) ++g.dueBuildN;
+    if (g.buildDue) {
+        g.dueHeld.fetch_add(1, std::memory_order_relaxed);
+        g.dueBuilt.fetch_add(1, std::memory_order_relaxed);
+        g.dueBuiltUs.fetch_add(static_cast<uint64_t>(ms * 1000.0), std::memory_order_relaxed);
+    }
     (void)sleepUs;
 }
 
@@ -1041,6 +1123,192 @@ void CreateAheadDropAll(int why)
     ReleaseAll(why == 0 ? "a save starts" : "level change", why == 0 ? &g.dropSave : &g.dropTravel);
 }
 
+namespace {
+// ---- CreateAheadDueMs (gateahead 2026-11-27, S-005) ----
+double g_dueCur[2] = {0.0, 0.0};  // the player's place at the last call (old-engine units: x east, y north)
+
+void DueReset()
+{
+    g.dueCallS = 0.0;
+    g.dueBuildMsThisCall = 0.0;
+    g.dueWorkN = g.dueWorkAt = 0;
+    g.duePosOk = g.dueVelOk = false;
+    g.dueLastCall = false;
+}
+
+// Every playing frame-end call, first: the work of the frame that just ended, creates and grid shifts since the last call,
+// the player's place and velocity.
+void DueTrack(double now, uint64_t sleepUs)
+{
+    ++g.dueFrame;
+    if (g.dueCallS > 0.0 && g.dueLastCall) {
+        // the frame that carried the last call's due build: its time with the build (what the player got), against the target
+        const double withBuild = (now - g.dueCallS) * 1000.0 - static_cast<double>(sleepUs) / 1000.0;
+        const uint64_t us = static_cast<uint64_t>(std::max(0.0, withBuild) * 1000.0);
+        g.dueFrames.fetch_add(1, std::memory_order_relaxed);
+        g.dueFramesUs.fetch_add(us, std::memory_order_relaxed);
+        if (us > g.dueFrameMaxUs.load(std::memory_order_relaxed)) g.dueFrameMaxUs.store(us, std::memory_order_relaxed);
+        const uint64_t target = static_cast<uint64_t>(g.dueUs.load(std::memory_order_relaxed));
+        const bool over = target && us >= target;
+        if (over) g.dueFramesOver.fetch_add(1, std::memory_order_relaxed);
+    }
+    g.dueLastCall = false;
+    if (g.dueCallS > 0.0) {
+        double work = (now - g.dueCallS) * 1000.0 - static_cast<double>(sleepUs) / 1000.0 - g.dueBuildMsThisCall;
+        if (work < 0.0) work = 0.0;
+        g.dueWork[g.dueWorkAt] = static_cast<float>(work);
+        g.dueWorkAt = (g.dueWorkAt + 1) % kDueHist;
+        if (g.dueWorkN < kDueHist) ++g.dueWorkN;
+    }
+    g.dueCallS = now;
+    g.dueBuildMsThisCall = 0.0;
+    const uint64_t creates = g.pawnCreates.load(std::memory_order_relaxed);
+    if (creates != g.dueCreatesSeen) {
+        g.dueCreatesSeen = creates;
+        g.dueCreateS = now;
+    }
+    // the player's place and velocity (UE -> old-engine units: x / k, y = -y / k, as Build converts the other way)
+    double px = 0, py = 0, pz = 0;
+    bool havePos;
+    if (g.test) {
+        havePos = g.fakes.player != nullptr;
+        if (havePos) px = g.fakes.player[0], py = g.fakes.player[1];
+    } else {
+        havePos = NpcPacingPlayerPos(&px, &py, &pz);
+    }
+    if (!havePos) {
+        g.duePosOk = g.dueVelOk = false;
+    } else {
+        const double ox = px / kOldToUe, oy = -py / kOldToUe;
+        g_dueCur[0] = ox;
+        g_dueCur[1] = oy;
+        if (!g.duePosOk || std::hypot(ox - g.duePos[0], oy - g.duePos[1]) > kDueJumpOld) {
+            // the first place, or a jump (a teleport-sized move since the last sample): not known until the next sample
+            g.duePos[0] = ox, g.duePos[1] = oy, g.duePosS = now;
+            g.duePosOk = true;
+            g.dueVelOk = false;
+        } else if (now - g.duePosS >= kDueVelMinS) {
+            const double dt = now - g.duePosS, dx = ox - g.duePos[0], dy = oy - g.duePos[1];
+            if (dt > kDueVelMaxS) {
+                g.dueVelOk = false;  // a gap: not known until the next sample
+            } else {
+                g.dueVel[0] = dx / dt, g.dueVel[1] = dy / dt;
+                g.dueVelOk = true;
+            }
+            g.duePos[0] = ox, g.duePos[1] = oy, g.duePosS = now;
+        }
+    }
+    uint64_t shifts = 0;
+    if (g.test) shifts = g.fakes.shifts ? *g.fakes.shifts : 0;
+    else shifts = RowPreloadShifts();
+    if (shifts != g.dueShiftsSeen) {
+        const bool missed = now - g.dueLastBuildS < kDueEdgeS;  // a due build shortly before the shift: the line estimate missed it
+        if (missed) g.dueShiftsAfter.fetch_add(1, std::memory_order_relaxed);
+        g.dueShiftsSeen = shifts;
+        g.dueShiftS = now;
+    }
+}
+
+// Seconds until the player crosses the next cell-middle line (old-engine x or y = 4096 k + 2048) at his current velocity;
+// 1e9 = not moving towards one; < 0 = not known. The grid shifts only there (gateaheadrev B1; notes-rowpreload, rowload): its
+// centre is the cell of the last shift, and the next shift comes when the player is a whole cell (4096) from that cell's middle
+// on one axis, i.e. at the middle of the neighbour cell. Every middle line is taken, so no centre is needed (a superset of the
+// lines where a shift can come). A player who starts moving within the last 0.1-0.2 s is not caught (accepted: rare).
+double DueShiftLineS()
+{
+    if (!g.duePosOk || !g.dueVelOk) return -1.0;
+    double t = 1e9;
+    for (int a = 0; a < 2; ++a) {
+        const double half = kCellOld / 2.0;
+        const double lo = std::floor((g_dueCur[a] - half) / kCellOld) * kCellOld + half, v = g.dueVel[a];  // the line at or below
+        if (v > 1e-3) t = std::min(t, (lo + kCellOld - g_dueCur[a]) / v);
+        else if (v < -1e-3) t = std::min(t, (g_dueCur[a] - lo) / -v);
+    }
+    return t;
+}
+
+// The largest SpawnActor time of the last 8 builds (gateaheadrev S4: the max, not a quartile), at least kDueBuildFloorMs;
+// kDueBuildFirstMs before any build was timed
+double DueEstimateMs()
+{
+    double est = kDueBuildFirstMs;
+    if (g.dueBuildN) {
+        est = kDueBuildFloorMs;
+        for (int i = 0; i < g.dueBuildN; ++i) est = std::max(est, static_cast<double>(g.dueBuild[i]));
+    }
+    return est;
+}
+
+// The coming frame's known work besides ours (gateaheadrev S1/S2): the timer GC pass due in it (bit 1), a cell's removal going
+// on (bit 2), an AddToWorld with work in the frame that just ended (bit 4). elapsedUs: the coming frame's predicted delta.
+int DueStreamBits(uint64_t elapsedUs)
+{
+    if (g.test) return g.fakes.gcBits ? *g.fakes.gcBits : 0;
+    return (GcPassAfterBusyNextUnits(elapsedUs) & 3) | (GcPassAfterBusyAddRecent() ? 4 : 0);
+}
+
+bool DueCapKnown()
+{
+    if (g.test) return !(g.fakes.uncapped && *g.fakes.uncapped);
+    return NpcPacingCapPeriodUs() > 0.0;
+}
+
+// The guards every piece of work after a frame without slack must pass (a due build with its estimate, a stale actor's
+// expiry with kDueDestroyMs). Returns the counter of the first one that stops it, or null; *workOut / *edgeOut for the logs.
+std::atomic<uint64_t>* DueGuard(double now, double estMs, double* workOut, double* edgeOut)
+{
+    const int dueUs = g.dueUs.load(std::memory_order_relaxed);
+    double work = 0.0;
+    for (int i = 0; i < g.dueWorkN; ++i) work = std::max(work, static_cast<double>(g.dueWork[i]));
+    const double edge = DueShiftLineS();
+    *workOut = work;
+    *edgeOut = edge;
+    if (!DueCapKnown()) return &g.dueSkipCap;  // no frame cap: CreateAhead's rules are for a capped frame (S5)
+    if (g.dueFrame - g.dueLastFrame < kDueGapFrames || now - g.dueLastS < kDueGapS) return &g.dueSkipGap;
+    if (now - g.dueCreateS < kDueAfterCreateS) return &g.dueSkipCreate;
+    if (now - g.dueShiftS < kDueAfterShiftS) return &g.dueSkipShift;
+    if (edge < 0.0) return &g.dueSkipPos;
+    if (edge < kDueEdgeS) return &g.dueSkipEdge;
+    if (g.dueWorkN < kDueHist || work + estMs > static_cast<double>(dueUs) / 1000.0) return &g.dueSkipFit;
+    // the GC timer test adds the coming frame's delta: FApp::DeltaTime is already set here (the frame that just ended); the
+    // larger of it and our prediction (review re-check R1)
+    double deltaUs = (work + estMs) * 1000.0;
+    if (!g.test)
+        if (const double* const dt = GcPassAfterBusyDeltaTime()) deltaUs = std::max(deltaUs, *dt * 1e6);
+    if (DueStreamBits(static_cast<uint64_t>(deltaUs))) return &g.dueSkipStream;
+    return nullptr;
+}
+
+// The reference the due rule builds after this frame (called only after a frame without slack while pacing holds nothing),
+// or null (the first reason that stops it counted).
+Entry* DuePick(double now, int maxHeld)
+{
+    if (!g.dueUs.load(std::memory_order_relaxed)) return nullptr;
+    Entry* pick = nullptr;
+    bool any = false;
+    for (Entry& en : g.e) {
+        if (en.state != kReady || en.spare) continue;
+        any = true;
+        if (now - en.tSeen <= kDueWindowS && (!pick || en.tSeen < pick->tSeen)) pick = &en;
+    }
+    if (!any) return nullptr;
+    const double est = DueEstimateMs();
+    double work = 0.0, edge = 0.0;
+    std::atomic<uint64_t>* why = nullptr;
+    if (!pick) why = &g.dueSkipOld;  // only references noted longer ago than the look-ahead
+    else if (g.held >= maxHeld || g.dueHeld.load(std::memory_order_relaxed) >= kDueMaxHeld) why = &g.dueSkipRoom;
+    else why = DueGuard(now, est, &work, &edge);
+    if (why) {
+        why->fetch_add(1, std::memory_order_relaxed);
+        return nullptr;
+    }
+    g.duePredMs = work;
+    g.dueEstMs = est;
+    g.dueEdgeS = edge;
+    return pick;
+}
+}  // namespace
+
 // npcs/npc_pacing.cpp's frame-end hook, game thread, after the cap's wait. sleepUs: that wait; busy: NpcCreationPacing
 // holds a unit or deferred a command in the frame that just ended; travel: a fast travel is pending.
 void CreateAheadFrame(uint64_t sleepUs, bool busy, bool travel)
@@ -1049,6 +1317,7 @@ void CreateAheadFrame(uint64_t sleepUs, bool busy, bool travel)
     const int mode = g.mode.load(std::memory_order_relaxed);
     if (!mode) {
         if (g.held || g.nq) ReleaseAll("switched off", &g.dropOff);
+        DueReset();
         return;
     }
     // a menu or loading screen, a pending fast travel: nothing is held across it
@@ -1061,9 +1330,11 @@ void CreateAheadFrame(uint64_t sleepUs, bool busy, bool travel)
         for (Entry& en : g.e) en.state = kFree;
         g.world = {};  // taken again from the next stock create
         g.haveTmpl = false;
+        DueReset();
         return;
     }
     const double now = NowS();
+    DueTrack(now, sleepUs);  // CreateAheadDueMs: this frame's work, creates, grid shifts, the player's velocity
     // new references from the old-engine thread
     Seen in[kMaxQueue];
     int n = 0;
@@ -1092,6 +1363,14 @@ void CreateAheadFrame(uint64_t sleepUs, bool busy, bool travel)
     // like a build: only after a frame with slack while pacing holds nothing, one per frame, and that frame builds nothing.
     const bool slack = sleepUs >= static_cast<uint64_t>(g.slackUs.load(std::memory_order_relaxed));
     bool destroyed = false;
+    // CreateAheadDueMs (gateaheadrev S3): after a frame without slack, a held actor whose time is up (a reference's 20 s, a
+    // spare whose base form was not created for 90 s) may be destroyed under the due rule's guards, one per frame and as that
+    // frame's one piece of work, as after a slack frame; else a long stretch without slack keeps them until a menu
+    bool dueExpire = false;
+    if (!slack && !busy && g.dueUs.load(std::memory_order_relaxed)) {
+        double w = 0, e = 0;
+        dueExpire = DueGuard(now, kDueDestroyMs, &w, &e) == nullptr;
+    }
     int asked = 0;
     for (Entry& en : g.e) {
         if (en.state == kFree) continue;
@@ -1099,7 +1378,7 @@ void CreateAheadFrame(uint64_t sleepUs, bool busy, bool travel)
             Release(en, "gone", nullptr);  // forgotten, nothing destroyed
             continue;
         }
-        const bool mayDestroy = en.state != kHeld || (slack && !busy && !destroyed);
+        const bool mayDestroy = en.state != kHeld || ((slack || dueExpire) && !busy && !destroyed);
         if (!levelledOn && !en.spare && en.ref >= 0xFF000000u) {
             // CreateAheadLevelled switched off live (review rev-levelled S1): a run-time reference's entry is not built and not
             // adopted any more; a built one is destroyed like a timeout (paced), counted under "key off"
@@ -1127,6 +1406,7 @@ void CreateAheadFrame(uint64_t sleepUs, bool busy, bool travel)
                     g.runtimeNever.fetch_add(1, std::memory_order_relaxed);
                     if (en.state == kHeld) g.runtimeNeverBuilt.fetch_add(1, std::memory_order_relaxed);
                 }
+                if (en.state == kHeld && en.due) g.dueNever.fetch_add(1, std::memory_order_relaxed);  // CreateAheadDueMs
                 Release(en, "no create came", &g.dropTimeout);
             }
             continue;
@@ -1145,6 +1425,11 @@ void CreateAheadFrame(uint64_t sleepUs, bool busy, bool travel)
             }
         }
     }
+    if (destroyed && !slack) {  // the destroy above ran under the due rule's guards: it counts for the gap like a due build
+        g.dueExpired.fetch_add(1, std::memory_order_relaxed);
+        g.dueLastS = now;
+        g.dueLastFrame = g.dueFrame;
+    }
     if (!g.haveTmpl || !g.world.obj) return;
     if (!Live(g.world)) {
         ReleaseAll("the world is gone", &g.dropWorld);
@@ -1157,6 +1442,33 @@ void CreateAheadFrame(uint64_t sleepUs, bool busy, bool travel)
     Entry* pick = nullptr;
     for (Entry& en : g.e)
         if (en.state == kReady && (!pick || en.tSeen < pick->tSeen)) pick = &en;
+    if (pick && !slack && !busy) {
+        // CreateAheadDueMs (gateahead): a noted reference of the row ahead may be built after a frame without slack, when the
+        // next frame keeps within the target with the build in it (DuePick: fit, gap, look-ahead, creates, shifts, middle line, GC / streaming, cap)
+        const int poolNow = g.pool.load(std::memory_order_relaxed);
+        if (Entry* const due = DuePick(now, poolNow ? poolNow : kMaxHeld)) {
+            if (PurgePending()) {  // crash1118, as below
+                g.purgeWait.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            if (IsOffsetClass(due->cls)) {  // as below (SF2)
+                due->state = kFree;
+                NoteDropped(due->ref);
+                g.offsetSkipped.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            if (due->scale == 0.0 && !LearnedScale(due->base, &due->scale)) due->scale = 0.0;
+            if (!ScaleBuildable(due->scale)) return;  // no scale known yet: left ready, a slack frame decides as before (N2)
+            g.buildDue = true;
+            Build(due, sleepUs, now);
+            g.buildDue = false;
+            g.dueLastS = g.dueLastBuildS = now;
+            g.dueLastFrame = g.dueFrame;
+            g.dueLastEdgeS = g.dueEdgeS;
+            g.dueLastCall = due->state == kHeld && due->due;  // built: the next call measures the frame that carries it
+            return;
+        }
+    }
     if (pick && (!slack || busy)) {
         (busy ? g.busy : g.noSlack).fetch_add(1, std::memory_order_relaxed);
         return;
@@ -1343,10 +1655,10 @@ bool InstallCreateAhead(bool beforeGameCode)
     }
     g.installed.store(true);
     Log("[createahead] CreateAhead installed (the spawner's SpawnActor call exe+0x%llX, UWorld::SpawnActor exe+0x%llX, K2_DestroyActor "
-        "slot +0x%X, GC purge query exe+0x%llX): at most %d actors held (CreateAheadPool=%d%s), CreateAheadLevelled=%d, %d spares per base form, %.0f s",
+        "slot +0x%X, GC purge query exe+0x%llX): at most %d actors held (CreateAheadPool=%d%s), CreateAheadLevelled=%d, CreateAheadDueMs=%d, %d spares per base form, %.0f s",
         static_cast<unsigned long long>(f.spawnCall - game.base), static_cast<unsigned long long>(f.spawnFn - game.base), f.destroySlot,
         static_cast<unsigned long long>(purge - game.base), g.pool.load() ? g.pool.load() : kMaxHeld, g.pool.load(), g.pool.load() ? ": idle spares make room for base forms in use" : "",
-        g.levelled.load(), kSparesPerBase, kHoldS);
+        g.levelled.load(), g.dueUs.load() / 1000, kSparesPerBase, kHoldS);
     return true;
 }
 
@@ -1377,6 +1689,24 @@ void SetCreateAheadLevelled(int levelled)
               : "run-time references get spares only");
 }
 
+void SetCreateAheadDue(int ms)
+{
+    if (ms < 0) ms = 0;  // negative = off (N1)
+    if (ms != 0 && ms < 18) ms = 18;
+    if (ms > 33) ms = 33;
+    const bool changed = g.dueUs.exchange(ms * 1000) != ms * 1000;
+    if (changed && g.installed.load()) {
+        if (ms)
+            Log("[createahead] CreateAheadDueMs=%d: a character noted in the row ahead may also be built after a frame without cap slack, "
+                "when the next frame stays within %d ms with the build in it (at most one per %.2f s and %llu frames, noted within %.0f s, "
+                "not within %.1f s of a create or %.1f s of a grid shift, not %.1f s or less before the player crosses a cell-middle line, "
+                "not before a frame that carries the timer GC pass or level streaming, only with a frame cap)",
+                ms, ms, kDueGapS, static_cast<unsigned long long>(kDueGapFrames), kDueWindowS, kDueAfterCreateS, kDueAfterShiftS, kDueEdgeS);
+        else
+            Log("[createahead] CreateAheadDueMs=0: characters are built ahead only after frames with cap slack");
+    }
+}
+
 void SetCreateAhead(int mode, int slackMs)
 {
     if (slackMs < 1) slackMs = 1;
@@ -1398,6 +1728,30 @@ void LogCreateAheadStats()
                          g.runtimeNever.load() + g.classLost.load();
     if (sum == g.statsSeen) return;
     g.statsSeen = sum;
+    if (g.dueUs.load() || g.dueBuilt.load()) {
+        const uint64_t db = g.dueBuilt.load();
+        const uint64_t df = g.dueFrames.load();
+        const int heldDue = g.dueHeld.load();
+        Log("[createahead] CreateAheadDueMs=%d: frames that carried one %llu (mean %.2f ms, max %.2f ms, at or over the target %llu); "
+            "dropped without an adoption %llu, held now %d",
+            g.dueUs.load() / 1000, static_cast<unsigned long long>(df),
+            df ? static_cast<double>(g.dueFramesUs.load()) / 1000.0 / static_cast<double>(df) : 0.0,
+            static_cast<double>(g.dueFrameMaxUs.load()) / 1000.0, static_cast<unsigned long long>(g.dueFramesOver.load()),
+            static_cast<unsigned long long>(g.dueWasted.load()), heldDue);
+        Log("[createahead] CreateAheadDueMs=%d: due builds %llu (mean %.2f ms; adopted %llu, no create came %llu; a grid shift within %.1f s "
+            "after one %llu); waited: gap %llu, older than %.0f s %llu, after a create %llu, after a grid shift %llu, pool full %llu, "
+            "velocity not known %llu, middle line near %llu, no fit %llu, GC pass / streaming next %llu, no frame cap %llu; held actors "
+            "expired after a frame without slack %llu",
+            g.dueUs.load() / 1000, static_cast<unsigned long long>(db),
+            db ? static_cast<double>(g.dueBuiltUs.load()) / 1000.0 / static_cast<double>(db) : 0.0,
+            static_cast<unsigned long long>(g.dueAdopted.load()), static_cast<unsigned long long>(g.dueNever.load()), kDueEdgeS,
+            static_cast<unsigned long long>(g.dueShiftsAfter.load()), static_cast<unsigned long long>(g.dueSkipGap.load()), kDueWindowS,
+            static_cast<unsigned long long>(g.dueSkipOld.load()), static_cast<unsigned long long>(g.dueSkipCreate.load()),
+            static_cast<unsigned long long>(g.dueSkipShift.load()), static_cast<unsigned long long>(g.dueSkipRoom.load()),
+            static_cast<unsigned long long>(g.dueSkipPos.load()), static_cast<unsigned long long>(g.dueSkipEdge.load()),
+            static_cast<unsigned long long>(g.dueSkipFit.load()), static_cast<unsigned long long>(g.dueSkipStream.load()),
+            static_cast<unsigned long long>(g.dueSkipCap.load()), static_cast<unsigned long long>(g.dueExpired.load()));
+    }
     Log("[createahead] cells walked %llu, references noted %llu (queued %llu); built %llu (mean %.2f ms; waited: no slack %llu frames, "
         "pacing busy %llu); character creates %llu: took a built actor %llu (spares %llu), came before it was built %llu, not taken: class "
         "%llu scale %llu parameters %llu gone %llu not at its build place %llu; destroyed unused: no create came %llu, menu / loading %llu, travel %llu, save %llu, "
@@ -1453,6 +1807,20 @@ void CreateAheadTestSetup(const CreateAheadFakes* f)
         c->store(0);
     g.pool.store(0);  // CreateAheadPool as the default (the pool test sets it itself)
     g.levelled.store(0);  // CreateAheadLevelled as the default (its test sets it itself)
+    g.dueUs.store(0);     // CreateAheadDueMs as the default (its test sets it itself)
+    DueReset();
+    g.dueBuildN = g.dueBuildAt = 0;
+    g.dueFrame = g.dueLastFrame = 0;
+    g.dueLastS = g.dueLastBuildS = g.dueCreateS = g.dueShiftS = -1e300;
+    g.dueCreatesSeen = g.pawnCreates.load();
+    g.dueShiftsSeen = (f && f->shifts) ? *f->shifts : 0;
+    g.buildDue = false;
+    g.dueHeld.store(0);
+    for (std::atomic<uint64_t>* c : {&g.dueBuilt, &g.dueAdopted, &g.dueNever, &g.dueSkipFit, &g.dueSkipGap, &g.dueSkipCreate, &g.dueSkipShift,
+                                     &g.dueSkipEdge, &g.dueSkipPos, &g.dueSkipRoom, &g.dueSkipOld, &g.dueShiftsAfter, &g.dueBuiltUs,
+                                     &g.dueFrames, &g.dueFramesOver, &g.dueFramesUs, &g.dueFrameMaxUs, &g.dueWasted,
+                                     &g.dueSkipCap, &g.dueSkipStream, &g.dueExpired})
+        c->store(0);
     if (f) {
         g.fakes = *f;
         g.test = true;
@@ -1511,6 +1879,24 @@ CreateAheadTestCounts CreateAheadTestRead()
     c.heldBack = static_cast<int>(g.heldBack.load());
     c.destroyQuiet = static_cast<int>(g.destroyQuiet.load());
     c.mode = g.mode.load();
+    c.dueBuilt = static_cast<int>(g.dueBuilt.load());
+    c.dueAdopted = static_cast<int>(g.dueAdopted.load());
+    c.dueNever = static_cast<int>(g.dueNever.load());
+    c.dueSkipFit = static_cast<int>(g.dueSkipFit.load());
+    c.dueSkipGap = static_cast<int>(g.dueSkipGap.load());
+    c.dueSkipCreate = static_cast<int>(g.dueSkipCreate.load());
+    c.dueSkipShift = static_cast<int>(g.dueSkipShift.load());
+    c.dueSkipEdge = static_cast<int>(g.dueSkipEdge.load());
+    c.dueSkipPos = static_cast<int>(g.dueSkipPos.load());
+    c.dueSkipRoom = static_cast<int>(g.dueSkipRoom.load());
+    c.dueSkipOld = static_cast<int>(g.dueSkipOld.load());
+    c.dueFrames = static_cast<int>(g.dueFrames.load());
+    c.dueFramesOver = static_cast<int>(g.dueFramesOver.load());
+    c.dueWasted = static_cast<int>(g.dueWasted.load());
+    c.dueSkipCap = static_cast<int>(g.dueSkipCap.load());
+    c.dueSkipStream = static_cast<int>(g.dueSkipStream.load());
+    c.dueExpired = static_cast<int>(g.dueExpired.load());
+    c.dueHeld = g.dueHeld.load();
     return c;
 }
 

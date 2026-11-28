@@ -241,6 +241,7 @@ void ExecHook(void* delegateInstance)
     const uint64_t t0 = LedgerClockUs();  // HitchLedger: the fade-to-game frame and its time (PrepareCollisionBehindLoadingScreen included)
     const bool prepared = PrepareFirst(delegateInstance);
     g_fadeToGameCalls.fetch_add(1, std::memory_order_relaxed);
+    CrashEvent(kEvKey, prepared, 0, 0, "screen end");  // CrashReport's ring: a loading screen's end
     g.origExec(delegateInstance);
     if (prepared) PrepareCollisionEnd();
     if (t0) LedgerFadeToGame(LedgerClockUs() - t0);
@@ -251,6 +252,7 @@ bool ExecIfSafeHook(void* delegateInstance)
     const uint64_t t0 = LedgerClockUs();
     const bool prepared = PrepareFirst(delegateInstance);
     g_fadeToGameCalls.fetch_add(1, std::memory_order_relaxed);
+    CrashEvent(kEvKey, prepared, 1, 0, "screen end");  // CrashReport's ring: a loading screen's end
     const bool result = g.origExecIfSafe(delegateInstance);
     if (prepared) PrepareCollisionEnd();
     if (t0) LedgerFadeToGame(LedgerClockUs() - t0);

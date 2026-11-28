@@ -242,6 +242,7 @@ bool ScreenshotParallelRows(uint32_t rows, size_t bytes, void (*fn)(const void* 
     return true;
 }
 
+
 namespace {
 
 bool Fail(const char* why)

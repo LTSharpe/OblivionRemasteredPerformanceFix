@@ -9,6 +9,284 @@ Downloads, checksums and build attestations: https://github.com/LTSharpe/Oblivio
 Bug fixes say whose bug it was: **game bug** = also happens without OblivionPerfFix (in the game, its engine or a
 driver library); **our bug** = caused by an earlier version of OblivionPerfFix.
 
+## 1.7.0-beta
+2026-11-28. For Oblivion Remastered, Steam build 19115871 (Game Pass experimental).
+
+**In short:** a crash and hang report for bug reports (on by default; it costs nothing while you play) and a one-click
+`OblivionPerfFix-CollectReport.bat` that gathers what a report needs; GPU crash reports can say what graphics memory a
+crash touched (off by default, for reports). New performance keys for the first seconds after a load, for crossings and for
+menus are on by default, as are the fixes for the bugs below (each entry names the key that switches it off; a `.ini` from
+an earlier version without these keys gets the same defaults). Five game or mod bugs are fixed (crashes while travelling, near a rider on a
+horse and with an item script, a character left in a T-pose, the camera on horseback), and the benchmark has two
+additions from contributors (pull requests #60 and #61).
+
+- **New (on by default): a crash and hang report** (`CrashReport`, `HangReport`, `HangReportSeconds`). If the game
+  crashes, `OblivionPerfFix-crash.txt` next to the log says where: the program part and offset, the thread and its call
+  stack, whether any of this mod's code was on it (and which setting's), and what the game did in the last minute
+  (doors and fast travel, cells, menus and loading screens). If the game's main thread does not finish a frame for 10 s
+  (the picture freezes or goes black), the same file gets every thread's call stack and the graphics device's state, and
+  the game goes on. Nothing is written in a session without a crash or hang, the report changes nothing in how the game
+  handles a crash, and it costs nothing while the game runs. Each report starts with a short summary between two `----`
+  lines (version, game build, Windows, CPU, RAM, graphics card and driver, upscaler versions, what happened and where):
+  paste it into a bug report as it is. The GPU crash report's per-second lines now show the longest
+  frame without HitchLedger too (they said 0.0 ms before: our bug, report only).
+
+- **New (off by default): a graphics memory record for GPU crash reports** (`GpuMemoryRecord=1`). Some GPU crashes are a
+  "page fault": the graphics card read or wrote memory at an address that no longer belonged to anything. With this
+  setting on, the mod keeps a list of the graphics memory the game and its upscalers make and free, and the GPU crash
+  report then says what was at that address (what kind of memory, its size and name, when it was made and when it was
+  freed) and which upscaler, frame generation and overlay libraries were loaded, with their versions. It changes nothing
+  in the game; it costs about 9 MB of memory and a little CPU time while graphics memory is made (mostly loading). Every
+  GPU crash report now also names the graphics card and its driver version.
+
+- Crash reports are easier to send: new `OblivionPerfFix-CollectReport.bat` (next to the DLL in every zip) gathers the mod's logs and crash report, the game's `Engine.ini` / `GameUserSettings.ini`, the newest crash folders, a few Windows event-log entries, your hardware / driver versions, a list of the files in the game's folder and the `.ini` / `.log` of OptiScaler, ReShade, Special K and UE4SS into one zip of at most 10 MB, and copies a short summary of the newest crash or hang record to the clipboard. Say what you were doing, then paste the summary into a Nexus bug report (Nexus takes no files) or a GitHub issue (new "Crash or hang" form, where the zip goes too); if we need the zip and you have no GitHub account, a share link from any file-sharing service (OneDrive, Google Drive, Dropbox, MEGA ...) does. It takes the game's crash folders of the same game session as the newest record, lists the file dates and the mod DLL's size and short hash, warns when started from a folder without the mod, and keeps only the newest zip in its folder. Apart from deleting its own older zips it only reads files, changes nothing, sends nothing; your Windows user name is blanked in the text files, and the game's crash dump is added only if you say yes (and fits).
+
+- **Benchmark: `ride-track-gallop`, the riding track on a horse at a gallop** (the galloping challenge, save-free; pull
+  request #61 by luisAzcuaga, thanks). After the teleport the player mounts a new black horse (`placeatme`, then the
+  activate key, as a player does) and the walk presses the gallop toggle once: about 670 units/s on the straights (a
+  recorded play session: 633-658), the 80 s track in about 83 s. A walk scene can now say `"mount"` and `"press"`
+  (docs/benchmark.md, the challenge scenes); the mod has `press` and `pawn` verbs. On an i7-12700, profile `small`, 3
+  fresh games: game thread 7.77 ms per frame galloping vs 7.34 running and 6.90 flying the same track; the ridden
+  horse's movement component takes about 220 us per call (a character's: 30-50 us).
+
+- **New (on by default, not yet measured): fewer townspeople made in one piece at a crossing when the frames before it
+  had no time to spare** (`CreateAheadDueMs`). Riding up to Anvil's gate at 4K with the 60 cap, the frames before the
+  crossing were all a little over the cap after the people and horses at the main gate arrived, so the actors the fix
+  builds ahead were not built (it waited for a frame with time to spare), and the harbour people were made at the
+  crossing at 7-11 ms each. With `CreateAheadDueMs=25` such a character may also be built in the seconds before the
+  crossing on a frame that stays within 25 ms with it (at most four a second; not just before or after the world's
+  cell grid moves, not right after a character was made, not before the game's memory clean-up; only with a frame
+  cap). The actor built and its hand-over are the same as before; only which frame pays the ~3 ms changes. A game
+  behaviour (also without the mod). On by default; `CreateAheadDueMs=0` switches it off.
+
+- **New (on by default): slower play after a fast travel or a load, near the video memory limit** (`LoadPeakKeepsBack`,
+  `RtSceneBufferGrowToPeak`; the slowdown is the game's engine and Windows, also without the mod, but OblivionPerfFix's own
+  memory keeps added to it). At the end of a load the old and the new area are in video memory together for about a
+  second; when that passes what Windows gives the game, Windows moves part of it to system RAM and brings it back over
+  the next minute or two, and every new block of video memory waits for that (36-175 ms, several times on a ride after a
+  fast travel in the maintainers' tests). `LoadPeakKeepsBack=1` makes the mod's memory keeps work as the game does while a
+  loading screen is up near the limit (slow new blocks on the ride after a fast travel 20 against 7 in 4 + 4 test cycles,
+  drops of 50 ms or more 11 against 3, loading screens not longer). `RtSceneBufferGrowToPeak=1` grows the ray-traced
+  scene's list to the session's size behind the loading screen instead of in steps in the first minute of play. Same
+  picture. On by default; `LoadPeakKeepsBack=0` and `RtSceneBufferGrowToPeak=0` switch them off.
+- **New (off by default, not yet measured): a 150-180 ms drop about a second after crossing into a new area after a fast
+  travel near the video memory limit** (`DfAtlasKeep`; the game's engine, also without the mod). The engine makes its store
+  of object shapes for lighting (the distance-field brick atlas, 64-256 MB) smaller when an area unloads and larger again on
+  the next stream-in; near the limit each new store makes the graphics thread wait for Windows. `DfAtlasKeep=1` keeps the
+  store at its size (at most the largest this session already had, 256 MB at the game's settings) and lets it grow as
+  before. The same entries are looked up the same way: same picture. Off by default (`DfAtlasKeep=1` switches it on).
+- **New (on by default, preliminary): a sudden drop a few seconds before some cell crossings, for example on the road at
+  Ra'sava Camp between Skingrad and Anvil** (`DfObjectBufferKeep`, `DfMappingReserve`, `DfAddSpread`; the game's engine, also
+  without the mod). When a far cell's plants come in, the engine adds about 17 000 lighting shapes in one frame and in the same
+  frame moves its 117 000-entry list to a bigger place and re-makes two video-memory buffers (28-43 ms frame intervals in our
+  tests). `DfObjectBufferKeep=1` makes the buffers with room to spare from the start and keeps them at the session's largest size (+26 MB of video memory; same picture), `DfMappingReserve=1` makes room
+  for the list behind the loading screen (same picture), `DfAddSpread=1` lets far shapes beyond `DfAddSpreadBudget` come in over
+  the next 1-3 frames (equivalent: far lighting shapes up to 3 frames late). On by default; `DfObjectBufferKeep=0`, `DfMappingReserve=0` and `DfAddSpread=0` switch them off.
+- **New (on by default, preliminary): the engine's own short-lived load memory goes back sooner behind a loading screen
+  near the limit** (`LoadPeakDrain`; the one-page-a-frame rule is the game's engine, also without the mod). Up to 4 empty
+  upload pages a frame instead of one, emptied ray-tracing memory blocks after 2 frames instead of 20, and no spare blocks
+  made there; the 24 pages `UploadMemoryKeep` keeps stay. Only empty memory goes back sooner: same picture. In the
+  maintainers' first test (3 fast-travel cycles per setting) the rides after the travel had fewer paging waits (2 against 7-10). On by default; `LoadPeakDrain=0` switches it off.
+- **New (on by default, not yet measured): a drop a second after crossing into a new area on the road**
+  (`UploadPagePreGrow`; the game's engine, also without the mod: it keeps 5 upload pages, `UploadMemoryKeep` 24). The new
+  area's textures need 30-36 of the engine's 4 MB upload pages at once; each missing one is made while the engine holds a
+  lock the other streaming threads and the graphics thread wait on (3-4 ms each, in series: 43-98 ms frames on the road to
+  Fort Empire and three other spots in the maintainers' play). With it on, up to 40 pages are kept (64 MB more; back to 24
+  near the video memory limit) and a missing page is made ahead on a background thread, outside the lock, by the engine's
+  own code. Same picture. On by default; `UploadPagePreGrow=0` switches it off.
+- **New (on by default, not yet measured): fewer of the engine's leftover load pages given back in the first seconds of play**
+  (`UploadPageScreenRelease`; the engine's one-page-a-frame rule, also without the mod). After every loading screen the
+  engine still holds 70-230 upload pages it no longer needs and gives them back one a frame in the first 1-4 seconds of play
+  (4-7 ms of graphics-thread time each). With it on they go back several a frame behind the screen, once the load has
+  stopped making pages (at most about 24 ms extra a frame, behind the screen only). Same pages, same rules, same picture. On by default; `UploadPageScreenRelease=0` switches it off.
+- **New (on by default, not yet measured): closing a menu in the open world need not rebuild all water**
+  (`WaterRebuildSkip`). Every time the inventory, pause menu, magic menu or map opened or closed, the game (in its Unreal
+  Engine 5.3 water code) told every loaded water zone to build its water surface again, although nothing had changed:
+  about 9 ms of the frame the menu closes, in the maintainers' test with 8 zones loaded outside a city. The game also
+  switches the water surface off while the menu is open; the kept surface is used when the renderer still holds it. The surface is now kept when the things the
+  fix checks (the water bodies, their positions, sizes, visibility and materials) are what its last build used, the idea
+  of Epic's own fix in Unreal Engine 5.5; any other rebuild request still rebuilds it. Equivalent to the game's result.
+  A game behaviour (also without the mod). On by default; `WaterRebuildSkip=0` switches it off.
+
+- **New (on by default): menu layout files are read once** (`MenuFileCache`). Each time a conversation, the pause
+  menu, the journal or another menu from the original game opened, the old engine read its layout file from disk again,
+  with every file it includes, and cleaned it up before building the menu: part of the short stall when a conversation
+  or menu opens. Each file is now read once and the cleaned-up text kept (a few hundred KB); menus are built from the
+  same bytes exactly as before and still open fresh each time. A menu file edited while the game runs is seen after a
+  restart. Not measured in play yet. On by default; `MenuFileCache=0` switches it off.
+- **`StuckEffectLookFix` made more careful around loading** (one report of a crash opening doors in an Oblivion gate
+  with 1.6.0-beta on the Game Pass version; not reproduced, and no fault found in this fix, which is the newest one
+  active in that log). The fix now leaves alone a weapon or character whose actor, area or world is being unloaded,
+  changes only the stored setting of one that is not in the world at that moment (no calls into the engine for it),
+  and puts a look back only while its material is still the one it saw. Nothing changes in play. Its log lines now also
+  show later events (one every 5 seconds after the first 20).
+- **New (on by default): a cancelled character load no longer waits for the character's face** (`HeadCancelNoWait`).
+  When the game cancels a character's model load while the old engine is building the character's face on a loader
+  thread, it waited for that face to be finished only to throw it away: a 64-68 ms frame (seen twice at Robber's Glen,
+  a traveller at the edge of the loaded area as you ride past). The face is now finished in the background and put away
+  a moment later by the same thread (not for the player's own face); the same characters load and cancel as before,
+  nothing on screen changes. On by default; `HeadCancelNoWait=0` switches it off.
+- **New (on by default): video memory the game has just made is no longer sent out of video memory at once** (`ResidencyFreshNew`; the
+  behaviour is the game's engine's, also without OblivionPerfFix). Above 70 % of its video-memory budget the engine sends
+  memory it has not used for a while to system RAM and brings it back at its next use; memory it had just made counted as
+  never used, so it went out at once and the GPU waited for it to come back at its first use: 80-96 ms frames on the road
+  up to the Kvatch Oblivion gate in our play, each one next to a new 64 MB block (and every spare block of
+  `GpuPoolSpareAhead` went this way). Now a block counts as used when it is made, as if a frame had used it; the rest of
+  the engine's rules for staying inside the budget are unchanged (right at the limit the engine's own order applies), and so
+  is the picture. Not measured in play yet.
+  On by default; `ResidencyFreshNew=0` switches it off.
+- **New (on by default): a spare video-memory block is made ahead for the next new one** (`GpuPoolSpareAhead`; the stall is the game's
+  engine's, also without OblivionPerfFix). When a new area needs another 64 MB texture block (or 32 MB buffer block), the
+  engine made it while every thread that wanted that memory waited: 35-43 ms in one play at Kvatch and Shetcombe Farm,
+  three red drops. Now one spare block per list that grew is made ahead on a thread of ours and usually handed over at once, the
+  design Epic added to its newest engine for buffers, here also for textures. Same block, same picture; the spares count
+  inside `GpuPoolKeepMB`. Not measured in play yet. On by default; `GpuPoolSpareAhead=0` switches it off.
+- **New (on by default): files of objects asked for again when the row of cells is switched on** (`CellObjectPreloadRelook`;
+  needs `CellObjectPreload`). The in-frame load is the game's own; this widens `CellObjectPreload`'s cover. The files
+  `CellObjectPreload` loads ahead of time are used by nothing until the cell is switched on, so the game's memory clean-up
+  can free them again in between (a forced clean-up in a test ride did, 4 of 4); the object is then made with its files
+  read from disk inside that frame (seen once in play: a book at Dasek Moor, a 0.24 s frame).
+  With this on, the objects of the cells looked at ahead are looked up again when the grid shifts, and a file that has gone
+  is asked for again, from a few frames to a few tenths of a second before the object is made, behind the game's own
+  loads. Nothing is made earlier or later. The gain is not yet shown in the game: our test rides did not reproduce the
+  in-frame load with or without it. On by default; `CellObjectPreloadRelook=0` switches it off.
+- **New (on by default): no 0.2 s freeze when you pick a save on the main menu** (`SaveBytesBulkRead`; an improvement, not a bug fix).
+  Clicking a save on the Load Game page, and confirming it, froze the game for about 0.2 s (201 ms and 176 ms in our play log, 175 ms in
+  our test) because the game read the save's data one byte at a time. With the key on (1) each block of the file is read in one piece:
+  reading the save took 12 to 22 ms at the click in our test. The same bytes are read; short or damaged files are read the game's way. On by default; `SaveBytesBulkRead=0` switches it off.
+
+- **New (on by default): a conversation, the Credits or a menu opened after the game's memory clean-up no longer waits for loads**
+  (`MenuLoadKeep`, `MenuLoadKeepMB`; an improvement, not a bug fix). The game loaded the conversation screen, item classes, icons and the
+  menus' 29 small input-mapping files (not the ones you can rebind keys in) from
+  disk again at each such open (5 to 25 ms in our logs) because its clean-up, about once a minute, had dropped them. With the key on
+  (1) what a menu or conversation loads stays in memory (at most `MenuLoadKeepMB`, 64 by default): in our play it kept 81 such objects (about 11 MB), which are then not loaded again at the next open. On by default; `MenuLoadKeep=0` switches it off.
+- **New (on by default): putting on a robe yourself no longer builds its cloth several times in full**
+  (`ClothRegisterLiteRefresh`). When a piece is put on by itself (by you in the inventory, or when a scene is set up),
+  the game takes it off and makes it anew, and a robe's cloth was then built several times (5 to 8 in our test), all
+  but the last thrown away. `ClothRegisterLite`'s treatment now covers this too: in the maintainers' test a robe put on took 9.5 ms instead of
+  20.2 ms in its frame. The cloth that stays is exactly the game's. On by default; `ClothRegisterLiteRefresh=0` switches it off.
+- **New (on by default): starting and ending a conversation in third person, and switching the view, stutter less**
+  (`EquipRefreshOneSpawn`; an improvement, not a bug fix: the game's own inefficiency). At each first/third-person switch
+  the game made every piece you wear anew twice, throwing the first one away at once. The first make is now left out when
+  the piece is the same kind: in the maintainers' test a switch took 8.4 instead of 13.6 ms when a conversation started
+  and 10.7 instead of 16.0 ms when it ended. The piece is still made new by the game, so it looks and moves the same. On by default; `EquipRefreshOneSpawn=0` switches it off.
+- **New (off by default, optional tweak): your clothing is kept at a first/third-person switch**
+  (`EquipRefreshKeepActor`). At a conversation's start and end in third person, and when you switch the view, the game
+  made every piece you wear anew even though it is the same piece. With the switch on the piece you wear is kept and only
+  set up for the new view, which took a further 0.5 to 1 ms off each switch in our test. A piece whose cloth the game does not set up again
+  may keep swinging instead of starting from a still pose, which is why it is optional.
+- **New (on by default): the frame after a conversation, a menu or a loading screen is shorter** (`UnfreezeClothSkip`;
+  an improvement, not a bug fix: the game's own inefficiency). When the world un-pauses, the game goes through every
+  object of every loaded place (3 to 4 ms in Cheydinhal's street, 6 to 7 ms at its canal in the maintainers' test) to
+  set up the few pieces with an older kind of cloth again. The game's own set-ups now note those pieces, and the pass sets
+  up just those: 1.3-2.5 instead of 3.4-5.5 ms in the street, 4.8-5.4 instead of 6.3-8.3 ms at the canal. Nothing you see or play changes. On by default; `UnfreezeClothSkip=0` switches it off.
+- **New (on by default): the first conversation and the first persuasion of a session no longer load while you wait**
+  (`MenuLoadPreload`, with `MenuLoadKeep`). Their screens and the menus' input files are loaded behind the first loading
+  screen instead: in the maintainers' test the first conversation's opening frames took 23.8 instead of 37.1 ms and the
+  first persuasion's 27.2 instead of 32.6 ms, with no load of 2 ms or more left at any opening. The same files, only
+  loaded earlier; they then stay loaded for the session. On by default; `MenuLoadPreload=0` switches it off.
+- **New (off by default): a kept robe's cloth set up faster at a view switch** (`EquipRefreshKeepCloth`, goes with
+  `EquipRefreshKeepActor`). 1 builds the robe's repeated cloth set-ups the way `ClothRegisterLite` does (the same result as
+  the game's; it needs `ClothRegisterLite=3` and `ClothRegisterLiteRefresh=1`); 2 (optional tweak) leaves them out, so
+  the kept robe's cloth keeps swinging instead of starting again, but only while the robe, its collision shapes and its
+  cloth settings are the same as when its cloth was built. In the maintainers' test 1 made one of the robe's two repeated set-ups per switch the fast way, and 2
+  left the robe's own set-up out with no visible difference in frame grabs; the time this key saves on its own has not
+  been measured yet.
+
+- **New (on by default): menus open a few milliseconds faster** (`StringTableMemo`). Every menu text that comes from the
+  game's text tables made the engine look up its table in the game's file index, twice per text, on every open (in the
+  maintainers' samples of play up to about 7 ms of an inventory open, 9 of the pause menu, 20 of the map, 5-10 of a
+  Settings tab). The answer is now remembered per table; the texts are made exactly as before. On by default; `StringTableMemo=0` switches it off.
+- **New (on by default): a shorter hitch when you click a save on the Load page** (`SlotClickPayloadCopy`; the game's own
+  cost, also without OblivionPerfFix). Clicking a save made the game copy the save's bytes eight times in one frame
+  before the "Are you sure?" box appears: 9-13 ms with 4-6 MB saves on our test PC.
+  Three of those copies were made from lists thrown away right after, and five only fed a step that does nothing with
+  them; they are now skipped (that work is now 1-2 ms), and the step that keeps the save's bytes gets exactly the same
+  bytes. On by default; `SlotClickPayloadCopy=0` switches it off.
+
+- **New (on by default): when a frame is already long, the next piece of the cell being streamed in waits one frame**
+  (`StreamInHeavySkipMs`, part of `StreamInBudget`). Riding past a cave or a fort, a frame made long by a physics step
+  or a crowd could also get the next slice of a newly streamed-in cell on top. With the key set (17 is the default), that
+  slice moves to the next frame. Equivalent to the game's own result, not identical: the cell is paused for one frame and
+  finished a few frames later (at most 8 pauses per cell, a few frames more with `StreamInBudget=2`); never before a cell
+  has started, never two frames in a row, never behind a loading screen, and a wait for streaming is not held up. On our
+  test ride past Memorial Cave (4 rides each way) the burst's frames of 20 ms or more fell from 73 to 21 and its slowest
+  frame was about 2 ms shorter. On by default; `StreamInHeavySkipMs=0` switches it off.
+
+- **Fixed: the log's count of loaded saves was always 0** (our bug in 1.6.0-beta; a log line only, the game is not affected).
+  `StreamBehindLoadingScreen`'s statistics line (`[streamload] ... N save loads`) recognises a loaded save by the save system's
+  read of it, and that was only watched when `UnfreezeBehindLoadingScreen` was on at start-up, which it is not by default. The
+  read is now always noted (it only records the time). Fast travels are still counted only with that key on, and the line
+  now says so.
+
+- **Fixed: the game could freeze on the first loading screen after Load** (our bug in 1.6.0-beta; with AMD frame generation
+  on). The screen stayed black while the music played on. `CmdMemPregrow`'s work behind the first loading screen fell on
+  the moment the game turns frame generation off there, where a race in AMD's frame generation can go wrong: AMD's count
+  of the frames shown stayed one short and the game waited for it for ever. The race is AMD's, but our work there made it
+  likely: in every launch that froze, that work was running at that moment. It now starts only once frame generation is
+  off and pauses its driver work whenever it is on. Without frame generation nothing changes.
+
+- **Crash fixed: "access violation reading address 0" while travelling** (`PrePlacedRecordGuard`; one report on
+  1.6.0-beta; game bug: the missing check is the game's own, so it can also happen without OblivionPerfFix; 1.6.0-beta's
+  character pacing made its window a few frames wider). When the game switches on a cell, it looks up each placed
+  object's Unreal object in a list kept per cell. An object missing from that list crashed the game. That can happen when
+  two objects in one cell share an id (the game's own files have about 30 such pairs) and one is switched off just
+  before the other is switched on. The missing entry is now made again by the game's own code, as when the object was
+  paired, and the object appears as usual. Only an object whose pairing the game has already cancelled is left out until
+  its cell is switched on again. Nothing changes while the entry is there. We never saw the real case in our own runs
+  (about 4,800 hand-overs), so we tested the fix by removing entries on purpose: 81 times the entry was made again, with
+  no crash and no visible difference, at about 0.5 ms each time it acts.
+  On by default; `PrePlacedRecordGuard=0` goes back to the game's behaviour.
+
+- **Crash fixed: the game could close while riding past a rider on a horse** (`RiderBindGuard`; game bug: also
+  happens without OblivionPerfFix). A horse's animations also move its rider's bones, through the rider's own
+  animation data. When the rider is unloaded and loaded again (riders travelling along a road are, as the cell behind
+  the player is unloaded), the horse kept the old links and wrote into memory the game had already freed; once Windows
+  took that memory back, the game crashed (seen once, near Bruma). Those links are now cleared at the moment the
+  rider's animation data goes; the game links the horse to the rider again the next time it binds the horse's
+  animations (at the latest when the rider gets back on it), as it always does. Nothing you see changes. On by default; `RiderBindGuard=0` goes back to the game's behaviour.
+
+- **Fixed: a character getting up from a chair could be left in a T-pose** (`FurnitureStandUpFix`; whose bug is not
+  settled yet). Seen in two sessions at Five Riders Stables in Leyawiin after a fast travel: the stable owner stood with
+  her arms out and could not be talked to. Her state machine had missed the moment she sat, and only its seated state
+  leads to the stand-up that gives back walking and ends the old engine's "getting up". In exactly that state the game
+  is now told she is still seated once more, so its own seated state and stand-up run as they do when nothing is missed.
+  On by default; `FurnitureStandUpFix=0` goes back to the game's behaviour.
+- **Fixed: after loading a save, the camera on horseback could stay far too close to the horse**
+  (`WeaponCameraStateFix`; game bug: also happens without OblivionPerfFix). Reloading or getting off and on again did not
+  help; seen once, after a bow fight.
+  The camera keeps a "weapon out" state of its own and leaves it only when it sees you put the weapon away. A save loads
+  you with the weapon already away, so a camera that was in that state at the load stayed in it: on foot that view looks
+  like the normal one, on a horse it is the on-foot distance. Now, when the camera has stayed in that state for a second
+  while your weapon is away, its state machine is restarted from its first state, and the game's own rules then pick
+  the horse view (in our test within a tenth of a second).
+  On by default; `WeaponCameraStateFix=0` goes back to the game's behaviour.
+
+- **Crash fixed: the game could crash when an item's script swapped one item for another in an inventory**
+  (`InventoryScriptWalkFix`; crash data shared by Necroseed in issue #53; game bug: also happens without OblivionPerfFix). Every frame the game
+  runs the scripts of the scripted items an inventory holds, going down the inventory's list. While a script runs, the
+  game keeps its place in the list, and afterwards only checks whether the number of items changed. A script that adds
+  one item and removes another keeps that number, and the removal can free the very part of the list the game is
+  standing on; the game then read freed memory and could crash. Now, after each item script, the game checks whether the
+  next step it is about to take would go through a part of the list the script took away; only then does it take its
+  own "list changed" path (back to the start of the list, as it already does whenever the number of items changes).
+  Nothing changes otherwise. We made this happen on purpose in a test (a deliberate change in the middle of an item
+  script): without the fix the game crashed with the same error as in issue #53, with it the game kept running. What
+  triggered the crash in issue #53's fight is not known; this is the one way to that crash we have found.
+  On by default; `InventoryScriptWalkFix=0` goes back to the game's behaviour.
+
+- **Benchmark: `-Scenes` runs the scenes in the order you list them** (our bug in the benchmark, not in the fix or the
+  game; pull request #60 by luisAzcuaga, thanks). Until now every selection ran in the scenario's order, without a word, so
+  `-Scenes ic-waterfront-pass,brindle-control-hold,brindle-corral-hold` (challenge #32's "via the control spot")
+  measured the corral before the control spot. A pattern such as `canal-*` keeps the scenario's order within it. A run
+  without `-Scenes` is unchanged.
+
+- **Benchmark: `-LiveFixIni`** (pull request #60 by luisAzcuaga, thanks) switches a fix key in a kept game for an A-B-B-A:
+  with `-Session reuse` the run writes its `-FixIni` keys into the installed `OblivionPerfFix.ini`, reads them back and
+  waits 2.5 s (the fix re-reads its ini every second). Until now a reused game only got a warning that `-FixIni` was not
+  applied, and the key had to be written by hand. The run's warnings name the keys written; a key the fix reads only at
+  start-up still needs a new game. `-Close` puts the ini back as it was before the first live write.
+
 ## 1.6.0-beta
 2026-11-21. For Oblivion Remastered, Steam build 19115871 (Game Pass experimental). Numbers marked "ours" are from our
 test PC (Ryzen 7 5800X, RX 9070 XT: one PC with an AMD graphics card; nothing here was tested on an NVIDIA card).

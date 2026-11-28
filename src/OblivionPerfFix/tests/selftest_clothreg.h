@@ -137,6 +137,42 @@ int Dress(int comp, int cls, bool rebuild, bool read = false, bool bounds = fals
     reinterpret_cast<void (*)(void*, void*, void*, void*)>(g_info.equipHook)(nullptr, nullptr, nullptr, nullptr);
     return g_builds - before;
 }
+// ClothRegisterLiteRefresh: a fake equipment-slot refresh does the same as the fake EquipBodyPart (spawn + register + the
+// Blueprint's rebuilds); called through the fix's refresh hook. Returns the builds; *ret = what the hook returned.
+uint64_t FakeRefresh(void* a, void* b, void* c, void* d)
+{
+    FakeEquip(a, b, c, d);
+    return 0xC0FFEEull;
+}
+// EquipRefreshKeepCloth (dlgedge): a refresh of a KEPT clothing actor: no spawn / registration, only the robe Blueprint's
+// rebuilds (3 on the bench robe) of a component that already holds a proxy; g_keptSetAsset first rebuilds it via SetSkinnedAsset.
+int g_keptRebuilds = 3;
+bool g_keptSetAsset = false;
+// EquipRefreshKeepCloth 2's record (review S2-3): fake GetSkinnedAsset (+0x5E0), GetPhysicsAsset (+0x7A0), PropertyCollections +0x920
+void* FakeKeptAsset(const uint8_t* c) { return *reinterpret_cast<void* const*>(c + 0x5E0); }
+void* FakeKeptPhys(const uint8_t* c) { return *reinterpret_cast<void* const*>(c + 0x7A0); }
+void* g_keptColl[2][2];  // TSharedPtr {object, controller}
+alignas(16) uint8_t g_frame[0x40];  // a fake FFrame (Code at +0x20)
+uint64_t FakeKeptRefresh(void*, void*, void*, void*)
+{
+    using Exec = void (*)(uint8_t*, void*, void*);
+    if (g_keptSetAsset) reinterpret_cast<void (*)(uint8_t*)>(g_info.setAssetHook)(g_s.comp);
+    for (int i = 0; i < g_keptRebuilds; ++i) reinterpret_cast<Exec>(g_info.execRecreateHook)(g_s.comp, g_frame, nullptr);
+    return 0xBEEFull;
+}
+int RefreshSlot(int comp, int cls, bool rebuild, uint64_t* ret)
+{
+    uint8_t* c = g_comp[comp];
+    *reinterpret_cast<void**>(c) = g_vt;
+    *reinterpret_cast<uint8_t**>(c + 0x20) = g_actor[cls];
+    *reinterpret_cast<uint64_t*>(c + 0x18) = 77;
+    *reinterpret_cast<uint8_t**>(g_actor[cls] + 0x10) = g_class[cls];
+    *reinterpret_cast<int32_t*>(g_class[cls] + 0x0C) = 1000 + cls;
+    g_s = Script{c, rebuild, false, false, false};
+    const int before = g_builds;
+    *ret = reinterpret_cast<uint64_t (*)(void*, void*, void*, void*)>(g_info.refreshHook)(nullptr, reinterpret_cast<void*>(2), nullptr, nullptr);
+    return g_builds - before;
+}
 
 inline void ClothRegSelfTest(const opf::GameModule& game)
 {
@@ -153,6 +189,8 @@ inline void ClothRegSelfTest(const opf::GameModule& game)
               at(*ci.requiresSyncSlot, 0x53CD370) && at(*ci.calcBoundsSlot, 0x53C7500),
           "cloth register: vtable exe+0x803EBD0, RequiresPreEndOfFrameSync exe+0x53CD370, CalcBounds exe+0x53C7500");
     Check(ci.proxyOff == 0x940 && ci.registeredOff == 0x8C, "cloth register: proxy +0x940, registered flag +0x8C");
+    Check(at(ci.getAsset, 0x30627C0) && at(ci.getPhys, 0x3077D30) && ci.collOff == 0x920,
+          "keep cloth record: GetSkinnedAsset exe+0x30627C0, GetPhysicsAsset exe+0x3077D30, PropertyCollections +0x920");
     Check(at(ci.equip, 0x484CCD0) && ci.numEquipSlots == 2 && at(ci.equipCall, 0x4823DDD) &&
               ((at(ci.equipSlots[0], 0x7CDEF80 + 0xAD0) && at(ci.equipSlots[1], 0x7CED258 + 0xAD0)) ||
                (at(ci.equipSlots[1], 0x7CDEF80 + 0xAD0) && at(ci.equipSlots[0], 0x7CED258 + 0xAD0))),
@@ -173,6 +211,27 @@ inline void ClothRegSelfTest(const opf::GameModule& game)
           "cloth lite: completion sites: FClothConstraints::Enable exe+0x53ABC00, FLODData::Update's Update call exe+0x53C0651 redirected");
     Check(at(ci.onUnregisterSlot, 0x803EBD0 + 0x350) && *ci.onUnregisterSlot == ci.onUnregisterHook,
           "cloth lite: OnUnregister's vtable slot exe+0x803EF20 points at the hook (proxies dropped inside the call)");
+    // ClothRegisterLiteRefresh: not searched until its install (review S2-2); then the equipment-slot refresh exe+0x4830170 and
+    // its 2 direct calls (argument set-up checked, S2-3), both redirected through a stub to the hook (S3-4).
+    Check(ci.refresh == nullptr && ci.numRefreshCalls == 0, "cloth lite refresh: nothing searched while the key is not installed");
+    {
+        const bool inst = InstallClothRegisterRefresh();
+        ClothRegisterInfo(&ci);
+        Check(inst && at(ci.refresh, 0x4830170) && ci.numRefreshCalls == 2 &&
+                  ((at(ci.refreshCalls[0], 0x4833EAE) && at(ci.refreshCalls[1], 0x4840738)) ||
+                   (at(ci.refreshCalls[1], 0x4833EAE) && at(ci.refreshCalls[0], 0x4840738))),
+              "cloth lite refresh: equipment-slot refresh exe+0x4830170 (SetChildActorClass = EquipBodyPart's), calls exe+0x4833EAE, exe+0x4840738");
+        auto stubTo = [](uint8_t* call) {
+            const uint8_t* const st = RipTarget(call, 1, 5);
+            void* t = nullptr;
+            int32_t z = -1;
+            memcpy(&z, st + 2, 4);
+            if (st[0] == 0xFF && st[1] == 0x25 && z == 0) memcpy(&t, st + 6, 8);
+            return t;
+        };
+        Check(inst && stubTo(ci.refreshCalls[0]) == ci.refreshHook && stubTo(ci.refreshCalls[1]) == ci.refreshHook,
+              "cloth lite refresh: both calls redirected through a stub whose target is the hook");
+    }
     ClothRegisterTestSetup(reinterpret_cast<void*>(&FakeRecreate), reinterpret_cast<void*>(&FakeExecRecreate),
                            reinterpret_cast<void*>(&FakeExecSuspended), reinterpret_cast<void*>(&FakeExecEnabled),
                            reinterpret_cast<void*>(&FakeRequiresSync), reinterpret_cast<void*>(&FakeCalcBounds),
@@ -256,6 +315,148 @@ inline void ClothRegSelfTest(const opf::GameModule& game)
     }
     g_extraRebuilds = 0;
     Check(dressRules(7, 6, false, false, false, &r) == 1 && r == 1, "cloth lite mode 3: registration only: completed");
+    {   // ClothRegisterLiteRefresh (mode 3): a refresh's builds as an EquipBodyPart call's; off = the game's builds; rax passed through
+        ClothRegisterRefreshTestSetup(reinterpret_cast<void*>(&FakeRefresh));
+        g_extraRebuilds = 1;
+        uint64_t ret = 0;
+        SetClothRegisterRefresh(0);
+        int r0 = g_rules;
+        const int bOff = RefreshSlot(3, 6, true, &ret);
+        const int rOff = g_rules - r0;
+        Check(bOff == 3 && rOff == 3 && ret == 0xC0FFEEull, "cloth lite refresh off: 3 builds, 3 rule sets (the game's), return value passed");
+        SetClothRegisterRefresh(1);
+        const uint64_t c0 = GetClothRegisterStats().completed, lb0 = GetClothRegisterStats().liteBuilds;
+        r0 = g_rules;
+        ret = 0;
+        const int bOn = RefreshSlot(3, 6, true, &ret);
+        const int rOn = g_rules - r0;
+        Check(bOn == 3 && rOn == 1 && ret == 0xC0FFEEull && GetClothRegisterStats().completed == c0 + 1 &&
+                  GetClothRegisterStats().liteBuilds == lb0 + 3 && g_rulesSawX == g_buildPose,
+              "cloth lite refresh on: every build of the refresh lite, the last completed in place (one rule set), return value passed");
+        r0 = g_rules;
+        Check(RefreshSlot(4, 6, false, &ret) == 1 && g_rules - r0 == 1 && GetClothRegisterStats().completed == c0 + 2,
+              "cloth lite refresh on: registration only: completed");
+        Check(dressRules(7, 6, false, false, false, &r) == 1 && r == 1, "cloth lite refresh: an EquipBodyPart call after it unchanged");
+        SetClothRegisterLite(0);  // review S3-4: refresh key on, ClothRegisterLite off = the game's builds
+        r0 = g_rules;
+        Check(RefreshSlot(3, 6, true, &ret) == 3 && g_rules - r0 == 3, "cloth lite refresh on, ClothRegisterLite off: the game's builds");
+        SetClothRegisterLite(3);
+        g_extraRebuilds = 0;
+        {   // EquipRefreshKeepCloth (dlgedge): the kept actor's Blueprint rebuilds (component registered, proxy already there)
+            ClothRegisterRefreshTestSetup(reinterpret_cast<void*>(&FakeKeptRefresh));
+            ClothKeepRecordTestSetup(reinterpret_cast<void*>(&FakeKeptAsset), reinterpret_cast<void*>(&FakeKeptPhys), 0x920);
+            uint8_t* const kc = g_comp[6];
+            *reinterpret_cast<void**>(kc + 0x5E0) = reinterpret_cast<void*>(0xA1);
+            *reinterpret_cast<void**>(kc + 0x7A0) = reinterpret_cast<void*>(0xB1);
+            g_keptColl[0][0] = reinterpret_cast<void*>(0xC1);
+            *reinterpret_cast<void**>(kc + 0x920) = g_keptColl;
+            *reinterpret_cast<int32_t*>(kc + 0x928) = 1;
+            auto keptRefresh = [&](int* builds, int* rules, bool reg = true) {
+                *reinterpret_cast<void**>(kc) = g_vt;
+                *reinterpret_cast<uint8_t**>(kc + 0x20) = g_actor[6];
+                *reinterpret_cast<uint64_t*>(kc + 0x18) = 77;
+                if (reg) kc[g_regOff] |= 1;
+                else kc[g_regOff] &= ~1;
+                if (!Proxy(kc)) Proxy(kc) = reinterpret_cast<void*>(0x70000);
+                g_s = Script{kc, false, false, false, false};
+                const int b0 = g_builds, r0 = g_rules;
+                uint64_t rr = reinterpret_cast<uint64_t (*)(void*, void*, void*, void*)>(g_info.refreshHook)(nullptr, reinterpret_cast<void*>(2), nullptr, nullptr);
+                *builds = g_builds - b0;
+                *rules = g_rules - r0;
+                return rr;
+            };
+            int b = 0, rr = 0;
+            SetEquipRefreshKeepCloth(0);
+            Check(keptRefresh(&b, &rr) == 0xBEEFull && b == 3 && rr == 3, "keep cloth 0: a kept robe's 3 Blueprint rebuilds as in the game (3 rule sets)");
+            SetEquipRefreshKeepCloth(1);
+            ClothRegisterStats k0 = GetClothRegisterStats();
+            keptRefresh(&b, &rr);
+            ClothRegisterStats k1 = GetClothRegisterStats();
+            Check(b == 3 && rr == 1 && k1.completed == k0.completed + 1 && k1.liteBuilds == k0.liteBuilds + 3 && g_rulesSawX == g_buildPose &&
+                      Proxy(kc) != nullptr,
+                  "keep cloth 1: the 3 rebuilds lite, the last completed in place (one rule set, the game's constraints)");
+            SetEquipRefreshKeepCloth(2);
+            void* const before = Proxy(kc);
+            uint8_t* const code0 = reinterpret_cast<uint8_t*>(0x1000);
+            *reinterpret_cast<uint8_t**>(g_frame + 0x20) = code0;
+            keptRefresh(&b, &rr);
+            Check(b == 3 && rr == 1, "keep cloth 2 outside a view switch: mode 1's rules (3 lite builds, one rule set)");
+            EquipRefreshKeepTestScope(true);
+            EquipRefreshKeepTestKept(g_actor[5]);  // another actor kept
+            *reinterpret_cast<uint8_t**>(g_frame + 0x20) = code0;
+            keptRefresh(&b, &rr);
+            Check(b == 3 && rr == 1, "keep cloth 2, owner not a kept actor: mode 1's rules");
+            EquipRefreshKeepTestScope(false);
+            EquipRefreshKeepTestScope(true);
+            EquipRefreshKeepTestKept(g_actor[6]);
+            *reinterpret_cast<uint8_t**>(g_frame + 0x20) = code0;
+            void* const p2 = Proxy(kc);
+            k0 = GetClothRegisterStats();
+            keptRefresh(&b, &rr);
+            k1 = GetClothRegisterStats();
+            Check(b == 0 && rr == 0 && Proxy(kc) == p2 && *reinterpret_cast<uint8_t**>(g_frame + 0x20) == code0 + 3 &&
+                      k1.completed == k0.completed && k1.liteFallbacks == k0.liteFallbacks,
+                  "keep cloth 2, kept actor: the 3 rebuilds left out (proxy kept, the thunk's P_FINISH done: Code + 3)");
+            *reinterpret_cast<uint8_t**>(g_frame + 0x20) = nullptr;
+            g_keptRebuilds = 1;
+            keptRefresh(&b, &rr);
+            Check(b == 0 && *reinterpret_cast<uint8_t**>(g_frame + 0x20) == nullptr, "keep cloth 2: a null Code stays null (P_FINISH)");
+            g_keptRebuilds = 3;
+            g_keptSetAsset = true;  // rebuilt via SetSkinnedAsset in this view switch: its Blueprint rebuilds are not left out
+            keptRefresh(&b, &rr);
+            g_keptSetAsset = false;
+            Check(b == 4 && Proxy(kc) != p2, "keep cloth 2: built by SetSkinnedAsset in the same view switch: rebuilds not left out");
+            EquipRefreshKeepTestScope(false);
+            EquipRefreshKeepTestScope(true);  // a new view switch: the list of builds starts empty again
+            EquipRefreshKeepTestKept(g_actor[6]);
+            keptRefresh(&b, &rr, false);
+            Check(b == 3, "keep cloth 2: an unregistered component's rebuilds are the game's");
+            keptRefresh(&b, &rr);
+            Check(b == 0, "keep cloth 2: next view switch, registered and kept: left out again");
+            EquipRefreshKeepTestScope(false);
+            // review S2-3: each input the proxy was built from, changed since its build -> the rebuilds run (and record anew)
+            auto nextSwitch = [&](int* builds) {
+                EquipRefreshKeepTestScope(true);
+                EquipRefreshKeepTestKept(g_actor[6]);
+                keptRefresh(builds, &rr);
+                EquipRefreshKeepTestScope(false);
+            };
+            int b2 = -1;
+            *reinterpret_cast<void**>(kc + 0x5E0) = reinterpret_cast<void*>(0xA2);
+            nextSwitch(&b);
+            nextSwitch(&b2);
+            Check(b == 3 && b2 == 0, "keep cloth 2: the cloth asset changed since the proxy's build: rebuilt (then left out again)");
+            *reinterpret_cast<void**>(kc + 0x7A0) = reinterpret_cast<void*>(0xB2);
+            nextSwitch(&b);
+            nextSwitch(&b2);
+            Check(b == 3 && b2 == 0, "keep cloth 2: the physics asset changed (colliders): rebuilt (then left out again)");
+            g_keptColl[0][0] = reinterpret_cast<void*>(0xC2);  // ResetConfigProperties: new shared property collections
+            nextSwitch(&b);
+            *reinterpret_cast<int32_t*>(kc + 0x928) = 2;
+            nextSwitch(&b2);
+            Check(b == 3 && b2 == 3, "keep cloth 2: the property collections replaced / one more: rebuilt");
+            *reinterpret_cast<int32_t*>(kc + 0x928) = 5;
+            nextSwitch(&b);
+            nextSwitch(&b2);
+            Check(b == 3 && b2 == 3, "keep cloth 2: more than 4 property collections: never left out");
+            *reinterpret_cast<int32_t*>(kc + 0x928) = 1;
+            nextSwitch(&b);
+            Proxy(kc) = reinterpret_cast<void*>(0x70010);  // a proxy the record did not see
+            nextSwitch(&b2);
+            Check(b == 3 && b2 == 3, "keep cloth 2: a proxy other than the recorded one: rebuilt");
+            ClothKeepRecordTestSetup(reinterpret_cast<void*>(&FakeKeptAsset), reinterpret_cast<void*>(&FakeKeptPhys), 0x920);  // no records
+            nextSwitch(&b);
+            nextSwitch(&b2);
+            Check(b == 3 && b2 == 0, "keep cloth 2: no record yet (key switched on live): rebuilt once, then left out");
+            ClothKeepRecordTestSetup(nullptr, nullptr, 0);
+            nextSwitch(&b);
+            Check(b == 3, "keep cloth 2: record sites not found: nothing left out");
+            (void)before;
+            SetEquipRefreshKeepCloth(0);
+            ClothRegisterRefreshTestSetup(reinterpret_cast<void*>(&FakeRefresh));
+        }
+        SetClothRegisterRefresh(0);
+    }
     {   // review finding 1: key off between (a) and (b): the entry that started lite stays lite, its last build is completed
         const ClothRegisterStats f0 = GetClothRegisterStats();
         g_flipOffAfterA = true;

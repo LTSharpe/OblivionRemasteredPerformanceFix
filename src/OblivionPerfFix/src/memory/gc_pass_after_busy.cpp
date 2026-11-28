@@ -235,6 +235,7 @@ void Decide(uint8_t* engine, float interval)
                 g_holdFrames = 0;
                 g_holdBusy = 0;
                 s.delayed.fetch_add(1, std::memory_order_relaxed);
+                CrashEvent(kEvKey, busy, 0, 0, "GC put off");  // CrashReport's ring
             }
             ++g_holdFrames;
             g_holdBusy |= busy;
@@ -307,6 +308,15 @@ int GcPassAfterBusyNextUnits(uint64_t elapsedUs)
     return u | 1;
 }
 
+// CreateAheadDueMs (create_ahead.cpp, game thread, frame end): an AddToWorld with work in the frame that just ended (the
+// same signal that holds the timer GC pass back above); false when not installed
+bool GcPassAfterBusyAddRecent()
+{
+    if (!g_installed || !g_env.frameCounter) return false;
+    const uint64_t add = g_lastAddFrame.load(std::memory_order_relaxed);
+    return add != ~0ull && add + 1 >= *g_env.frameCounter;
+}
+
 // Game thread: StreamOutEndPlaySlice's hook in RemoveFromWorld's unregister loop (kind 1; reached only while a level's
 // components are being unregistered, i.e. with work) and, through GcPassAfterBusyNoteAdd, an AddToWorld call that did work
 void GcPassAfterBusyNoteStream(int kind)
@@ -315,6 +325,17 @@ void GcPassAfterBusyNoteStream(int kind)
     (kind ? g_lastRemoveFrame : g_lastAddFrame).store(*g_env.frameCounter, std::memory_order_relaxed);
 }
 bool GcPassAfterBusyWatching() { return g_env.frameCounter != nullptr; }
+
+// HangReport (crash_report.cpp): the engine's GFrameCounter, found by ConditionalCollectGarbage's `cmp [GFrameCounter],rax` alone
+// (locate only: works with GcPassAfterBusy off; the same code on the Game Pass exe). Null when not found once or not in .data.
+const volatile uint64_t* FindGFrameCounter()
+{
+    const GameModule& game = Game();
+    const auto fs = FindAll(game.text, ParsePattern(kFunc));
+    if (fs.size() != 1) return nullptr;
+    uint8_t* const frame = RipTarget(fs[0] + kFuncFrameCounter - 3, 3, 7);
+    return game.data.Contains(frame) ? reinterpret_cast<const volatile uint64_t*>(frame) : nullptr;
+}
 // StreamRegisterGranularity's AddToWorld hook: the call's own time in QPC ticks
 void GcPassAfterBusyNoteAdd(int64_t qpcTicks)
 {

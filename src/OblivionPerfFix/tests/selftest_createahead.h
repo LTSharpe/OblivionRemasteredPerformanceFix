@@ -731,6 +731,214 @@ inline void CreateAheadSelfTest(const opf::GameModule& game)
     c = CreateAheadTestRead();
     Check(spawns == sK && destroys == dK && c.held == 0 && c.offsetSkipped >= 1,
           "createahead (aheadindex): a class whose root had an offset of its own is not built ahead any more (SF2)");
+
+    // CreateAheadDueMs (gateahead 2026-11-27): a noted reference may be built after a frame WITHOUT slack when the next frame
+    // keeps within the target with the build in it; bounded by a gap, the look-ahead, creates, grid shifts and the cell edge
+    {
+        static uint64_t shiftCount = 0;
+        static int gcBitsV = 0, uncappedV = 0;
+        CreateAheadFakes fakesD = fakes;
+        fakesD.shifts = &shiftCount;
+        fakesD.gcBits = &gcBitsV;
+        fakesD.uncapped = &uncappedV;
+        gcBitsV = uncappedV = 0;
+        CreateAheadTestSetup(&fakesD);
+        if (nObjs > 160) nObjs = 1;  // the fake object table (256): the world (object 0) stays, nothing else is referenced now
+        gcClass = purgeFlag = 0;
+        constexpr double k = 100.0 / 70.0;
+        const auto at = [&](double oldX, double oldY) { player[0] = oldX * k, player[1] = -oldY * k, player[2] = 0.0; };
+        at(4096.0 * 10 + 2048.0, 4096.0 * 3 + 2048.0);  // the middle of a cell, standing
+        clockS = 20000.0;
+        // a frame: its work (ms) and its cap sleep (us); the clock advances by both
+        const auto frame = [&](double workMs, uint64_t sleepUs, bool busy = false) {
+            clockS += workMs / 1000.0 + static_cast<double>(sleepUs) / 1e6;
+            CreateAheadFrame(sleepUs, busy, false);
+        };
+        const auto frames = [&](int n, double workMs, uint64_t sleepUs = 0, bool busy = false) {
+            for (int i = 0; i < n; ++i) frame(workMs, sleepUs, busy);
+        };
+        Stock(world, 0x960, 0xB1, &clsA, 1.0, tmpl, &got, &took);  // the world, the parameters
+        frames(80, 18.0);                                          // > 1 s after that create, no slack
+        // (a) key 0: nothing is built after frames without slack (as before)
+        note(0x1501, formB1, 1.0f);
+        frames(20, 18.0);
+        c = CreateAheadTestRead();
+        const bool off = c.built == 0 && c.dueBuilt == 0;
+        // (b) key 25: work 18 + estimate 4 (no build timed yet) <= 25: built once, by the due rule; its create takes it
+        SetCreateAheadDue(25);
+        frames(1, 18.0);
+        c = CreateAheadTestRead();
+        const bool dOne = c.built == 1 && c.dueBuilt == 1 && c.held == 1;
+        Check(off && dOne, "createahead due: with CreateAheadDueMs=0 nothing is built after frames without slack; with 25 a noted "
+                          "reference is built after one (work 18 ms + estimate 4 ms within 25)");
+        Stock(world, 0x1501, 0xB1, &clsA, 1.0, tmpl, &got, &took);
+        c = CreateAheadTestRead();
+        Check(took && c.dueAdopted == 1 && c.adopted >= 1, "createahead due: the create of a reference built by the due rule takes its actor "
+                                                            "(the same adoption check)");
+        // (c) after a character create: no due build for 1 s
+        note(0x1502, formB1, 1.0f);
+        frames(30, 18.0);  // 0.54 s
+        c = CreateAheadTestRead();
+        const bool waitCreate = c.dueBuilt == 1 && c.dueSkipCreate > 0;
+        frames(40, 18.0);  // past 1 s
+        c = CreateAheadTestRead();
+        Check(waitCreate && c.dueBuilt == 2, "createahead due: no due build within 1 s after a character create; after it, one");
+        frames(20, 18.0);  // nothing ready: a clean start for the gap case
+        // (d) the gap: two references, the second waits at least 10 frames and 0.25 s
+        note(0x1503, formB1, 1.0f);
+        note(0x1504, formB1, 1.0f);
+        frames(1, 18.0);
+        const int dG0 = CreateAheadTestRead().dueBuilt;  // the first at once
+        frames(12, 18.0);
+        const int dG1 = CreateAheadTestRead().dueBuilt;  // 12 frames, 0.216 s since it: within 0.25 s
+        frames(2, 18.0);                                // 14 frames, 0.252 s
+        c = CreateAheadTestRead();
+        Check(dG0 == 3 && dG1 == 3 && c.dueBuilt == 4 && c.dueSkipGap > 0,
+              "createahead due: at most one due build per 0.25 s and 10 frames (the next one waits)");
+        const bool both = true;
+        // (e) no fit: work 23 + estimate 3 (timed builds: the 3 ms floor) > 25: not built; work 21 + 3 <= 25: built
+        note(0x1505, formB1, 1.0f);
+        frames(20, 23.0);
+        c = CreateAheadTestRead();
+        const bool noFit = c.dueBuilt == 4 && c.dueSkipFit > 0;
+        frames(3, 21.0);  // the largest of the last 4 frames is still 23
+        const bool stillNo = CreateAheadTestRead().dueBuilt == 4;
+        frames(1, 21.0);
+        c = CreateAheadTestRead();
+        Check(both && noFit && stillNo && c.dueBuilt == 5,
+              "createahead due: built only when the largest work of the last 4 frames + the build's estimate stays within the target");
+        // (f) pacing holds a unit: no due build (as with slack)
+        note(0x1506, formB1, 1.0f);
+        frames(30, 18.0, 0, true);
+        const bool busyNo = CreateAheadTestRead().dueBuilt == 5;
+        // (g) a grid shift: no due build for 2.5 s
+        ++shiftCount;
+        frames(100, 18.0);  // 1.8 s
+        c = CreateAheadTestRead();
+        const bool shiftNo = c.dueBuilt == 5 && c.dueSkipShift > 0;
+        frames(50, 18.0);
+        c = CreateAheadTestRead();
+        Check(busyNo && shiftNo && c.dueBuilt == 6, "createahead due: none while pacing holds a unit, none within 2.5 s after a grid shift");
+        // (h) the grid shifts only on a cell-middle line (x or y = 4096 k + 2048; gateaheadrev B1): 280 units before one, moving
+        // east at 500 units/s: none while it is 0.6 s away or less; past it (the next one 8 s away), built
+        double x = 4096.0 * 11 + 2048.0 - 460.0;
+        for (int i = 0; i < 20; ++i) {  // moving, nothing noted: the velocity is known (500 units/s), 280 units left
+            x += 500.0 * 0.018;
+            at(x, 4096.0 * 3 + 2048.0);
+            frame(18.0, 0);
+        }
+        note(0x1507, formB1, 1.0f);
+        for (int i = 0; i < 20; ++i) {  // 0.36 s, 180 units: still in the cell, the edge 0.56 s away or less
+            x += 500.0 * 0.018;
+            at(x, 4096.0 * 3 + 2048.0);
+            frame(18.0, 0);
+        }
+        c = CreateAheadTestRead();
+        const bool edgeNo = c.dueBuilt == 6 && c.dueSkipEdge > 0;
+        for (int i = 0; i < 30; ++i) {
+            x += 500.0 * 0.018;
+            at(x, 4096.0 * 3 + 2048.0);
+            frame(18.0, 0);
+        }
+        c = CreateAheadTestRead();
+        if (!(edgeNo && c.dueBuilt == 7)) printf("    edge case: due built %d, edge waits %d, fit %d, velocity %d, gap %d\n", c.dueBuilt, c.dueSkipEdge, c.dueSkipFit, c.dueSkipPos, c.dueSkipGap);
+        Check(edgeNo && c.dueBuilt == 7, "createahead due: none when the player crosses a cell-middle line (where the grid shifts) within 0.6 s; "
+                                         "past it, built");
+        // (h2) crossing a cell's EDGE (the grid does not shift there): built while the next middle line is far (4.5 s)
+        note(0x150B, formB1, 1.0f);
+        x = 4096.0 * 13 - 200.0;
+        for (int i = 0; i < 40; ++i) {  // crosses the edge at 53248 after about 0.4 s
+            x += 500.0 * 0.018;
+            at(x, 4096.0 * 3 + 2048.0);
+            frame(18.0, 0);
+        }
+        c = CreateAheadTestRead();
+        Check(c.dueBuilt == 8,
+              "createahead due: crossing a cell's edge (no grid shift there) does not hold a due build back");
+        // (i) a jump (teleport-sized move): the velocity is not known, no due build until two samples agree again
+        note(0x1508, formB1, 1.0f);
+        at(4096.0 * 20 + 2048.0, 4096.0 * 3 + 2048.0);
+        frames(3, 18.0);
+        c = CreateAheadTestRead();
+        const bool jumpNo = c.dueBuilt == 8 && c.dueSkipPos > 0;
+        frames(20, 18.0);
+        c = CreateAheadTestRead();
+        Check(jumpNo && c.dueBuilt == 9, "createahead due: after a jump of the player the velocity is not known: none until it is again");
+        // (j) the look-ahead: a reference noted more than 6 s ago is not built by the due rule (a slack frame may still build it)
+        note(0x1509, formB1, 1.0f);
+        frames(1, 18.0, 0, true);  // noted, its class looked up; held back (busy)
+        frames(340, 18.0, 0, true);  // 6.1 s while busy
+        frames(5, 18.0);
+        c = CreateAheadTestRead();
+        const bool oldNo = c.dueBuilt == 9 && c.dueSkipOld > 0;
+        frame(10.0, 6000);  // a slack frame: built as before (noted 6.3 s ago, within the 10 s build window)
+        c = CreateAheadTestRead();
+        Check(oldNo && c.dueBuilt == 9 && c.built == 10,
+              "createahead due: a reference noted more than 6 s ago is not built by the due rule; a slack frame still builds it");
+        // (k) live 0: back to slack only
+        SetCreateAheadDue(0);
+        note(0x150A, formB1, 1.0f);
+        frames(40, 18.0);
+        c = CreateAheadTestRead();
+        Check(c.dueBuilt == 9 && c.built == 10, "createahead due: CreateAheadDueMs=0 (live): nothing after frames without slack again");
+        Check(c.dueFrames == 9 && c.dueFramesOver == 0 && c.dueWasted == 0 && c.dueHeld == 8,
+              "createahead due: each due build's carrying frame is counted (9, none at or over the target here), none dropped yet, 8 held");
+        // (m) gateaheadrev S3: held actors whose 20 s are up are destroyed after frames WITHOUT slack too (under the due guards,
+        // one per frame and gap), so a ride without slack does not keep them until a menu
+        SetCreateAheadDue(25);
+        frames(400, 18.0);  // 7.2 s: the first due builds pass their 20 s
+        c = CreateAheadTestRead();
+        Check(c.dueExpired >= 1 && c.dueWasted >= 1 && c.dueHeld < 9 && c.dueBuilt == 10,
+              "createahead due: held actors past their time are destroyed after frames without slack (counted)");
+        const int wastedM = c.dueWasted;
+        freeze = 1;  // a menu: every held actor goes; the seven due-built ones no create took count as dropped without an adoption
+        frame(18.0, 0);
+        freeze = 0;
+        c = CreateAheadTestRead();
+        Check(c.dueWasted == 9 && c.held == 0 && c.dueHeld == 0 && wastedM <= 9,
+              "createahead due: due builds dropped without an adoption are counted (9 of 10; one adopted), expired or at the menu");
+        // after the menu: a stock create gives the world and the parameters again (and the 1 s create guard follows)
+        Stock(world, 0x970, 0xB1, &clsA, 1.0, tmpl, &got, &took);
+        frames(70, 18.0);
+        // (o) gateaheadrev S1: the coming frame carries the timer GC pass / a removal / an add: none; then built
+        gcBitsV = 1;
+        note(0x1601, formB1, 1.0f);
+        frames(20, 18.0);
+        c = CreateAheadTestRead();
+        const bool gcNo = c.dueBuilt == 10 && c.dueSkipStream > 0;
+        gcBitsV = 0;
+        frames(1, 18.0);
+        c = CreateAheadTestRead();
+        Check(gcNo && c.dueBuilt == 11, "createahead due: none before a frame known to carry the timer GC pass or level streaming");
+        // (p) gateaheadrev S5: no frame cap: none (CreateAhead's rules are for a capped frame); capped again: built
+        uncappedV = 1;
+        note(0x1602, formB1, 1.0f);
+        frames(20, 18.0);
+        c = CreateAheadTestRead();
+        const bool capNo = c.dueBuilt == 11 && c.dueSkipCap > 0;
+        uncappedV = 0;
+        frames(1, 18.0);
+        c = CreateAheadTestRead();
+        Check(capNo && c.dueBuilt == 12, "createahead due: without a frame cap the key does nothing");
+        // (q) a GC purge pending: the due path builds nothing either; after it, built
+        purgeFlag = 1;
+        note(0x1603, formB1, 1.0f);
+        const int pw0 = CreateAheadTestRead().purgeWait;
+        frames(20, 18.0);
+        c = CreateAheadTestRead();
+        const bool purgeNo = c.dueBuilt == 12 && c.purgeWait > pw0;
+        purgeFlag = 0;
+        frames(1, 18.0);
+        c = CreateAheadTestRead();
+        Check(purgeNo && c.dueBuilt == 13, "createahead due: none while a GC purge is pending");
+        // (n) gateaheadrev S3: at most 8 due-built actors held at once (3 held now; 6 more noted: 5 built, then it waits)
+        for (uint32_t id = 0x1611; id < 0x1617; ++id) note(id, formB1, 1.0f);
+        frames(120, 18.0);
+        c = CreateAheadTestRead();
+        Check(c.dueHeld == 8 && c.dueBuilt == 18 && c.dueSkipRoom > 0, "createahead due: at most 8 due-built actors held at once");
+        gcBitsV = uncappedV = 0;
+        player[0] = 1000.0, player[1] = 2000.0, player[2] = 300.0;
+    }
     gcClass = purgeFlag = 0;
     CreateAheadTestSetup(nullptr);
 }

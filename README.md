@@ -30,7 +30,7 @@ with NVIDIA and AMD graphics cards, DLSS and FSR, Intel and AMD CPUs, on Steam a
 
 [Results](#results) · [Install](#install-two-minutes) · [AMD ML frame generation](#optional-amd-ml-frame-generation-radeon-rx-9000) ·
 [What it does](#what-it-does) · [Check it on your PC](#check-it-on-your-pc-before--after) · [Graphics settings](#find-good-graphics-settings) ·
-[Uninstall](#uninstall) · [Is it safe?](#is-it-safe) · [Compatibility](#compatibility) · [FAQ](#faq) · [Help improve it](#help-improve-it)
+[If it crashes](#if-the-game-crashes-or-hangs) · [Uninstall](#uninstall) · [Is it safe?](#is-it-safe) · [Compatibility](#compatibility) · [FAQ](#faq) · [Help improve it](#help-improve-it)
 
 ## Results
 
@@ -356,9 +356,63 @@ rain, and little for the CPU to do, so it shows what your graphics card can carr
   on), and towns are where the CPU is the limit instead: settings that only cost the graphics card won't help there,
   the fix does.
 
+## If the game crashes or hangs
+
+OblivionPerfFix writes a short report when the game crashes or stops responding: `OblivionPerfFix-crash.txt`, next to
+`OblivionPerfFix.log` (the previous one is kept as `OblivionPerfFix-crash.1.txt`). It says where the crash happened and
+whether any of the mod's code was involved. To send it, double-click `OblivionPerfFix-CollectReport.bat` in the same folder
+(`OblivionRemastered\Binaries\Win64`; `WinGDK` on Game Pass; `OBSE\Plugins` on the OBSE route). It makes one zip file next
+to itself (at most 10 MB), opens the folder with the zip selected, and **copies a short summary to your clipboard**. Then:
+
+1. **Nexus:** open the mod's Bugs tab, first write what you were doing when it happened, then paste (Ctrl+V) the
+   summary. Nexus bug reports take no files, so there is nothing to upload there; if the cause needs more, we will ask
+   for the zip.
+2. **GitHub:** open the [Crash or hang form](https://github.com/LTSharpe/OblivionRemasteredPerformanceFix/issues/new?template=crash_report.yml),
+   first say what you were doing, then paste the summary and drag the zip into the box.
+3. **No GitHub account, and we asked for the zip:** upload it to any file-sharing service you like (for example
+   OneDrive, Google Drive, Dropbox or MEGA), share it as "anyone with the link", and paste the link in your bug report
+   or a Nexus message. Only when asked; the summary is enough to start with.
+
+If the game has not crashed yet (you only want to report a problem), the summary holds your set-up instead: mod version,
+game build, processor, graphics card and the other DLLs the game loaded (OptiScaler, ReShade and the like).
+
+What is in the zip:
+
+- the mod's `OblivionPerfFix.log` files, `OblivionPerfFix-crash.txt` and `OblivionPerfFix.ini`;
+- the game's `Engine.ini` and `GameUserSettings.ini`, and the text files the game wrote into its crash folders
+  (`Documents\My Games\Oblivion Remastered\Saved\Crashes`) of the same game session as the newest record (matched by
+  the process id and start time the record prints; if none matches, the two newest folders, and `manifest.txt` says so);
+- a list of the files in the game's program folder (names, sizes and dates, never contents), and, when present, the
+  `.ini` and the end of the `.log` (at most 256 KB) of OptiScaler, ReShade, Special K and UE4SS, because they change how the
+  game behaves;
+- a few Windows event-log entries from the last 3 days: only those that name the game's program, and graphics-driver
+  resets;
+- your Windows version, processor, memory, graphics card and driver version, the game program's size and build stamp, and
+  the size and a short SHA-256 hash of the mod's DLL;
+- `summary.txt` (the text copied to the clipboard) and `manifest.txt` (everything in the zip with the date of each original
+  file, the crash folders found, and anything left out). If you start the tool from a folder that has no mod DLL or ini, it
+  warns at the top of the screen and in `manifest.txt`.
+
+It also asks whether to add the game's own crash dump (`UEMinidump.dmp`); press Enter to add it, `n` to leave it out. A
+dump is a binary file: it can still contain your Windows user name and some of the game's memory, which is why it is
+asked. If the zip would pass 10 MB, the dump is left out first and then the logs are cut shorter; the screen and
+`manifest.txt` say what was dropped. In all the text files your Windows user name is replaced by `<user>` and the computer
+name by `<pc>`, and the account and machine ids in the game's crash context are blanked. The script only reads files and
+writes the one zip: it changes nothing, needs no administrator rights, and sends nothing anywhere (it contains no network
+code; read it, it is plain text) except that it deletes older `OblivionPerfFix-report-<date>.zip` files in its own folder:
+only the newest report is kept, and the screen says so. You may look inside the zip before you share it.
+
+For a GPU crash ("GPU crashed or D3D device removed" in the log), two settings in `OblivionPerfFix.ini` help the report
+and are **off by default**: `GpuPassMarkers=1` makes the report name the render pass the graphics card stopped in (on Radeon
+cards only), and `GpuMemoryRecord=1` keeps a list of the graphics memory the game makes and frees (about 9 MB and a little
+CPU time while loading), so a crash at a memory address can say what was there. Neither changes what is drawn. Switch them on
+when asked for a GPU crash report (restart the game once), play until it crashes again, and send the zip; switch them off
+afterwards.
+
 ## Uninstall
 
-Delete `version.dll`, `OblivionPerfFix.ini`, the `OblivionPerfFix*.log` files and `OblivionPerfFix-gpu.txt` from
+Delete `version.dll`, `OblivionPerfFix.ini`, the `OblivionPerfFix*.log` files, `OblivionPerfFix-gpu.txt`, `OblivionPerfFix-crash*.txt`,
+`OblivionPerfFix-CollectReport.bat` and `.ps1` and any `OblivionPerfFix-report-*.zip` from
 `OblivionRemastered\Binaries\Win64\` (Game Pass: `Binaries\WinGDK\`; OBSE route: your file in `OBSE\Plugins\`), and any
 `OblivionPerfFix.<number>.log` in `%TEMP%` (there only if the normal log could not be written). That's all: the fix changes nothing on disk, and your saves don't depend on it.
 

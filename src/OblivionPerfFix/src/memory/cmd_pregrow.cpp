@@ -31,6 +31,19 @@
 // when it comes before the session's busiest moment it hands that moment's burst back (findings "cmdgiveback"). Normal sessions here stay above
 // 0.54 GB, so 0.5 GB means the session is really running out.
 //
+// AMD's frame generation (S-060, findings "freeze1122"; framegen_pacing.cpp FrameGenPresentsQuiet). Until 1.6.0 the pass started
+// on the loading screen's first frame, and its burst of driver memory work (allocations, their mapping and residency, and the
+// probe's frees, hundreds a second) fell on the moment the game turns frame generation off there. AMD's swap chain then has a race
+// of its own: the generated pair still waiting on its presenter thread and the game's next frame going out at once; when the
+// presenter's last Present comes second, its present fence is left one behind and the configure that turns generation off waits for
+// it with no time limit: the game froze at the first Load (4 of 4 frozen launches had the presenter's frame 5-8 ms late, every launch
+// that loaded had it 0.2-0.4 ms early). So the pass touches the driver only while generation is configured off and no configure is
+// under way: it starts once the loading screen's "off" has returned (AMD's configure waits for every pending present before it
+// returns), and before each allocator it waits, touching nothing, while generation is on (the world coming up ends it as before).
+// Without frame generation nothing waits. If the library is loaded but its configure is not watched, the pass waits until the world
+// comes up and is then off with a log line. Outside the window and not paused: after a stop, the unbind and resets of the batch in hand;
+// InitRes (once, before the probe); one RecordOn already under way when a configure turns generation on (about 1-2 ms).
+//
 // What happens at shutdown. The pool lives in the engine's FD3D12Device (deleted in FD3D12Adapter::CleanupResources); its destructor
 // deletes the wrappers still in the pool, not the ones held here. Rendering ends before that (no obtains), so:
 //  - before each batch and before each give-back the thread waits for a recent obtain (kQuietMs). While the engine is quiet it does not
@@ -73,6 +86,14 @@ constexpr ULONGLONG kQuietLimitMs = 30000;  // a batch waits this long for the e
 
 // Stop reasons
 enum { kGoOn = 0, kStopMemory, kStopWorld, kStopFailed, kStopQuit };
+// A stop reason handed back through an Ops call that returns an HRESULT (record): not a failure of the driver.
+HRESULT StopHr(int reason) { return MAKE_HRESULT(1, 0x60, reason); }
+bool IsStopHr(HRESULT hr, int* reason)
+{
+    if (HRESULT_FACILITY(hr) != 0x60 || !(hr & 0x80000000) || HRESULT_CODE(hr) <= kGoOn || HRESULT_CODE(hr) > kStopQuit) return false;
+    *reason = HRESULT_CODE(hr);
+    return true;
+}
 const char* StopName(int s)
 {
     switch (s) {
@@ -250,6 +271,11 @@ void GrowBatch(const Ops& o, void* const* in, int b, int lists, void** out, int*
 {
     for (int i = 0; i < b; ++i) {
         const HRESULT hr = o.record(o.ctx, in[i], lists, &r.lists);
+        int why = kGoOn;
+        if (IsStopHr(hr, &why)) {  // the world came up (or the device went) while it waited before this one: nothing recorded on it
+            r.stop = why;
+            break;
+        }
         if (FAILED(hr)) {
             r.hr = hr;
             r.stop = kStopFailed;
@@ -391,6 +417,10 @@ struct Pass {
     bool frameTied = false;  // started behind the loading screen: at most one later batch per game-thread frame
     uint32_t paceFrame = 0;
     int inFrame = 0, perFrame = 0;
+    int fgWaits = 0;          // waits for frame generation to be off during the pass (S-060)
+    bool fgStopped = false;   // a wait for it ended the pass (the world came up, or the device went)
+    int fgStopWhy = kGoOn;    // which: kStopWorld or kStopQuit (device removed)
+    ULONGLONG fgWaitMs = 0;
 };
 
 std::atomic<int> g_requested{0};  // the key, once armed
@@ -410,6 +440,25 @@ std::atomic<int> g_loadingSeen{0};   // the loading mode was seen while waiting
 std::atomic<int> g_latchNamed{-1};   // the named-freeze count at that moment (for the log)
 std::atomic<uint32_t> g_frameCount{0};  // game-thread frames seen by the hook (the batches' clock behind the loading screen)
 bool (*g_readFreeze)(int32_t*, int32_t*) = &ReadMenuFreeze;  // the self-test swaps it
+
+bool FgQuiet();
+bool WorldIsUp();
+// Before driver work (S-060): waits, touching nothing, while frame generation is on. kGoOn, or kStopWorld / kStopQuit (device removed).
+int WaitFgQuiet(Pass& p)
+{
+    if (FgQuiet()) return kGoOn;
+    const ULONGLONG t0 = GetTickCount64();
+    ++p.fgWaits;
+    int r = kGoOn;
+    while (!FgQuiet()) {
+        if (WorldIsUp()) { r = kStopWorld; break; }
+        if (p.r.dev && FAILED(p.r.dev->GetDeviceRemovedReason())) { r = kStopQuit; break; }
+        Sleep(2);
+    }
+    p.fgWaitMs += GetTickCount64() - t0;
+    if (r) { p.fgStopped = true; p.fgStopWhy = r; }
+    return r;
+}
 
 // The freeze subsystem's loading mode (1: SetMode(1) at the end of a transition's fade to black). The first
 // load from the main menu still has the menu's named freeze on the stack (ledger: named 1, mode 1), so only the mode counts.
@@ -436,6 +485,12 @@ bool Growable(ID3D12CommandAllocator* ca) { return ca && reinterpret_cast<void*>
 bool WorldIsUp()
 {
     return FadeToGameCalls(nullptr) != 0;
+}
+
+// AMD's frame generation presenter can have no presents pending (S-060). Lab: the old start ignores it; test 19 / 20 fake "on".
+bool FgQuiet()
+{
+    return FrameGenPresentsQuiet() == 1;
 }
 
 void Sample(IDXGIAdapter3* ad, Facts& f, double* nonLocalMB)
@@ -558,6 +613,7 @@ bool ProbeCost(Pass& p, double* costLocal, double* costNonLocal)
     int rounds = 0, listsIgnored = 0;
     const int lists = ListsFor(kGroups);
     for (int round = 0; round < kRounds; ++round) {
+        if (WaitFgQuiet(p)) return false;
         ID3D12CommandAllocator* a[kEach] = {};
         HRESULT hr = S_OK;
         for (int i = 0; i < kEach && SUCCEEDED(hr); ++i)
@@ -594,7 +650,9 @@ HRESULT OpRecord(void* c, void* w, int lists, int* done)
 {
     ID3D12CommandAllocator* const ca = CaOf(w);
     if (!Growable(ca)) return S_OK;
-    return RecordOn(static_cast<Pass*>(c)->r, ca, lists, done);
+    Pass& p = *static_cast<Pass*>(c);
+    if (const int stop = WaitFgQuiet(p)) return StopHr(stop);  // S-060: no driver work while frame generation is on
+    return RecordOn(p.r, ca, lists, done);
 }
 HRESULT OpUnbind(void* c) { return Unbind(static_cast<Pass*>(c)->r); }
 HRESULT OpResetAlloc(void*, void* w)
@@ -612,6 +670,7 @@ int OpCheck(void* c)
         Sleep(10);
     }
     if (WorldIsUp()) return kStopWorld;
+    if (const int stop = WaitFgQuiet(p)) return stop;  // S-060: before the pool is touched for a batch
     ++p.batches;
     Facts f;
     Sample(p.adapter, f, nullptr);
@@ -677,6 +736,15 @@ int InitGuarded(Pass& p, double* costLocal, double* costNonLocal, HRESULT* hr, L
         return 1;
     }
 }
+int ProbeGuarded(Pass& p, double* costLocal, double* costNonLocal, bool* ok)
+{
+    __try {
+        *ok = ProbeCost(p, costLocal, costNonLocal);
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 1;
+    }
+}
 int FreeGuarded(Res& r)
 {
     __try {
@@ -688,7 +756,7 @@ int FreeGuarded(Res& r)
 }
 
 // The wait before the pass, with its world, clock and gates injected (the self-test runs it on a fake clock).
-enum WaitResult { kWaitGo, kWaitGoNoHook, kWaitOffWorld, kWaitOffGates };
+enum WaitResult { kWaitGo, kWaitGoNoHook, kWaitOffWorld, kWaitOffGates, kWaitOffFrameGen };
 struct WaitEnv {
     void* ctx;
     bool (*frameSeen)(void* ctx);    // the frame hook has run
@@ -698,9 +766,10 @@ struct WaitEnv {
     const char* (*gates)(void* ctx);  // the opening gates on fresh figures: nullptr = open
     ULONGLONG (*now)(void* ctx);
     void (*sleep)(void* ctx, int ms);
+    bool (*fgQuiet)(void* ctx);       // AMD's frame generation presenter can have no presents pending (S-060)
 };
 struct WaitOut {
-    ULONGLONG hookMs = 0, loadingMs = 0, gatesMs = 0;  // time spent in each step
+    ULONGLONG hookMs = 0, loadingMs = 0, gatesMs = 0, fgMs = 0;  // time spent in each step
     const char* why = nullptr;                           // the last closed gate
 };
 WaitResult WaitCore(const WaitEnv& e, ULONGLONG hookWaitMs, WaitOut& out)
@@ -728,6 +797,13 @@ WaitResult WaitCore(const WaitEnv& e, ULONGLONG hookWaitMs, WaitOut& out)
         e.sleep(e.ctx, 50);
     }
     out.gatesMs = e.now(e.ctx) - t;
+    // 4. Frame generation off (S-060): the loading screen's configure that turns it off has returned.
+    t = e.now(e.ctx);
+    while (!e.fgQuiet(e.ctx)) {
+        if (e.worldUp(e.ctx)) { out.fgMs = e.now(e.ctx) - t; return kWaitOffFrameGen; }
+        e.sleep(e.ctx, 2);
+    }
+    out.fgMs = e.now(e.ctx) - t;
     return kWaitGo;
 }
 
@@ -745,6 +821,7 @@ const char* WeGates(void* c)
 }
 ULONGLONG WeNow(void*) { return GetTickCount64(); }
 void WeSleep(void*, int ms) { Sleep(static_cast<DWORD>(ms)); }
+bool WeFgQuiet(void*) { return FgQuiet(); }
 
 // Before anything touches the pool or the device: wait for the first loading screen, then for the opening gates again.
 // false = the world came up first: nothing done. A quit while waiting ends the process here (nothing is held).
@@ -752,7 +829,7 @@ bool WaitForLoadingScreen(Pass& p)
 {
     p.frameTied = false;
     Log("[cmdmem] pre-grow: waiting for the first loading screen");
-    const WaitEnv e{&p, &WeFrameSeen, &WeLoadingSeen, &WeSetWaiting, &WeWorldUp, &WeGates, &WeNow, &WeSleep};
+    const WaitEnv e{&p, &WeFrameSeen, &WeLoadingSeen, &WeSetWaiting, &WeWorldUp, &WeGates, &WeNow, &WeSleep, &WeFgQuiet};
     WaitOut o;
     switch (WaitCore(e, kHookWaitMs, o)) {
     case kWaitGoNoHook:
@@ -765,12 +842,16 @@ bool WaitForLoadingScreen(Pass& p)
     case kWaitOffGates:
         Log("[cmdmem] pre-grow off: the world came up before the gates opened again (%s): nothing done", o.why ? o.why : "-");
         return false;
+    case kWaitOffFrameGen:
+        Log("[cmdmem] pre-grow off: the world came up while frame generation was on (or could not be seen: %d), %.1f s waited: nothing done",
+            FrameGenPresentsQuiet(), o.fgMs / 1000.0);
+        return false;
     case kWaitGo: break;
     }
     p.frameTied = true;
     p.perFrame = kLaterBatch;
-    Log("[cmdmem] pre-grow: the first loading screen is up (named freezes %d; %.1f s waited, gates again %.0f ms): starting, later batches of %d, one per frame",
-        g_latchNamed.load(), (o.hookMs + o.loadingMs) / 1000.0, static_cast<double>(o.gatesMs), p.perFrame);
+    Log("[cmdmem] pre-grow: the first loading screen is up (named freezes %d; %.1f s waited, gates again %.0f ms, frame generation off after %.0f ms, %u changes seen): starting, later batches of %d, one per frame",
+        g_latchNamed.load(), (o.hookMs + o.loadingMs) / 1000.0, static_cast<double>(o.gatesMs), static_cast<double>(o.fgMs), FrameGenSwitches(), p.perFrame);
     return true;
 }
 
@@ -794,6 +875,12 @@ int PassBody()
         FreeGuarded(p.r);
         return 0;
     }
+    if (FAILED(hr) && p.fgStopped) {
+        if (p.fgStopWhy == kStopQuit) Log("[cmdmem] pre-grow off: the graphics device was removed while setting up: nothing done");
+        else Log("[cmdmem] pre-grow off: frame generation came on while setting up and stayed on until the world came up: nothing done");
+        FreeGuarded(p.r);
+        return 0;
+    }
     if (FAILED(hr)) {
         Log("[cmdmem] pre-grow off: setting up failed (hr 0x%08X): nothing done", static_cast<unsigned>(hr));
         FreeGuarded(p.r);
@@ -806,6 +893,23 @@ int PassBody()
         Log("[cmdmem] pre-grow off: the device is not on the GPU the memory figures come from: nothing done");
         FreeGuarded(p.r);
         return 0;
+    }
+    // S-060 / review S4: a probe that falls on a moment when the game frees memory can read ~0 (11-22 lab run: -5.77 MB). One retry
+    // 250 ms later before "almost no memory" turns the pass off; both readings in the log.
+    if (costLocal + costNonLocal < kCostMinMB
+    ) {
+        const double l1 = costLocal, n1 = costNonLocal;
+        Sleep(250);
+        bool ok = false;
+        const int ex2 = ProbeGuarded(p, &costLocal, &costNonLocal, &ok);
+        if (ex2 || !ok) {
+            Log("[cmdmem] pre-grow off: the cost probe read %.2f + %.2f MB, and the second one %s: nothing done", l1, n1,
+                ex2 ? "raised an exception" : (p.fgStopped ? "was stopped (frame generation on until the world came up, or the device went)" : "failed"));
+            FreeGuarded(p.r);
+            return 0;
+        }
+        Log("[cmdmem] pre-grow: the cost probe read %.2f MB video + %.2f MB system memory (under %.1f in all), second reading %.2f + %.2f MB",
+            l1, n1, kCostMinMB, costLocal, costNonLocal);
     }
     if (const char* const why = CostGate(costLocal, costNonLocal)) {
         Log("[cmdmem] pre-grow off: %s (%.2f MB video memory + %.2f MB system memory): nothing done", why, costLocal, costNonLocal);
@@ -832,6 +936,7 @@ int PassBody()
     if (!ex) FreeGuarded(p.r);
     Log("[cmdmem] pre-grow: %d direct allocators grown, %d exist (%d new), %d lists, %.0f ms, longest pool hold %.1f ms; video memory %.0f -> %.0f MB, non-local %.0f -> %.0f MB, RAM free %.0f -> %.0f MB, commit room %.0f -> %.0f MB; stopped early: %s; hr 0x%08X, %d left off the pool%s",
         r.grown, r.total, r.made, r.lists, NowMs() - t0, r.longestHoldMs, f0.usedMB, f1.usedMB, nl0, nl1, f0.ramFreeMB, f1.ramFreeMB, f0.commitRoomMB, f1.commitRoomMB, StopName(r.stop), static_cast<unsigned>(r.hr), r.lost + r.abandoned, r.obtainNull ? ", the engine's obtain returned nothing" : "");
+    if (p.fgWaits) Log("[cmdmem] pre-grow: waited %d time(s), %llu ms in all, for frame generation to be off again", p.fgWaits, static_cast<unsigned long long>(p.fgWaitMs));
     return ex ? 0 : r.grown;
 }
 
@@ -1009,7 +1114,7 @@ struct FakePool {
     FakeW w[kN];
     int stack[kN], top = 0, made = 0;
     int nullAfter = 1 << 30;
-    int recordFailAt = -1, resetFailAt = -1, records = 0, resetsSeen = 0;
+    int recordFailAt = -1, resetFailAt = -1, records = 0, resetsSeen = 0, recordStopAt = -1, recordStopReason = 0;
     int stopAtCheck = -1, stopReason = 0, checks = 0, engineEvery = 0, engineOps = 0;
     bool quiet = false;
     int boundId = -1;
@@ -1074,6 +1179,7 @@ HRESULT FRecord(void* c, void* v, int lists, int* done)
     auto& w = *static_cast<FakeW*>(v);
     p.EngineStep();
     if (w.where != 1) p.Bad("recorded on a wrapper not held here");
+    if (p.recordStopAt == p.records) { ++p.records; return StopHr(p.recordStopReason); }  // a wait before it ended the pass (S-060)
     if (p.recordFailAt == p.records++) return E_FAIL;
     if (p.boundId >= 0) p.w[p.boundId].bound = false;
     w.bound = true;
@@ -1221,7 +1327,7 @@ const char* CmdPregrowSelfTest()
     {
         // The wait on a fake clock: the frame hook, the loading screen, the world, the gates.
         struct FW {
-            ULONGLONG t = 0, hookAt = 0, loadingAt = ~0ull, worldAt = ~0ull, gatesAt = 0;
+            ULONGLONG t = 0, hookAt = 0, loadingAt = ~0ull, worldAt = ~0ull, gatesAt = 0, fgAt = 0;
             bool waiting = false, polledNotWaiting = false;
             int setOn = 0, setOff = 0;
         };
@@ -1233,10 +1339,11 @@ const char* CmdPregrowSelfTest()
                         [](void*) { return w.t >= w.worldAt; },
                         [](void*) -> const char* { return w.t >= w.gatesAt ? nullptr : "closed"; },
                         [](void*) { return w.t; },
-                        [](void*, int ms) { w.t += static_cast<ULONGLONG>(ms); }};
-        const auto run = [&](ULONGLONG hookAt, ULONGLONG loadingAt, ULONGLONG worldAt, ULONGLONG gatesAt, WaitOut& o) {
+                        [](void*, int ms) { w.t += static_cast<ULONGLONG>(ms); },
+                        [](void*) { return w.t >= w.fgAt; }};
+        const auto run = [&](ULONGLONG hookAt, ULONGLONG loadingAt, ULONGLONG worldAt, ULONGLONG gatesAt, WaitOut& o, ULONGLONG fgAt = 0) {
             w = FW{};
-            w.hookAt = hookAt; w.loadingAt = loadingAt; w.worldAt = worldAt; w.gatesAt = gatesAt;
+            w.hookAt = hookAt; w.loadingAt = loadingAt; w.worldAt = worldAt; w.gatesAt = gatesAt; w.fgAt = fgAt;
             return WaitCore(e, 20000, o);
         };
         WaitOut o;
@@ -1253,6 +1360,12 @@ const char* CmdPregrowSelfTest()
         if (run(0, 3000, 9000, ~0ull, o) != kWaitOffGates || !o.why || w.waiting) return "wait: world up while the gates are closed";
         // the gates closed for 2 s on the loading screen, then open: go after them
         if (run(0, 3000, ~0ull, 5000, o) != kWaitGo || w.t < 5000 || o.gatesMs < 1950) return "wait: the gates are not waited for";
+        // S-060: frame generation still on when the loading screen is seen: go only once it is off (its configure returned)
+        if (run(0, 3000, ~0ull, 0, o, 3500) != kWaitGo || w.t < 3500 || w.t > 3510 || o.fgMs < 490) return "wait: frame generation on is not waited for";
+        // frame generation on until the world: off, nothing done
+        if (run(0, 3000, 9000, 0, o, ~0ull) != kWaitOffFrameGen || w.t < 9000 || w.waiting) return "wait: world up while frame generation is on";
+        // no frame generation (quiet from the start): no wait at all
+        if (run(0, 3000, ~0ull, 0, o, 0) != kWaitGo || o.fgMs != 0) return "wait: quiet frame generation waited for";
     }
     if (SizeFor(ok, 1, 1.9, 0.0) != kAutoN) return "automatic size on a good PC";
     if (SizeFor(ok, 100, 1.9, 0.0) != 100) return "asked size on a good PC";
@@ -1385,6 +1498,25 @@ const char* CmdPregrowSelfTest()
         RunPlan(o, 260, 17, 22, r);
         if (p.fail) return p.fail;
         if (r.stop != kStopFailed || r.hr != E_FAIL || r.grown != 30) return "a failed record does not stop the pass";
+        if ((why = FakeBooks(p, 0, 0)) != nullptr) return why;
+    }
+    // S-060: a wait for frame generation before an allocator ends with the world up (or the device gone): a stop, not a failure;
+    // nothing recorded on it, the rest back.
+    {
+        int code = 0;
+        if (IsStopHr(S_OK, &code) || IsStopHr(E_FAIL, &code) || IsStopHr(DXGI_ERROR_DEVICE_REMOVED, &code) || IsStopHr(E_ABORT, &code) ||
+            !IsStopHr(StopHr(kStopWorld), &code) || code != kStopWorld || !IsStopHr(StopHr(kStopQuit), &code) || code != kStopQuit)
+            return "stop HRESULTs are not told apart from driver results";
+    }
+    for (const int at : {0, 5, 21, 22, 30, 100}) {
+        FakeInit(p, 100);
+        p.recordStopAt = at;
+        p.recordStopReason = kStopWorld;
+        PlanResult r;
+        const Ops o = kFakeOps(p);
+        RunPlan(o, 260, 17, 22, r, 3);
+        if (p.fail) return p.fail;
+        if (r.stop != kStopWorld || r.hr != S_OK || r.grown != at) return "a stop from the frame generation wait is not a clean stop";
         if ((why = FakeBooks(p, 0, 0)) != nullptr) return why;
     }
     // An allocator's Reset fails: that wrapper stays off the pool (the engine's release would make it a fatal), the rest back.

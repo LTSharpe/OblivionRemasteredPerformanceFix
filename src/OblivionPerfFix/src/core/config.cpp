@@ -49,6 +49,7 @@ Config LoadConfig(const wchar_t* iniPath)
     c.screenshotFilterFast = get(L"Fixes", L"MenuScreenshotFilter", c.screenshotFilterFast) != 0;
     c.screenshotReadbackConvert = get(L"Fixes", L"ScreenshotReadbackConvert", c.screenshotReadbackConvert);
     c.screenshotParallel = get(L"Fixes", L"ScreenshotParallel", c.screenshotParallel);
+    c.slotClickPayloadCopy = get(L"Fixes", L"SlotClickPayloadCopy", c.slotClickPayloadCopy);
     c.hdrMenuRows = get(L"Fixes", L"HdrMenuRows", c.hdrMenuRows) != 0;
     c.dlssRayReconstruction = get(L"Fixes", L"DlssRayReconstruction", c.dlssRayReconstruction) != 0;
     c.hudAspectRow = get(L"Fixes", L"HudAspectRow", c.hudAspectRow) != 0;
@@ -93,6 +94,8 @@ Config LoadConfig(const wchar_t* iniPath)
     c.bodyRemovalSpreadNearM = get(L"Fixes", L"BodyRemovalSpreadNearM", c.bodyRemovalSpreadNearM);
     c.streamRegisterGranularity = get(L"Fixes", L"StreamRegisterGranularity", c.streamRegisterGranularity);
     c.streamInBudget = get(L"Fixes", L"StreamInBudget", c.streamInBudget);
+    c.streamInHeavySkipMs = get(L"Fixes", L"StreamInHeavySkipMs", c.streamInHeavySkipMs);
+    c.streamInHeavySkipMax = get(L"Fixes", L"StreamInHeavySkipMax", c.streamInHeavySkipMax);
     c.navQueryPriority = get(L"Fixes", L"NavQueryPriority", c.navQueryPriority);
     c.physicsSubstepCap = get(L"Fixes", L"PhysicsSubstepCap", c.physicsSubstepCap);
     c.lumenCardsNarrow = get(L"Fixes", L"LumenCardsNarrow", c.lumenCardsNarrow);
@@ -125,6 +128,19 @@ Config LoadConfig(const wchar_t* iniPath)
     c.createPreloadNear = get(L"Fixes", L"CreatePreloadNear", c.createPreloadNear);
     c.otFrameTrim = get(L"Fixes", L"OtFrameTrim", c.otFrameTrim);
     c.looseMissCache = get(L"Fixes", L"LooseMissCache", c.looseMissCache);
+    c.menuFileCache = get(L"Fixes", L"MenuFileCache", c.menuFileCache);
+    c.menuFileCache = c.menuFileCache != 0 ? 1 : 0;
+    c.prePlacedRecordGuard = get(L"Fixes", L"PrePlacedRecordGuard", c.prePlacedRecordGuard);
+    if (c.prePlacedRecordGuard < 0 || c.prePlacedRecordGuard > 2) c.prePlacedRecordGuard = 1;  // 0 off, 1 on, 2 old exit; else on
+    c.headCancelNoWait = get(L"Fixes", L"HeadCancelNoWait", c.headCancelNoWait) != 0 ? 1 : 0;
+    c.riderBindGuard = get(L"Fixes", L"RiderBindGuard", c.riderBindGuard) != 0;
+    c.furnitureStandUpFix = get(L"Fixes", L"FurnitureStandUpFix", c.furnitureStandUpFix) != 0;
+    c.weaponCameraStateFix = get(L"Fixes", L"WeaponCameraStateFix", c.weaponCameraStateFix) != 0;
+    c.inventoryScriptWalkFix = get(L"Fixes", L"InventoryScriptWalkFix", c.inventoryScriptWalkFix) != 0;
+    c.invWalkWatch = get(L"Fixes", L"InvWalkWatch", c.invWalkWatch);
+    c.invWalkRepro = get(L"Fixes", L"InvWalkRepro", c.invWalkRepro);
+    c.invWalkReproRef = get(L"Fixes", L"InvWalkReproRef", c.invWalkReproRef);
+    c.invWalkReproMs = get(L"Fixes", L"InvWalkReproMs", c.invWalkReproMs);
     c.flowOverlapsOnce = get(L"Fixes", L"FlowOverlapsOnce", c.flowOverlapsOnce) == 1 ? 1 : 0;
     {
         const int v = get(L"Fixes", L"StartupBarFinish", c.startupBarFinish);
@@ -139,9 +155,43 @@ Config LoadConfig(const wchar_t* iniPath)
     c.instanceBufferFloor = get(L"Fixes", L"InstanceBufferFloor", c.instanceBufferFloor);
     c.npcBodiesOneLock = get(L"Fixes", L"NpcBodiesOneLock", c.npcBodiesOneLock);
     c.clothRegisterLite = get(L"Fixes", L"ClothRegisterLite", c.clothRegisterLite);
+    c.menuLoadPreload = get(L"Fixes", L"MenuLoadPreload", c.menuLoadPreload) != 0 ? 1 : 0;
+    {
+        const int v = get(L"Fixes", L"UnfreezeClothSkip", c.unfreezeClothSkip);
+        c.unfreezeClothSkip = v != 0 ? 1 : 0;
+    }
+    c.equipRefreshOneSpawn = get(L"Fixes", L"EquipRefreshOneSpawn", c.equipRefreshOneSpawn) != 0 ? 1 : 0;
+    c.equipRefreshKeepActor = get(L"Fixes", L"EquipRefreshKeepActor", c.equipRefreshKeepActor) != 0 ? 1 : 0;
+    {
+        const int v = get(L"Fixes", L"EquipRefreshKeepCloth", c.equipRefreshKeepCloth);
+        c.equipRefreshKeepCloth = v == 1 || v == 2 ? v : 0;
+    }
+    c.clothRegisterLiteRefresh = get(L"Fixes", L"ClothRegisterLiteRefresh", c.clothRegisterLiteRefresh) != 0 ? 1 : 0;
     c.rigVmHashMemo = get(L"Fixes", L"RigVmHashMemo", c.rigVmHashMemo);
     c.rigLogicMapCache = get(L"Fixes", L"RigLogicMapCache", c.rigLogicMapCache);
     c.rtSceneBufferKeep = get(L"Fixes", L"RtSceneBufferKeep", c.rtSceneBufferKeep);
+    c.dfAtlasKeep = get(L"Fixes", L"DfAtlasKeep", c.dfAtlasKeep);  // dfatlas
+    if (c.dfAtlasKeep < 0 || c.dfAtlasKeep > 2) c.dfAtlasKeep = 1;
+    c.dfObjectBufferKeep = get(L"Fixes", L"DfObjectBufferKeep", c.dfObjectBufferKeep) != 0 ? 1 : 0;  // rasavafix
+    c.dfMappingReserve = get(L"Fixes", L"DfMappingReserve", c.dfMappingReserve) != 0 ? 1 : 0;
+    c.dfAddSpread = get(L"Fixes", L"DfAddSpread", c.dfAddSpread) != 0 ? 1 : 0;
+    c.dfAddSpreadBudget = get(L"Fixes", L"DfAddSpreadBudget", c.dfAddSpreadBudget);
+    if (c.dfAddSpreadBudget < 256) c.dfAddSpreadBudget = 256;
+    if (c.dfAddSpreadBudget > 1048576) c.dfAddSpreadBudget = 1048576;
+    c.dfAddSpreadNearM = get(L"Fixes", L"DfAddSpreadNearM", c.dfAddSpreadNearM);
+    if (c.dfAddSpreadNearM < 0) c.dfAddSpreadNearM = 0;
+    if (c.dfAddSpreadNearM > 1000) c.dfAddSpreadNearM = 1000;
+    c.rtSceneGrowToPeak = get(L"Fixes", L"RtSceneBufferGrowToPeak", c.rtSceneGrowToPeak) != 0 ? 1 : 0;  // s001load / s001port
+    c.loadPeakKeepsBack = get(L"Fixes", L"LoadPeakKeepsBack", c.loadPeakKeepsBack) != 0 ? 1 : 0;  // s001fix / s001port
+    c.loadPeakKeepsBackMarginMB = get(L"Fixes", L"LoadPeakKeepsBackMarginMB", c.loadPeakKeepsBackMarginMB);  // hidden
+    c.loadPeakDrain = get(L"Fixes", L"LoadPeakDrain", c.loadPeakDrain) != 0 ? 1 : 0;  // s001port
+    c.loadPeakDrainPages = get(L"Fixes", L"LoadPeakDrainPages", c.loadPeakDrainPages);  // hidden
+    c.uploadPagePreGrow = get(L"Fixes", L"UploadPagePreGrow", c.uploadPagePreGrow) != 0 ? 1 : 0;  // s083build
+    c.uploadPagePreGrowTarget = get(L"Fixes", L"UploadPagePreGrowTarget", c.uploadPagePreGrowTarget);  // hidden
+    c.uploadPagePreGrowQuietMs = get(L"Fixes", L"UploadPagePreGrowQuietMs", c.uploadPagePreGrowQuietMs);  // hidden
+    c.uploadPageStats = get(L"Fixes", L"UploadPageStats", c.uploadPageStats) != 0 ? 1 : 0;  // hidden
+    c.uploadPageScreenRelease = get(L"Fixes", L"UploadPageScreenRelease", c.uploadPageScreenRelease) != 0 ? 1 : 0;  // s083build
+    c.uploadPageScreenReleaseMs = get(L"Fixes", L"UploadPageScreenReleaseMs", c.uploadPageScreenReleaseMs);  // hidden
     c.rayTracingBuildBatch = get(L"Fixes", L"RayTracingBuildBatch", c.rayTracingBuildBatch) != 0;
     c.waterCaptureFsrSkip = get(L"Fixes", L"WaterCaptureFsrSkip", c.waterCaptureFsrSkip) != 0;
     c.waterCaptureNoRhiFlush = get(L"Fixes", L"WaterCaptureNoRhiFlush", c.waterCaptureNoRhiFlush) != 0;
@@ -151,6 +201,7 @@ Config LoadConfig(const wchar_t* iniPath)
     c.frameRateLimitAtStart = get(L"Fixes", L"FrameRateLimitAtStart", c.frameRateLimitAtStart);
     c.navLinkFast = get(L"Fixes", L"NavLinkFast", c.navLinkFast);
     c.saveBytesBulk = get(L"Fixes", L"SaveBytesBulk", c.saveBytesBulk);
+    c.saveBytesBulkRead = get(L"Fixes", L"SaveBytesBulkRead", c.saveBytesBulkRead);
     c.saveRefIdIndex = get(L"Fixes", L"SaveRefIdIndex", c.saveRefIdIndex);
     c.saveThumbnailAsync = get(L"Fixes", L"SaveThumbnailAsync", c.saveThumbnailAsync);
     // The public build has one ClothRegisterLite mode (3) and no verify / check / log-only modes (lab 2 and NavLinkFast's 3):
@@ -163,6 +214,7 @@ Config LoadConfig(const wchar_t* iniPath)
     if (c.frameRateLimitAtStart) c.frameRateLimitAtStart = 1;
     if (c.navLinkFast) c.navLinkFast = 1;
     if (c.saveBytesBulk) c.saveBytesBulk = 1;
+    if (c.saveBytesBulkRead) c.saveBytesBulkRead = 1;
     if (c.saveRefIdIndex) c.saveRefIdIndex = 1;
     if (c.saveThumbnailAsync) c.saveThumbnailAsync = 1;
     if (c.taskWaitDeadlockGuard) c.taskWaitDeadlockGuard = 1;          // lab 2 (measure only) reads as on
@@ -214,6 +266,10 @@ Config LoadConfig(const wchar_t* iniPath)
     c.drawBehindLoading = get(L"Fixes", L"DrawBehindLoadingScreen", c.drawBehindLoading);
     c.mapPopupSpread = get(L"Fixes", L"MapPopupSpread", c.mapPopupSpread);
     c.gpuMenuShot = get(L"Fixes", L"GpuMenuShot", c.gpuMenuShot);
+    c.stringTableMemo = get(L"Fixes", L"StringTableMemo", c.stringTableMemo);
+    if (c.stringTableMemo) c.stringTableMemo = 1;  // the public build has no verify mode: 2 reads as on
+    c.waterRebuildSkip = get(L"Fixes", L"WaterRebuildSkip", c.waterRebuildSkip);
+    if (c.waterRebuildSkip) c.waterRebuildSkip = 1;  // the public build has no verify mode: 2 reads as on
     c.npcCreationPacing = get(L"Fixes", L"NpcCreationPacing", c.npcCreationPacing) != 0;
     c.pacingBudgetMs = get(L"Fixes", L"PacingBudgetMs", c.pacingBudgetMs);
     c.pacingMinDistance = get(L"Fixes", L"PacingMinDistance", c.pacingMinDistance);
@@ -240,6 +296,7 @@ Config LoadConfig(const wchar_t* iniPath)
     c.impactPreload = get(L"Fixes", L"ImpactPreload", c.impactPreload);
     c.rowPreload = get(L"Fixes", L"RowPreload", c.rowPreload) != 0 ? 1 : 0;
     c.cellObjectPreload = get(L"Fixes", L"CellObjectPreload", c.cellObjectPreload) != 0 ? 1 : 0;
+    c.cellObjectPreloadRelook = get(L"Fixes", L"CellObjectPreloadRelook", c.cellObjectPreloadRelook) != 0 ? 1 : 0;
     c.createAhead = get(L"Fixes", L"CreateAhead", c.createAhead) != 0 ? 1 : 0;
     c.createAheadSlackMs = get(L"Fixes", L"CreateAheadSlackMs", c.createAheadSlackMs);
     if (c.createAheadSlackMs < 1) c.createAheadSlackMs = 1;
@@ -249,6 +306,10 @@ Config LoadConfig(const wchar_t* iniPath)
     if (c.createAheadPool > 32) c.createAheadPool = 32;
     if (c.createAheadPool > 0 && c.createAheadPool < 12) c.createAheadPool = 12;
     c.createAheadLevelled = get(L"Fixes", L"CreateAheadLevelled", c.createAheadLevelled) != 0 ? 1 : 0;
+    c.createAheadDueMs = get(L"Fixes", L"CreateAheadDueMs", c.createAheadDueMs);
+    if (c.createAheadDueMs < 0) c.createAheadDueMs = 0;
+    if (c.createAheadDueMs > 0 && c.createAheadDueMs < 18) c.createAheadDueMs = 18;
+    if (c.createAheadDueMs > 33) c.createAheadDueMs = 33;
     c.streamOutEndPlaySlice = get(L"Fixes", L"StreamOutEndPlaySlice", c.streamOutEndPlaySlice);
     if (c.streamOutEndPlaySlice < 0) c.streamOutEndPlaySlice = 0;
     if (c.streamOutEndPlaySlice > 1000) c.streamOutEndPlaySlice = 1000;
@@ -292,11 +353,22 @@ Config LoadConfig(const wchar_t* iniPath)
     c.gpuPoolKeepIniMB = c.gpuPoolKeepMB;
     if (c.gpuPoolKeepMB < 0) c.gpuPoolKeepMB = 0;
     if (c.gpuPoolKeepMB > 4096) c.gpuPoolKeepMB = 4096;
+    c.residencyFreshNew = get(L"Fixes", L"ResidencyFreshNew", c.residencyFreshNew) != 0 ? 1 : 0;
+    c.gpuPoolSpareAhead = get(L"Fixes", L"GpuPoolSpareAhead", c.gpuPoolSpareAhead ? 1 : 0) != 0;
+    c.gpuPoolSpareQuietMs = get(L"Fixes", L"GpuPoolSpareQuietMs", c.gpuPoolSpareQuietMs);
+    if (c.gpuPoolSpareQuietMs < 0) c.gpuPoolSpareQuietMs = 0;
+    if (c.gpuPoolSpareQuietMs > 2000) c.gpuPoolSpareQuietMs = 2000;
     c.allocatorTrimCopyFloor = get(L"Fixes", L"AllocatorTrimCopyFloor", c.allocatorTrimCopyFloor);
     if (c.allocatorTrimCopyFloor < 0) c.allocatorTrimCopyFloor = 0;
     if (c.allocatorTrimCopyFloor > 512) c.allocatorTrimCopyFloor = 512;
     c.logFile = get(L"General", L"LogFile", c.logFile) != 0;
     c.gpuCrashReport = get(L"General", L"GpuCrashReport", c.gpuCrashReport) != 0;
+    c.gpuMemoryRecord = get(L"General", L"GpuMemoryRecord", c.gpuMemoryRecord) != 0;
+    c.crashReport = get(L"General", L"CrashReport", c.crashReport) != 0;
+    c.hangReport = get(L"General", L"HangReport", c.hangReport) != 0;
+    c.hangReportSeconds = get(L"General", L"HangReportSeconds", c.hangReportSeconds);
+    if (c.hangReportSeconds < 5) c.hangReportSeconds = 5;
+    if (c.hangReportSeconds > 120) c.hangReportSeconds = 120;
     c.gpuPassMarkers = get(L"General", L"GpuPassMarkers", c.gpuPassMarkers);
     c.statsIntervalSeconds = get(L"General", L"StatsIntervalSeconds", c.statsIntervalSeconds);
     return c;

@@ -24,6 +24,13 @@
 // the same two steps first for a static mesh (bDisallowNanite off, SetVisibleInRayTracing(true)). Nothing is done while
 // the effect's component still has a form (its look legitimately showing, fading, or about to be replaced by its next
 // effect), nothing to a mesh whose overlay was set by anything else, and nothing to calls of the game's own.
+//
+// Teardown checks (S-076 hardening, 2026-11-23; nothing changes for a mesh in play). Before a leftover is acted on: if the
+// mesh's actor, level, world or package is going away (its object item dead, or the actor's bActorIsBeingDestroyed set),
+// the mesh goes with it and is only forgotten (nothing written); if the mesh is not registered (its level being removed,
+// its actor torn down), only its own fields are written, without PrecachePSOs and MarkRenderStateDirty (the engine
+// precaches again and builds its render state from those fields when it registers it; UE 5.3 OnRegister of skinned and
+// static meshes). A look is put back only while its MID is still the object that was seen.
 #include "common.h"
 
 #include <atomic>
@@ -84,6 +91,7 @@ struct Ref {  // an object, its FUObjectItem (index, serial at the time it was s
 struct Look {
     uint8_t* mid = nullptr;  // the material set (compared by address only; never read unless it is shown or listed)
     Ref by;                  // the status-effect component that set it; by.p == nullptr: not one of theirs (a base)
+    Ref midRef;              // the MID's object item when it was set (a look is put back only while it is still that object)
 };
 struct Mesh {
     Ref comp;
@@ -110,6 +118,12 @@ struct State {
     // SceneComponent.AttachParent, found on the first mesh remembered (0: not found, only the mesh's own actor counts)
     uint32_t attachOffset = 0;
     bool attachTried = false;
+    // teardown checks: the Actor class's name and its bActorIsBeingDestroyed (found on the first actor seen); the
+    // component's bRegistered (the byte MarkRenderStateDirty tests, confirmed by the reflected bNetAddressable in it)
+    NameId actorName, destroyingName, netAddrName;
+    uint32_t destroyingOffset = 0, regOffset = 0;
+    uint8_t destroyingMask = 0, regMask = 0;
+    bool destroyingTried = false;
     // the remembered meshes (game thread only)
     Mesh meshes[kMaxMeshes];
     int count = 0;
@@ -119,7 +133,7 @@ struct State {
 };
 State g;
 std::atomic<bool> g_on{false};
-std::atomic<uint64_t> g_seen{0}, g_cleared{0}, g_restored{0}, g_full{0}, g_faults{0};
+std::atomic<uint64_t> g_seen{0}, g_cleared{0}, g_restored{0}, g_full{0}, g_faults{0}, g_gone{0}, g_unreg{0};
 std::atomic<DWORD> g_testGt{0};  // self-test: the thread that counts as the game thread (0: the game's own only)
 
 bool Fail(const char* why)
@@ -247,6 +261,9 @@ bool IsStatusEffect(const uint8_t* obj)
     g.attachName = Lookup(L"AttachParent");
     g.staticName = Lookup(L"StaticMeshComponent");
     g.nanName = Lookup(L"bDisallowNanite");
+    g.actorName = Lookup(L"Actor");  // the teardown checks' names (one missing: that check is left out)
+    g.destroyingName = Lookup(L"bActorIsBeingDestroyed");
+    g.netAddrName = Lookup(L"bNetAddressable");
     g.midsOffset = OffsetOf(FieldNamed(bpc, g.midsName));
     g.formOffset = OffsetOf(FieldNamed(bpc, g.formName));
     if (!g.midsOffset || !g.formOffset || !g.staticName.valid() || !g.nanName.valid()) {
@@ -281,7 +298,24 @@ bool IsStaticMesh(const uint8_t* comp)
     return true;
 }
 
-// SceneComponent.AttachParent's offset, from the first remembered mesh's class (once)
+// A reflected bool property's byte (offset + ByteOffset) and mask, or false
+bool BoolBitOf(const uint8_t* field, uint32_t* byte, uint8_t* mask)
+{
+    uint8_t byteOff = 0, m = 0;
+    const uint32_t off = OffsetOf(field);
+    if (!off || !Rd(field + kBoolByteOffset, &byteOff) || !Rd(field + kBoolByteMask, &m) || !m) return false;
+    *byte = off + byteOff;
+    *mask = m;
+    return true;
+}
+
+// From the first remembered mesh's class (once): SceneComponent.AttachParent's offset, and ActorComponent's bRegistered:
+// the byte MarkRenderStateDirty tests (found in its code at the search) is the one the reflected bNetAddressable lives in,
+// above its two lowest bits (bRegistered, bRenderStateCreated); else the registered check is left out. bRegistered is bit 0
+// (0x1), as the game's own writes show (build 19115871): OnRegister sets it (or byte [rcx+8Ch],1 at exe+0x2FE971F),
+// OnUnregister clears it (and ...,0FEh at exe+0x2FE9ED6), and DestroyRenderState_Concurrent clears bRenderStateCreated
+// with bRenderStateDirty (and ...,7Dh at exe+0x2FDB510: bits 1 and 7). If the two bits were ever the other way round,
+// a registered mesh without render state would only miss one PrecachePSOs: no change to what is drawn
 void ResolveAttach(const uint8_t* comp)
 {
     if (g.attachTried) return;
@@ -290,6 +324,69 @@ void ResolveAttach(const uint8_t* comp)
     g.attachOffset = g.attachName.valid() && cls ? OffsetOf(FieldNamed(cls, g.attachName)) : 0;
     if (g.attachOffset) Log("[stuckfx] SceneComponent's AttachParent +0x%X", g.attachOffset);
     else Log("[stuckfx] SceneComponent's AttachParent NOT found: only looks of the mesh's own actor are put back");
+    uint32_t netByte = 0;
+    uint8_t netMask = 0;
+    const bool net = g.netAddrName.valid() && cls && BoolBitOf(FieldNamed(cls, g.netAddrName), &netByte, &netMask);
+    if (g.info.registeredByte && net && netByte == g.info.registeredByte && !(netMask & 3)) {
+        g.regOffset = g.info.registeredByte;
+        g.regMask = 1;
+        Log("[stuckfx] ActorComponent's bRegistered +0x%X bit 0x1", g.regOffset);
+    } else {
+        Log("[stuckfx] ActorComponent's bRegistered not confirmed (MarkRenderStateDirty's byte +0x%X, bNetAddressable +0x%X mask "
+            "0x%X): unregistered meshes are handled as registered ones", g.info.registeredByte, netByte, netMask);
+    }
+}
+
+// Is the mesh going away with its actor, level, world or package (an outer's object item dead, or the actor's
+// bActorIsBeingDestroyed set)? Then it is only forgotten. The first outer of class Actor is the actor.
+bool GoingAway(const uint8_t* comp)
+{
+    bool actorSeen = false;
+    const uint8_t* o = Ptr(comp, kObjOuter);
+    for (int depth = 0; o && depth < 8; ++depth) {
+        if (!MakeRef(const_cast<uint8_t*>(o)).p) return true;
+        if (!actorSeen && g.actorName.valid()) {
+            const uint8_t* const actorCls = ClassNamed(Ptr(o, kObjClass), g.actorName);
+            if (actorCls) {
+                actorSeen = true;
+                if (!g.destroyingTried) {
+                    g.destroyingTried = true;
+                    const bool ok = g.destroyingName.valid() &&
+                                    BoolBitOf(FieldNamed(actorCls, g.destroyingName), &g.destroyingOffset, &g.destroyingMask);
+                    if (!ok) g.destroyingMask = 0;
+                    Log("[stuckfx] Actor's bActorIsBeingDestroyed %s (+0x%X mask 0x%X)", ok ? "found" : "NOT found (not checked)",
+                        g.destroyingOffset, g.destroyingMask);
+                }
+                uint8_t b = 0;
+                if (g.destroyingMask && Rd(o + g.destroyingOffset, &b) && (b & g.destroyingMask)) return true;
+            }
+        }
+        o = Ptr(o, kObjOuter);
+    }
+    return false;
+}
+// Is the mesh registered (unknown: yes)?
+bool Registered(const uint8_t* comp)
+{
+    uint8_t b = 0;
+    return !g.regMask || !Rd(comp + g.regOffset, &b) || (b & g.regMask);
+}
+
+// Logs of the shipped build: the first 20 events, then at most one every 5 s
+bool LogDueAt(uint64_t now, uint64_t* lastMs, int* lines)
+{
+    if (*lines < 20 || now - *lastMs >= 5000) {
+        ++*lines;
+        *lastMs = now;
+        return true;
+    }
+    return false;
+}
+[[maybe_unused]] bool LogDue()
+{
+    static uint64_t lastMs = 0;
+    static int lines = 0;
+    return LogDueAt(GetTickCount64(), &lastMs, &lines);
 }
 
 uint8_t* OverlayOf(const uint8_t* comp) { return Ptr(comp, g.info.overlayOffset); }
@@ -314,7 +411,7 @@ bool Showing(const Ref& by) { return Alive(by) && Ptr(by.p, g.formOffset) != nul
 // The material is in its component's OverlayMIDs (and so alive and part of a look it shows)
 bool Listed(const Look& l)
 {
-    if (!Alive(l.by)) return false;
+    if (!Alive(l.by) || !Alive(l.midRef)) return false;  // the component and the MID still the objects seen
     uint8_t* const* data = nullptr;
     int32_t num = 0;
     if (!Rd(l.by.p + g.midsOffset, &data) || !Rd(l.by.p + g.midsOffset + 8, &num) || num <= 0 || num > 64 || !data) return false;
@@ -325,11 +422,13 @@ bool Listed(const Look& l)
     return false;
 }
 
-// The engine's setter, as the exec function has it inlined (game thread)
-void SetOverlay(uint8_t* comp, uint8_t* mid)
+// The engine's setter, as the exec function has it inlined (game thread); not registered: the field only (the engine
+// precaches PSOs and creates the render state from it when it registers the mesh; MarkRenderStateDirty would do nothing)
+void SetOverlay(uint8_t* comp, uint8_t* mid, bool registered = true)
 {
     if (OverlayOf(comp) == mid) return;
     if (!Wr(comp + g.info.overlayOffset, mid)) { ++g_faults; return; }
+    if (!registered) return;
     void** vt = nullptr;
     VoidFn precache = nullptr;
     if (Rd(comp, &vt) && vt && Rd(vt + g.info.precacheSlot / 8, &precache) && precache) precache(comp);
@@ -352,14 +451,16 @@ void Push(Mesh* m, uint8_t* mid, const Ref& by)
     }
     m->h[m->n].mid = mid;
     m->h[m->n].by = by;
+    m->h[m->n].midRef = by.p ? MakeRef(mid) : Ref{};  // a base is never put back: its MID is not followed
     ++m->n;
 }
 
 void LogAction(const char* what, const uint8_t*, const uint8_t*, const Look&, const uint8_t*)
 {
-    const uint64_t k = g_cleared.load() + g_restored.load();
-    if (k <= 20) Log("[stuckfx] %s a status effect's look left on a mesh after the effect ended (%llu so far)", what,
-                     static_cast<unsigned long long>(k));
+    const uint64_t k = g_cleared.load() + g_restored.load() + 1;  // this one included
+    if (LogDue())
+        Log("[stuckfx] %s a status effect's look left on a mesh after the effect ended (%llu so far)", what,
+            static_cast<unsigned long long>(k));
 }
 
 // A blueprint call has set the mesh's overlay from `before` to `after`; `caller` is the calling frame's object.
@@ -422,6 +523,14 @@ void Pass()
             if (!l.by.p) break;  // a look that was not a status effect's (or an unknown base): none, as the stock removal
             if (Listed(l) && Reaches(l, m->comp.p)) { repl = l.mid; break; }
         }
+        // its actor, level or world going away: the mesh goes with them; nothing is written
+        if (GoingAway(m->comp.p)) {
+            if (g_gone++ < 10) Log("[stuckfx] a leftover look on a mesh whose actor, level or world is going away: left alone");
+            DropMesh(m);
+            continue;
+        }
+        const bool registered = Registered(m->comp.p);
+        if (!registered && g_unreg++ < 10) Log("[stuckfx] a leftover look on a mesh that is not registered: its fields only");
         if (!repl && m->isStatic) {  // what the stock removal does to a static mesh before clearing its overlay
             if (g.nanMask) {
                 uint8_t b = 0;
@@ -430,7 +539,8 @@ void Pass()
             if (g.rtSetter) g.rtSetter(m->comp.p, true);
         }
         LogAction(repl ? "restored" : "cleared", m->comp.p, cur, top, repl);
-        SetOverlay(m->comp.p, repl);
+        SetOverlay(m->comp.p, repl, registered);
+        CrashEvent(kEvKey, reinterpret_cast<uint64_t>(m->comp.p), 0, 0, repl ? "look back" : "look clear");  // CrashReport's ring
         if (repl) {
             ++g_restored;
             m->n = k + 1;
@@ -496,7 +606,26 @@ bool Detour(uint8_t* fn, void* hook, uint8_t* region, bool beforeGameCode)
     return beforeGameCode && WriteCode(fn, std::span<const uint8_t>(jmp, sizeof jmp));
 }
 
+// UActorComponent::MarkRenderStateDirty opens with "IsRegistered() && bRenderStateCreated": a movzx of one byte of the
+// component (base register + disp32, build 19115871: movzx ecx, byte ptr [rcx+8Ch]), then "and al, 3 / cmp al, 3" within
+// the next 8 bytes. That byte's offset, or 0 (the registered check is then left out)
+uint32_t RegisteredByteOf(const uint8_t* fn)
+{
+    for (size_t i = 0; i + 7 <= 40; ++i) {
+        const uint8_t modrm = fn[i + 2];
+        if (fn[i] != 0x0F || fn[i + 1] != 0xB6 || (modrm & 0xC0) != 0x80 || (modrm & 7) == 4 || (modrm & 7) == 5) continue;
+        uint32_t disp = 0;
+        memcpy(&disp, fn + i + 3, 4);
+        for (size_t j = i + 7; j < i + 7 + 8; ++j)
+            if (fn[j] == 0x24 && fn[j + 1] == 0x03 && fn[j + 2] == 0x3C && fn[j + 3] == 0x03)
+                return disp >= 0x28 && disp < 0x400 ? disp : 0;
+    }
+    return 0;
+}
+
 }  // namespace
+
+uint32_t StuckEffectLookRegisteredByteOf(const uint8_t* fn) { return RegisteredByteOf(fn); }
 
 bool FindStuckEffectLook(StuckEffectLookInfo* out)
 {
@@ -528,7 +657,12 @@ bool FindStuckEffectLook(StuckEffectLookInfo* out)
         g.info.precacheSlot = slot;
         g.info.objectArray = array;
         g.info.fnameCtor = fname;
+        g.info.registeredByte = RegisteredByteOf(dirty);
         g.found = true;
+        if (g.info.registeredByte)
+            Log("[stuckfx] MarkRenderStateDirty's registered test: byte +0x%X", g.info.registeredByte);
+        else
+            Log("[stuckfx] MarkRenderStateDirty's registered test not found: unregistered meshes are handled as registered ones");
         Log("[stuckfx] SetOverlayMaterial's exec exe+0x%llX (OverlayMaterial +0x%X, PrecachePSOs slot +0x%X, MarkRenderStateDirty "
             "exe+0x%llX), SetVisibleInRayTracing exe+0x%llX",
             static_cast<unsigned long long>(exec - game.base), cmp, slot, static_cast<unsigned long long>(dirty - game.base),
@@ -578,10 +712,12 @@ void LogStuckEffectLookStats()
 {
     if (!g.installed) return;
     Log("[stuckfx] stats: %llu status-effect overlay calls seen, %llu leftover looks cleared, %llu restored to the look under "
-        "them, %llu not followed (table full), %llu write faults",
+        "them, %llu not followed (table full), %llu write faults; %llu left alone (actor, level or world going away), %llu on "
+        "unregistered meshes (fields only)",
         static_cast<unsigned long long>(g_seen.load()), static_cast<unsigned long long>(g_cleared.load()),
         static_cast<unsigned long long>(g_restored.load()), static_cast<unsigned long long>(g_full.load()),
-        static_cast<unsigned long long>(g_faults.load()));
+        static_cast<unsigned long long>(g_faults.load()), static_cast<unsigned long long>(g_gone.load()),
+        static_cast<unsigned long long>(g_unreg.load()));
 }
 
 // ---- self-test: the rules on fake objects (a fake GUObjectArray, classes, components, MIDs) ----
@@ -612,7 +748,7 @@ const wchar_t* g_testMissing = nullptr;
 NameId* TestFName(NameId* out, const wchar_t* name, int)
 {
     static const wchar_t* const names[] = {L"BPC_StatusEffect_C", L"OverlayMIDs", L"form", L"StaticMeshComponent", L"bDisallowNanite",
-                                           L"AttachParent"};
+                                           L"AttachParent", L"Actor", L"bActorIsBeingDestroyed", L"bNetAddressable"};
     *out = NameId{};
     if (g_testMissing && !wcscmp(name, g_testMissing)) return out;
     for (uint32_t i = 0; i < sizeof names / sizeof names[0]; ++i)
@@ -623,7 +759,7 @@ NameId* TestFName(NameId* out, const wchar_t* name, int)
 
 int StuckEffectLookTestLogic()
 {
-    constexpr int kObjs = 40;
+    constexpr int kObjs = 56;
     static FakeObj objs[kObjs];
     static uint8_t items[kObjs * kItemSize];
     static uint8_t* chunks[1];
@@ -943,11 +1079,184 @@ int StuckEffectLookTestLogic()
     frameEnd();
     check(ov(quiver) == nullptr && s.count == 0, 29);
     g_testGt.store(0);
+    // 18. the teardown checks (S-076 hardening): a MID that is no longer the object seen is not put back; a mesh whose
+    // actor, level or world is going away (an item dead, or the actor's bActorIsBeingDestroyed) is forgotten without a
+    // write; an unregistered mesh gets its fields only; a registered one the setter's calls, as before
+    {
+        setMids(swordFx, midG);  // 18a. the sword's own look under the player's, its MID gone when the player's effect ends
+        bpSet(swordFx, sword, midG);
+        setMids(pawnFx, midA);
+        bpSet(pawnFx, sword, midA);
+        setMids(pawnFx, nullptr);
+        setDead(13, true);
+        s.dirty = true;
+        frameEnd();
+        check(ov(sword) == nullptr && s.count == 0, 37);
+        setDead(13, false);
+        setMids(swordFx, nullptr);
+        uint8_t* const clsActor = reg(31);  // a class named as the Actor class, a level, an actor in it, its mesh and effect
+        const NameId nActor{15, 0};
+        memcpy(clsActor + kObjName, &nActor, 8);
+        uint8_t* const level = make(32, clsOther);
+        uint8_t* const actB = make(33, clsActor, level);
+        uint8_t* const meshB = make(34, clsStatic, actB);
+        uint8_t* const fxB = make(35, clsBpc, actB);
+        s.actorName = nActor;
+        s.destroyingTried = true;
+        s.destroyingOffset = 0x300;
+        s.destroyingMask = 0x04;
+        auto leftover = [&] {
+            memset(meshB + overlay, 0, 8);
+            setMids(fxB, midR);
+            bpSet(fxB, meshB, midR);
+            setMids(fxB, nullptr);
+            s.dirty = true;
+        };
+        leftover();  // 18b. the actor gone
+        setDead(33, true);
+        int d0 = g_testDirty;
+        const uint64_t gone0 = g_gone.load();
+        frameEnd();
+        check(ov(meshB) == midR && s.count == 0 && g_testDirty == d0 && g_gone.load() == gone0 + 1, 38);
+        setDead(33, false);
+        leftover();  // 18c. the actor being destroyed
+        actB[0x300] |= 0x04;
+        frameEnd();
+        check(ov(meshB) == midR && s.count == 0 && g_testDirty == d0, 39);
+        actB[0x300] = 0;
+        leftover();  // 18d. its level gone
+        setDead(32, true);
+        frameEnd();
+        check(ov(meshB) == midR && s.count == 0 && g_testDirty == d0, 40);
+        setDead(32, false);
+        s.regOffset = 0x380;  // 18e. not registered: the overlay and the nanite flag written, no precache, no dirty
+        s.regMask = 1;
+        meshB[0x380] = 0;
+        leftover();
+        meshB[nan] |= 2;
+        int p0 = g_testPrecache;
+        const uint64_t unreg0 = g_unreg.load();
+        frameEnd();
+        check(ov(meshB) == nullptr && !(meshB[nan] & 2) && g_testPrecache == p0 && g_testDirty == d0 &&
+                  g_unreg.load() == unreg0 + 1 && s.count == 0,
+              41);
+        meshB[0x380] = 1;  // 18f. registered (the actor, level alive, not being destroyed): the setter's calls, as before
+        leftover();
+        frameEnd();
+        check(ov(meshB) == nullptr && g_testPrecache == p0 + 1 && g_testDirty == d0 + 1 && s.count == 0, 42);
+        // 18h. not registered, a look under it still showing: put back, its fields only (no precache, no dirty), the
+        // history cut to it
+        uint8_t* const fxB2 = make(36, clsBpc, actB);
+        meshB[0x380] = 0;
+        memset(meshB + overlay, 0, 8);
+        setMids(fxB, midR);
+        bpSet(fxB, meshB, midR);
+        setMids(fxB2, midA2);
+        bpSet(fxB2, meshB, midA2);
+        setMids(fxB2, nullptr);
+        s.dirty = true;
+        const int p1 = g_testPrecache, d1 = g_testDirty;
+        frameEnd();
+        const Mesh* const um = FindMesh(meshB);
+        check(ov(meshB) == midR && g_testPrecache == p1 && g_testDirty == d1 && um && um->n == 1 && s.count == 1, 47);
+        setMids(fxB, nullptr);
+        bpSet(fxB, meshB, nullptr);
+        check(ov(meshB) == nullptr && s.count == 0, 48);
+        meshB[0x380] = 1;
+        // 18i. its world or package gone (the level's outers); the outer chain's bound: a dead item 8 outers up is still
+        // looked at, a 9th is not (the leftover then cleared as usual)
+        uint8_t* const world = make(37, clsOther);
+        uint8_t* const pkg = make(38, clsOther);
+        memcpy(level + kObjOuter, &world, 8);
+        memcpy(world + kObjOuter, &pkg, 8);
+        const int d2 = g_testDirty;
+        leftover();
+        setDead(38, true);
+        frameEnd();
+        check(ov(meshB) == midR && s.count == 0 && g_testDirty == d2, 49);
+        setDead(38, false);
+        leftover();
+        setDead(37, true);
+        frameEnd();
+        check(ov(meshB) == midR && s.count == 0 && g_testDirty == d2, 50);
+        setDead(37, false);
+        uint8_t* chain[9] = {};
+        for (int i = 8; i >= 0; --i) chain[i] = make(40 + i, clsOther, i < 8 ? chain[i + 1] : nullptr);
+        uint8_t* const meshD = make(49, clsStatic, chain[0]);
+        uint8_t* const fxD = make(50, clsBpc, chain[0]);
+        meshD[0x380] = 1;
+        auto leftoverD = [&] {
+            memset(meshD + overlay, 0, 8);
+            setMids(fxD, midR);
+            bpSet(fxD, meshD, midR);
+            setMids(fxD, nullptr);
+            s.dirty = true;
+        };
+        leftoverD();
+        setDead(47, true);  // the 8th outer: going away
+        frameEnd();
+        check(ov(meshD) == midR && s.count == 0, 51);
+        setDead(47, false);
+        leftoverD();
+        setDead(48, true);  // the 9th: past the bound
+        frameEnd();
+        check(ov(meshD) == nullptr && s.count == 0, 52);
+        setDead(48, false);
+        // 18j. bActorIsBeingDestroyed found by name on the actor's class, as in the game (bool property layout as verified
+        // on the game's classes: ByteOffset +0x71, ByteMask +0x72); then its name missing: not checked
+        static uint8_t fDestroy[0x80];
+        memset(fDestroy, 0, sizeof fDestroy);
+        const NameId nDestroy{48, 0};
+        const int32_t destroyOff = 0x308;
+        memcpy(fDestroy + kFieldName, &nDestroy, 8);
+        memcpy(fDestroy + kPropOffset, &destroyOff, 4);
+        fDestroy[0x72] = 0x10;
+        uint8_t* const fd = fDestroy;
+        memcpy(clsActor + kStructProps, &fd, 8);
+        s.destroyingName = nDestroy;
+        s.destroyingTried = false;
+        s.destroyingOffset = 0;
+        s.destroyingMask = 0;
+        leftover();
+        actB[0x308] = 0x10;
+        const int d3 = g_testDirty;
+        frameEnd();
+        check(s.destroyingTried && s.destroyingOffset == 0x308 && s.destroyingMask == 0x10 && ov(meshB) == midR &&
+                  s.count == 0 && g_testDirty == d3,
+              53);
+        s.destroyingName = NameId{};
+        s.destroyingTried = false;
+        leftover();
+        frameEnd();
+        check(s.destroyingTried && !s.destroyingMask && ov(meshB) == nullptr && s.count == 0 && g_testDirty == d3 + 1, 54);
+        actB[0x308] = 0;
+        // 18k. the shipped build's log rate: the first 20 lines, then one per 5 s
+        uint64_t lastMs = 0;
+        int lines = 0;
+        bool first20 = true;
+        for (int i = 0; i < 20; ++i) first20 = LogDueAt(100, &lastMs, &lines) && first20;
+        check(first20 && !LogDueAt(4000, &lastMs, &lines) && LogDueAt(5100, &lastMs, &lines) && !LogDueAt(10000, &lastMs, &lines) &&
+                  LogDueAt(10100, &lastMs, &lines),
+              55);
+        s.regMask = 0;
+        s.actorName = NameId{};
+        s.destroyingMask = 0;
+        // 18g. the bRegistered byte read from MarkRenderStateDirty's code (build 19115871's first bytes), and not from
+        // another shape
+        uint8_t code[64];
+        memset(code, 0xCC, sizeof code);
+        const uint8_t head[] = {0x41, 0x56, 0x48, 0x83, 0xEC, 0x20, 0x4C, 0x8B, 0xF1, 0x0F, 0xB6, 0x89, 0x8C, 0x00, 0x00, 0x00,
+                                0x0F, 0xB6, 0xC1, 0x24, 0x03, 0x3C, 0x03, 0x0F, 0x85, 0xCA, 0x01, 0x00, 0x00};
+        memcpy(code, head, sizeof head);
+        check(RegisteredByteOf(code) == 0x8C, 43);
+        code[20] = 0x07;  // "and al, 7": not the registered test
+        check(RegisteredByteOf(code) == 0, 44);
+    }
     // 17. the names and offsets looked up as in the game: a blueprint child class of BPC_StatusEffect_C with a property
     // chain, a static mesh class under SceneComponent; then one name missing: does nothing
     {
         static uint8_t cBpc[0x80], cChild[0x80], cScene[0x80], cStatic[0x80];
-        static uint8_t fMids[0x80], fOther[0x80], fForm[0x80], fNan[0x80], fAttach[0x80];
+        static uint8_t fMids[0x80], fOther[0x80], fForm[0x80], fNan[0x80], fAttach[0x80], fNet[0x80];
         memset(cBpc, 0, sizeof cBpc);
         memset(cChild, 0, sizeof cChild);
         memset(cScene, 0, sizeof cScene);
@@ -976,7 +1285,9 @@ int StuckEffectLookTestLogic()
         fNan[0x71] = 4;
         fNan[0x72] = 0x08;
         fNan[0x73] = 0x08;
-        field(fAttach, 46, 0x2B8, nullptr);  // AttachParent
+        field(fNet, 49, 0x8C, nullptr);      // bNetAddressable: ActorComponent's flag byte, mask 0x08 (above bRegistered 0x01)
+        fNet[0x72] = 0x08;
+        field(fAttach, 46, 0x2B8, fNet);     // AttachParent
         cls(cBpc, 41, nullptr, fMids);
         cls(cChild, 77, cBpc, nullptr);
         cls(cScene, 78, nullptr, fAttach);
@@ -988,6 +1299,7 @@ int StuckEffectLookTestLogic()
             s.objArray = array;
             s.fname = &TestFName;
             s.info.overlayOffset = overlay;
+            s.info.registeredByte = 0x8C;  // as read from MarkRenderStateDirty's code
             s.markDirty = &TestDirty;
         };
         fresh();
@@ -999,8 +1311,13 @@ int StuckEffectLookTestLogic()
               31);
         OnSet(meshObj, fxObj, nullptr, midA);  // the first mesh: its static-mesh flag and AttachParent found
         check(s.count == 1 && s.meshes[0].isStatic && s.staticClass == cStatic && s.nanOffset == 0x5F4 && s.nanMask == 0x08 &&
-                  s.attachTried && s.attachOffset == 0x2B8,
+                  s.attachTried && s.attachOffset == 0x2B8 && s.regOffset == 0x8C && s.regMask == 1,
               32);
+        fresh();  // the byte read from the code is not bNetAddressable's: the registered check is left out
+        s.info.registeredByte = 0x90;
+        check(IsStatusEffect(fxObj), 45);
+        OnSet(meshObj, fxObj, nullptr, midA);
+        check(s.attachOffset == 0x2B8 && !s.regMask, 46);
         fresh();
         g_testMissing = L"form";  // a property not found: nothing done, not asked again
         check(!IsStatusEffect(fxObj) && s.resolveFailed && !IsStatusEffect(fxObj), 33);
@@ -1011,11 +1328,29 @@ int StuckEffectLookTestLogic()
         check(s.attachTried && !s.attachOffset, 35);
         g_testMissing = nullptr;
         check(kBoolByteOffset == 0x71 && kBoolByteMask == 0x72, 36);  // the verified FBoolProperty layout (see the fake above)
+        fresh();  // bNetAddressable's mask in the byte's two lowest bits: the registered check is left out
+        fNet[0x72] = 0x01;
+        check(IsStatusEffect(fxObj), 56);
+        OnSet(meshObj, fxObj, nullptr, midA);
+        check(s.attachOffset == 0x2B8 && !s.regMask, 57);
+        fNet[0x72] = 0x08;
+        fresh();  // the three teardown names missing, one at a time: that check alone is left out
+        g_testMissing = L"bNetAddressable";
+        check(IsStatusEffect(fxObj), 58);
+        OnSet(meshObj, fxObj, nullptr, midA);
+        check(s.attachOffset == 0x2B8 && !s.regMask && s.actorName.valid() && s.destroyingName.valid(), 59);
+        fresh();
+        g_testMissing = L"Actor";
+        check(IsStatusEffect(fxObj) && !s.actorName.valid() && s.destroyingName.valid() && s.netAddrName.valid(), 60);
+        fresh();
+        g_testMissing = L"bActorIsBeingDestroyed";
+        check(IsStatusEffect(fxObj) && s.actorName.valid() && !s.destroyingName.valid() && s.netAddrName.valid(), 61);
+        g_testMissing = nullptr;
     }
 
     g = keep;
     g_on.store(wasOn);
-    g_seen = g_cleared = g_restored = g_full = g_faults = 0;
+    g_seen = g_cleared = g_restored = g_full = g_faults = g_gone = g_unreg = 0;
     return fail;
 }
 

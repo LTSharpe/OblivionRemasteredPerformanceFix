@@ -1,0 +1,65 @@
+name: Crash or hang
+description: The game crashed, froze or the picture stopped. Two minutes with the report tool makes it much easier to find the cause.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Sorry about that. To make this easy to look into, please run **`OblivionPerfFix-CollectReport.bat`** (it is in the same
+        folder as `version.dll`; double-click it). It writes one zip file, copies a short summary to your clipboard and sends
+        nothing anywhere. Then fill in the boxes below: first say what you were doing, then paste the summary (Ctrl+V) and
+        drag the zip into the upload box. No zip file? A description and the summary are still useful.
+  - type: textarea
+    id: what
+    attributes:
+      label: What were you doing?
+      description: Where in the game (place, indoors/outdoors), what you did just before, whether it happens every time, and whether it also happens without the fix (set every switch in `OblivionPerfFix.ini` to 0 or remove `version.dll`).
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What happened?
+      options: ["The game closed (crash to desktop)", "The game froze or stopped responding", "The picture froze, went black or glitched, then the game closed", "Something else"]
+    validations:
+      required: true
+  - type: dropdown
+    id: store
+    attributes:
+      label: Game and install
+      options: ["Steam, version.dll in Binaries\\Win64", "Xbox / PC Game Pass, version.dll in Binaries\\WinGDK", "OBSE64 plugin (Steam or Game Pass)", "Other"]
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary (paste what the report tool copied)
+      description: 'It starts with `---- OblivionPerfFix summary: paste this ----`. Nothing copied? Open `OblivionPerfFix-crash.txt` next to `OblivionPerfFix.log` and paste the part between those lines, or paste the first 30 lines of `OblivionPerfFix.log`.'
+      render: text
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: |
+        **The zip:** drag `OblivionPerfFix-report-<date>.zip` into the box below (it is at most 10 MB). In the text files your
+        Windows user name is already replaced by `<user>`; you may look inside before you upload. If the zip does not fit or the
+        upload fails, say so; you can also put it on any file-sharing service you like (OneDrive, Google Drive, Dropbox, MEGA ...),
+        share it as "anyone with the link" and paste the link in the box below.
+  - type: textarea
+    id: zip
+    attributes:
+      label: Report zip
+      description: Drag the zip here. Leave empty if you have none.
+  - type: input
+    id: version
+    attributes:
+      label: Fix version
+      description: First line of `OblivionPerfFix.log`, or the version in the summary.
+      placeholder: 1.7.0-beta
+    validations:
+      required: true
+  - type: textarea
+    id: mods
+    attributes:
+      label: Other mods and tools
+      description: OptiScaler, ReShade, Special K, UE4SS, OBSE64, overlays, anything else that adds DLLs. The summary and the zip list the DLLs, but your own words help.

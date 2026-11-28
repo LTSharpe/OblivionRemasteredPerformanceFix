@@ -478,14 +478,90 @@ static size_t DropNote(char* out, size_t cap, const SYSTEMTIME& t)
     return k > 0 && static_cast<size_t>(k) < cap - n ? n + static_cast<size_t>(k) : 0;
 }
 
+// CrashReport's sink (crash_report.cpp): while set, the Log lines of one thread (the report's writer) go to the sink instead
+// of the log, so that the GPU report's parts (memory history, ini keys, DRED) print into OblivionPerfFix-crash.txt.
+static thread_local void (*t_sink)(const char* line) = nullptr;  // per thread: two writers (watchdog, GPU helper) never share one
+
+void LogSetSink(void (*sink)(const char* line))
+{
+    t_sink = sink;
+}
+
+static thread_local void (*t_tee)(const char* line) = nullptr;  // per thread: a copy of each line (the GPU crash report's text)
+void LogSetTee(void (*tee)(const char* line))
+{
+    t_tee = tee;
+}
+
+// One line from a crash or hang record (crash_report.cpp): the log's lock is only tried (up to 200 ms), so a thread that was
+// stopped or crashed while holding it never blocks the record; written at once (crash mode). False: not written.
+bool LogCrashTry(const char* text)
+{
+    if (g_crashOnly) return false;
+    const ULONGLONG until = GetTickCount64() + 200;
+    bool owned = false;
+    while (!(owned = g_logMutex.try_lock()) && GetTickCount64() < until) Sleep(1);
+    if (!owned) return false;
+    bool ok = false;
+    if (g_logFile && !g_logFull) {
+        SYSTEMTIME t;
+        GetLocalTime(&t);
+        char line[1100];
+        size_t n = Stamp(line, t);
+        for (const char* p = text; *p && n < sizeof line - 3; ++p) {
+            if (*p == '\n') line[n++] = '\r';
+            line[n++] = *p;
+        }
+        line[n++] = '\r';
+        line[n++] = '\n';
+        ok = Append(line, n);
+    }
+    g_logMutex.unlock();
+    g_sync.store(true);
+    FileLock lock(200);
+    if (lock.owned) FlushQueue(lock);
+    return ok;
+}
+
+// "\Users\<name>\" and "/Users/<name>/" in a line become "\Users\<user>\" (in place; the line only gets shorter or keeps its size
+// for names of 6+ characters; a shorter name is padded no further than the line allows)
+static void ScrubUserName(char* s)
+{
+    for (char* p = s; *p; ++p) {
+        if ((*p != '\\' && *p != '/') || _strnicmp(p + 1, "users", 5) != 0 || (p[6] != '\\' && p[6] != '/')) continue;
+        char* name = p + 7;
+        char* e = name;
+        while (*e && *e != '\\' && *e != '/' && *e != ' ' && *e != '"' && *e != '\'' && *e != ':') ++e;
+        if (e == name || (e - name == 6 && strncmp(name, "<user>", 6) == 0)) continue;
+        const size_t tail = strlen(e) + 1;
+        const size_t len = strlen(s);
+        if (len - static_cast<size_t>(e - name) + 6 >= 1023) { memset(name, '*', static_cast<size_t>(e - name)); continue; }
+        memmove(name + 6, e, tail);
+        memcpy(name, "<user>", 6);
+        p = name + 5;
+    }
+}
+
 void Log(const char* fmt, ...)
 {
+    if (const auto sink = t_sink) {
+        char text[1024];
+        va_list sargs;
+        va_start(sargs, fmt);
+        vsnprintf(text, sizeof text, fmt, sargs);
+        va_end(sargs);
+        ScrubUserName(text);
+        sink(text);
+        return;
+    }
     if (g_crashOnly && strncmp(fmt, "[gpucrash]", 10) != 0) return;  // LogFile=0 (set once at start-up)
     char msg[1024];
     va_list args;
     va_start(args, fmt);
     vsnprintf(msg, sizeof msg, fmt, args);
     va_end(args);
+    ScrubUserName(msg);  // a path with the Windows user name (players paste the log as it is)
+    if (const auto tee = t_tee) tee(msg);
 
     SYSTEMTIME t;
     GetLocalTime(&t);

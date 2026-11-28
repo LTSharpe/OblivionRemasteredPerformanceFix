@@ -860,7 +860,62 @@ constexpr size_t kCompTimeAt = 63, kCompLastAt = 78;
 
 // ---- positions (game thread) ----
 
-// [root + location] of an actor, if obj is one: its root component's outer is the actor itself.
+// Is obj an actor? (2026-11-28, crash-report review: the owner walk's ActorLocationGuarded read a non-actor's word at the root
+// offset, an invalid pointer ~6 times a second, each an access violation caught by its __try.) UObject::ClassPrivate +0x10,
+// UStruct::SuperStruct +0x40 (UE 5.3, as furniture_standup.cpp reads them); AActor's UClass is learnt from the first object
+// whose root component's outer is the object itself (AActor derives from UObject directly: the class just below the root of
+// that chain). The verdict per UClass is cached (64-bit entries: the class pointer with the verdict in bit 0). -1: not known
+// (the actor class not learnt yet, or an implausible class pointer): the caller reads as before.
+constexpr uint32_t kObjClassPtr = 0x10, kStructSuperPtr = 0x40;
+const uint8_t* g_actorClass = nullptr;
+std::atomic<uint64_t> g_classVerdict[512];
+bool g_alFaulted = false;  // the last ActorLocationGuarded call faulted (self-test)
+
+inline bool PlausiblePtr(const uint8_t* p)
+{
+    const uintptr_t v = reinterpret_cast<uintptr_t>(p);
+    return v >= 0x10000 && v < 0x7FFFFFFF0000ull && (v & 7) == 0;
+}
+
+int ClassIsActor(const uint8_t* obj)
+{
+    if (!g_actorClass) return -1;
+    const uint8_t* const cls = *reinterpret_cast<const uint8_t* const*>(obj + kObjClassPtr);
+    if (!PlausiblePtr(cls)) return -1;
+    const uint64_t key = reinterpret_cast<uint64_t>(cls);
+    const size_t h = (key >> 4) * 0x9E3779B97F4A7C15ull >> 55;  // 512 buckets
+    for (size_t i = 0; i < 8; ++i) {
+        const uint64_t e = g_classVerdict[(h + i) & 511].load(std::memory_order_relaxed);
+        if (!e) break;
+        if ((e & ~1ull) == key) return static_cast<int>(e & 1);
+    }
+    int actor = 0;
+    const uint8_t* c = cls;
+    for (int depth = 0; c && depth < 32; ++depth) {
+        if (c == g_actorClass) { actor = 1; break; }
+        c = *reinterpret_cast<const uint8_t* const*>(c + kStructSuperPtr);
+        if (c && !PlausiblePtr(c)) return -1;
+    }
+    for (size_t i = 0; i < 8; ++i) {
+        uint64_t expect = 0;
+        if (g_classVerdict[(h + i) & 511].compare_exchange_strong(expect, key | static_cast<uint64_t>(actor))) break;
+        if ((expect & ~1ull) == key) break;
+    }
+    return actor;
+}
+
+void LearnActorClass(const uint8_t* actor)
+{
+    const uint8_t* chain[32];
+    int n = 0;
+    for (const uint8_t* c = *reinterpret_cast<const uint8_t* const*>(actor + kObjClassPtr); c && PlausiblePtr(c) && n < 32;
+         c = *reinterpret_cast<const uint8_t* const*>(c + kStructSuperPtr))
+        chain[n++] = c;
+    if (n >= 2) g_actorClass = chain[n - 2];  // chain[n - 1] = UObject's class; the one below it = AActor's
+}
+
+// [root + location] of an actor, if obj is one: its root component's outer is the actor itself. (Unchanged reads: with
+// PacingOwnerWalk=0 a fault here ends pacing's walk, as before; ActorLocationGuarded answers known non-actors first.)
 bool ActorLocation(const uint8_t* obj, double* x, double* y, double* z)
 {
     const uint8_t* root = *reinterpret_cast<const uint8_t* const*>(obj + g.rootOffset);
@@ -869,19 +924,104 @@ bool ActorLocation(const uint8_t* obj, double* x, double* y, double* z)
     *x = l[0];
     *y = l[1];
     *z = l[2];
+    if (!g_actorClass) LearnActorClass(obj);
     return std::isfinite(*x) && std::isfinite(*y) && std::isfinite(*z);
 }
+
+// Self-test: the old reads (before 2026-11-28) and the new path on fake objects: an actor (two classes deep), its child class,
+// a non-actor with an invalid pointer at the root offset, an actor without a root, a root whose outer is another object.
+bool ActorLocationGuarded(const uint8_t* obj, double* x, double* y, double* z);
+
+int ActorLocationSelfTest(char* why, size_t cap)
+{
+    struct alignas(16) Fake { uint8_t b[0x400]; };
+    static Fake objectCls, actorCls, pawnCls, compCls, actor, pawn, comp, noRoot, otherOuter, rootA, rootP, rootO;
+    auto put = [](Fake& f, uint32_t off, const void* v) { memcpy(f.b + off, &v, 8); };
+    const uint32_t ro = g.rootOffset ? g.rootOffset : 0x1A0, lo = g.locationOffset ? g.locationOffset : 0x128;
+    const uint32_t savedRo = g.rootOffset, savedLo = g.locationOffset;
+    g.rootOffset = ro;
+    g.locationOffset = lo;
+    put(actorCls, kStructSuperPtr, &objectCls);
+    put(pawnCls, kStructSuperPtr, &actorCls);
+    put(compCls, kStructSuperPtr, &objectCls);
+    put(actor, kObjClassPtr, &actorCls);
+    put(pawn, kObjClassPtr, &pawnCls);
+    put(comp, kObjClassPtr, &compCls);
+    put(noRoot, kObjClassPtr, &actorCls);
+    put(otherOuter, kObjClassPtr, &pawnCls);
+    put(actor, ro, &rootA);
+    put(pawn, ro, &rootP);
+    put(otherOuter, ro, &rootO);
+    put(rootA, kUObjectOuter, &actor);
+    put(rootP, kUObjectOuter, &pawn);
+    put(rootO, kUObjectOuter, &actor);
+    const void* bad = reinterpret_cast<const void*>(static_cast<uintptr_t>(0x0000123400000010ull));  // invalid, like the faulting word
+    put(comp, ro, bad);
+    const double loc[3] = {100.5, -200.25, 30.0};
+    memcpy(rootA.b + lo, loc, sizeof loc);
+    memcpy(rootP.b + lo, loc, sizeof loc);
+    auto oldPath = [&](const uint8_t* obj, double* x, double* y, double* z) -> int {  // the reads before 2026-11-28, guarded
+        __try {
+            const uint8_t* root = *reinterpret_cast<const uint8_t* const*>(obj + ro);
+            if (!root || *reinterpret_cast<const uint8_t* const*>(root + kUObjectOuter) != obj) return 0;
+            const double* l = reinterpret_cast<const double*>(root + lo);
+            *x = l[0]; *y = l[1]; *z = l[2];
+            return std::isfinite(*x) && std::isfinite(*y) && std::isfinite(*z) ? 1 : 0;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return 2;  // faulted: false
+        }
+    };
+    const uint8_t* const saveCls = g_actorClass;
+    g_actorClass = nullptr;
+    for (auto& e : g_classVerdict) e.store(0);
+    int bad1 = 0, faultsNew = 0, faultsOld = 0;
+    const Fake* objs[] = {&actor, &pawn, &comp, &noRoot, &otherOuter};
+    for (int round = 0; round < 2; ++round)  // round 0 learns the actor class, round 1 uses the cache
+        for (const Fake* o : objs) {
+            double ox = 0, oy = 0, oz = 0, nx = 0, ny = 0, nz = 0;
+            const int r0 = oldPath(o->b, &ox, &oy, &oz);
+            faultsOld += r0 == 2;
+            int r1 = 0;
+            __try {
+                r1 = ActorLocationGuarded(o->b, &nx, &ny, &nz) ? 1 : 0;
+                faultsNew += round == 1 && g_alFaulted;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                r1 = 2;
+            }
+            faultsNew += r1 == 2;
+            const bool same = (r0 == 1) == (r1 == 1) && (r0 != 1 || (ox == nx && oy == ny && oz == nz));
+            bad1 += !same;
+        }
+    const bool learnt = g_actorClass == actorCls.b;
+    const int actorVerdict = ClassIsActor(pawn.b), compVerdict = ClassIsActor(comp.b);
+    snprintf(why, cap, "ActorLocation: same results as the old reads on 5 fake objects x 2 rounds (%d differ), old path faulted %d times, "
+             "new path faulted %d times after the actor class was learnt (learnt %d, pawn class actor %d, component class actor %d)",
+             bad1, faultsOld, faultsNew, learnt ? 1 : 0, actorVerdict, compVerdict);
+    g_actorClass = saveCls;
+    for (auto& e : g_classVerdict) e.store(0);
+    g.rootOffset = savedRo;
+    g.locationOffset = savedLo;
+    return bad1 + (faultsNew != 0) + (faultsOld == 0) + !learnt + (actorVerdict != 1) + (compVerdict != 0);
+}
+}  // namespace
+int NpcPacingActorLocationSelfTest(char* why, size_t cap) { return ActorLocationSelfTest(why, cap); }
+namespace {
 
 // ActorLocation for any object of an owner chain: a smaller object (an equipment or hair delegate's owner, e.g. the
 // character's body pairing component) has no root component at that offset, and the word read there can be an invalid
 // pointer. That object is no actor; the walk goes on with its outer (ClothBuildDefer's owner lookup; pacing's own walk with
 // PacingOwnerWalk, mkusm's code from the first version of public PR #25). With PacingOwnerWalk=0 pacing's own walk
 // (ResolveDelegate) ends there: the unit counts as near (runs at once).
+// (2026-11-28) A known non-actor is answered from its class first (the __try stays for the rest): the walk's result is the same
+// (false either way), without the fault the read of its root word raised.
 bool ActorLocationGuarded(const uint8_t* obj, double* x, double* y, double* z)
 {
+    g_alFaulted = false;
     __try {
+        if (ClassIsActor(obj) == 0) return false;
         return ActorLocation(obj, x, y, z);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        g_alFaulted = true;
         return false;
     }
 }
@@ -2453,6 +2593,8 @@ void MaxTickRateHook(void* engine)
     HdrMenuFrameEnd();   // HdrMenuRows / HudAspectRow / DlssRayReconstruction (no-op unless installed)
     HdrGammaFrameEnd();  // HdrGamma22 (no-op unless installed; writes only while on)
     StuckEffectLookFrameEnd();  // StuckEffectLookFix: leftover status-effect looks (no-op unless installed)
+    WeaponCameraStateFrameEnd();  // WeaponCameraStateFix: the camera's weapon state after a load (no-op unless installed and on)
+    MenuLoadKeepFrame();   // MenuLoadPreload: behind the first loading screen (no-op unless on)
     CmdMemPregrowFrame();  // CmdMemPregrow: its pass waits for the first loading screen (reads the freeze state only while it waits)
     {
         LedgerPacing lp;
@@ -2463,6 +2605,8 @@ void MaxTickRateHook(void* engine)
         lp.capPeriodUs = g.capPeriodUs;
         const uint8_t* const tes = g.tes ? *g.tes : nullptr;
         lp.travel = tes && tes[kTesTravelPending];
+        CrashReportFrame(tes, lp.travel);  // CrashReport / HangReport: the frame clock, the event ring's game-thread events
+        LoadingStateFrame(lp.travel);  // LoadPeakKeepsBack / RtSceneBufferGrowToPeak: the loading-screen state (reads only while one is on)
         LedgerFrameEnd(lp);  // the frame since the last exit (no-op unless installed)
         DoorDiagFrameEnd();  // diagnostic DoorDiag's loading-screen timeline (no-op unless installed)
         StreamBehindLoadingFrameEnd();  // StreamBehindLoadingScreen (no-op unless installed and on)
@@ -3300,6 +3444,23 @@ bool NpcPacingPlayerPos(double* x, double* y, double* z)
     return true;
 }
 
+// CreateAheadDueMs: the engine's frame-rate cap period (0 = uncapped or not known)
+double NpcPacingCapPeriodUs() { return g.installed ? g.capPeriodUs : 0.0; }
+
+// WeaponCameraStateFix: the play world's first player controller (the same engine getters as ReadPlayer), or null
+void* NpcPacingPlayerController()
+{
+    if (!g.installed || !OnGameThread() || !g.gEngine || !g.getWorld || !g.getPc) return nullptr;
+    __try {
+        void* const engine = *g.gEngine;
+        if (!engine) return nullptr;
+        void* const world = g.getWorld(engine, nullptr);
+        return world ? g.getPc(world, 0) : nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return nullptr;
+    }
+}
+
 
 // The last position the game thread saw (any thread; for the GPU crash report: the values may be a frame old or mixed).
 bool NpcPacingLastPlayerPos(double* x, double* y, double* z)
@@ -3408,6 +3569,18 @@ bool NpcPacingFrameState(uint64_t* elapsedUs, uint64_t* unitUs)
     const uint64_t now = NowUs();
     *elapsedUs = now > g.lastPaceEnd ? now - g.lastPaceEnd : 0;
     *unitUs = g.unitUs;
+    return true;
+}
+
+// StreamInHeavySkipMs (streaming/stream_granularity.cpp), game thread: this frame's start (the frame-rate cap's sleep point, the
+// same edge NpcPacingFrameState measures from; one value per frame, so it also names the frame) and the time since; false
+// until the first frame edge or when NpcCreationPacing is not installed
+bool NpcPacingFrameClock(uint64_t* startUs, uint64_t* elapsedUs)
+{
+    if (!g.installed || !g.lastPaceEnd) return false;
+    const uint64_t now = NowUs();
+    *startUs = g.lastPaceEnd;
+    *elapsedUs = now > g.lastPaceEnd ? now - g.lastPaceEnd : 0;
     return true;
 }
 

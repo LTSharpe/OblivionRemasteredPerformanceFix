@@ -581,8 +581,13 @@ static uint64_t HashWords(uint64_t seed, const void* data, size_t bytes)
 #include "selftest_cellpreload.h"   // CellObjectPreload: sites, the cell walk and the request rules with a fake look-up and clock
 #include "selftest_impactpreload.h" // ImpactPreload: sites, the preload state machine with fakes
 #include "selftest_npcbodies.h"     // NpcBodiesOneLock: sites and the one-hold wrapper with a fake scene lock
+#include "selftest_dfatlas.h"       // DfAtlasKeep: ResizeBrickAtlasIfNeeded by pattern, fail-closed copies, decision, hook with fakes
+#include "selftest_dfscene.h"       // DfObjectBufferKeep / DfMappingReserve / DfAddSpread: sites on the mapped exe, logic with fakes
 #include "selftest_rtscene.h"       // RtSceneBufferKeep: sites, patch and the stub's decisions
 #include "selftest_poolkeep.h"      // GpuPoolKeepMB: sites, the keep decision, the hook on fake allocators, the patch
+#include "selftest_upage.h"        // UploadPagePreGrow / UploadPageScreenRelease: sites, probe, pre-grow round on a fake pool
+#include "selftest_poolspare.h"     // GpuPoolSpareAhead: CreateNewPool and its vtable slot, the spare hook and thread on fake allocators
+#include "selftest_resfresh.h"      // ResidencyFreshNew: BeginTrackingObject replaced; the LRU insert and the spare stamp on fakes
 #include "selftest_rtbatch.h"       // RayTracingBuildBatch: sites, patch and the queue decision
 #include "selftest_nanite.h"        // NaniteInitialRootPages (lab: NaniteStreamProbe / Nanite*MinMB with a fake resize)
 #include "selftest_waterinfo.h"     // the water-info capture keys (lab: and WaterInfoProbe): sites and patches
@@ -590,10 +595,13 @@ static uint64_t HashWords(uint64_t seed, const void* data, size_t bytes)
 #include "selftest_navlink.h"       // NavLinkFast: sites, the fast search and the skip rule against the game's search
 #include "selftest_readback.h"     // ScreenshotReadbackConvert's site and the game's conversion vs the fast one
 #include "selftest_parallel.h"     // ScreenshotParallel's sites, stubs and row bands
+#include "selftest_slotclick.h"    // SlotClickPayloadCopy's sites and stubs (S-085)
 #include "selftest_oscache.h"      // OsPageCache's sites and the cache core with fake OS functions
 #include "selftest_pso.h"          // PsoPrecompileFast's sites, trampoline and mode choices with fakes
 #include "selftest_destroybatch.h" // PhysicsDestroyBatch: sites and the wrapper with fakes
 #include "selftest_clothreg.h"    // ClothRegisterLite: sites, lite builds and their completion with fakes
+#include "selftest_unfreeze.h"    // UnfreezeClothSkip: sites, install, the walk decision and the watch with fakes
+#include "selftest_onespawn.h"    // EquipRefreshOneSpawn: sites, install with ClothRegisterLiteRefresh on, the skip guard with fakes
 #include "selftest_clothdefer.h"     // ClothBuildDefer: sites, hooks and the defer rule (after ClothRegisterLite)
 #include "selftest_bodyspread.h"   // BodyRemovalSpread: sites on the mapped exe, the queue / drain / drop logic with fakes
 #include "selftest_epicport.h"     // StreamOutEndPlaySlice, ResetLoadersNoFlush: sites on the mapped exe, the hooks with fakes
@@ -613,6 +621,9 @@ static uint64_t HashWords(uint64_t seed, const void* data, size_t bytes)
 #include "selftest_waterinfo_skip.h"  // WaterInfoSkip: layout reads on the mapped exe, the same-input decision with fakes
 #include "selftest_waterspread.h"     // WaterInfoSpread: sites + shared zone layout on the mapped exe, the defer / merge logic with fakes
 #include "selftest_mapspread.h"       // MapPopupSpread: sites by pattern on the mapped exe, the keep / drop / reuse logic with fakes
+#include "selftest_loadkeep.h"        // MenuLoadKeep: TryLoad by pattern on the mapped exe, the root / cluster / cap logic with a fake array
+#include "selftest_waterskip.h"       // WaterRebuildSkip: the water patterns on the mapped exe, the decision logic on fakes
+#include "selftest_stmemo.h"          // StringTableMemo: GetAssetReference by pattern on the mapped exe, the memo logic with a fake
 #include "selftest_gpushot.h"         // GpuMenuShot: sites by pattern on the mapped exe, the shader arithmetic, the shader on this GPU
 #include "selftest_thumbleft.h"        // SaveThumbLeftoverFix: sites by pattern, the removal decision, the bound-entry search
 #include "selftest_repath.h"        // RepathParallel: discovery on the mapped exe, the key, the nav-edit counter, the link marker
@@ -621,8 +632,13 @@ static uint64_t HashWords(uint64_t seed, const void* data, size_t bytes)
 #include "selftest_pairrace.h"      // PairReleaseOnce: discovery, the fix's writes and counting stubs (lab PairRaceProbe: a fake pool)
 #include "selftest_otframe.h"       // OtFrameTrim: discovery, install, the consumer and timer with fakes
 #include "selftest_loosemiss.h"     // LooseMissCache: discovery, install, the finder's checks with a fake _access
+#include "selftest_menufile.h"     // MenuFileCache: discovery, install, the hook with a fake loader and operator new
 #include "selftest_poweranim.h"     // PowerAttackAnimKeep: discovery, fakes, the hook, the game's release through the patch
 #include "selftest_flowonce.h"      // FlowOverlapsOnce: discovery, install, the hook with a fake adoption and UpdateOverlaps
+#include "selftest_preplaced.h"     // PrePlacedRecordGuard: discovery (also after FlowOverlapsOnce), install, the stub
+#include "selftest_headcancel.h"    // HeadCancelNoWait: discovery, the decision and the drain with fake tasks, install
+#include "selftest_riderbind.h"     // RiderBindGuard: discovery, install, the hooks with fake horse / rider controllers
+#include "selftest_standup.h"      // FurnitureStandUpFix: discovery, install, the decision on fake characters
 #include "selftest_animpar.h"      // AnimTeardownParallel's shapes and the helper queue with fakes
 #include "selftest_cellbuf.h"      // CellBufferPacedEvict's shapes, the clamp stub and the buffer LRU with and without the fix
 #include "selftest_rowpreload.h"   // RowPreload: sites (CellBufferPacedEvict's too) and the preload logic with fakes
@@ -642,6 +658,7 @@ static uint64_t HashWords(uint64_t seed, const void* data, size_t bytes)
 #include "selftest_skinsss.h"      // SeparableSkinAbove4K: the switch logic against a fake variable
 #include "selftest_scan.h"         // FindAll: the fast pattern search against the reference search
 #include "selftest_ticksplit.h"        // diagnostic TickSplit: sites, entries/windows/top rows, cost per call (lab: perception split)
+#include "selftest_gpumem.h"         // GpuMemoryRecord: import routes, WARP recording, report look-ups, cost
 
 // ---- fakes for the parallel flush test (physics_flush.cpp, PhysicsFlushParallel) ----
 namespace pfl {
@@ -2800,7 +2817,11 @@ int wmain(int argc, wchar_t** argv)
                           "a dismounted rider and a gone component, off and destroyed meshes untouched, the horse's look kept "
                           "only while the rider is attached, an ended look skipped for a deeper one, a gone top component, "
                           "history overflow, table full, the hook's off / off-game-thread / in-pass gates, the name and "
-                          "offset lookup (and a missing name: does nothing)");
+                          "offset lookup (and a missing name: does nothing); teardown checks: a gone MID not put back, a mesh "
+                          "whose actor, level, world or package is gone or the actor being destroyed left alone (8 outers "
+                          "looked at), bActorIsBeingDestroyed found by name, an unregistered mesh's fields only (cleared or put "
+                          "back), the bRegistered byte from MarkRenderStateDirty's code and its bNetAddressable cross-check "
+                          "(also refused in the two lowest bits), each teardown name missing, the log rate");
         StuckEffectLookInfo si{};
         const bool found = FindStuckEffectLook(&si);
         Check(found, "StuckEffectLookFix: SetOverlayMaterial / SetVisibleInRayTracing exec functions, FName, GUObjectArray found");
@@ -2808,11 +2829,185 @@ int wmain(int argc, wchar_t** argv)
             Check(si.exec - game.base == 0x3054490 && si.rtExec - game.base == 0x2D89C10,
                   "StuckEffectLookFix: the exec functions at exe+0x3054490 / exe+0x2D89C10 (build 19115871)");
             Check(si.overlayOffset == 0x5B0 && si.precacheSlot == 0x640, "StuckEffectLookFix: OverlayMaterial +0x5B0, PrecachePSOs slot +0x640");
+            Check(si.registeredByte == 0x8C, "StuckEffectLookFix: bRegistered's byte +0x8C read from MarkRenderStateDirty's code");
         }
         if (Installed(found && InstallStuckEffectLook(true), "StuckEffectLookFix (stuck effect look)")) {
             Check(si.exec[0] == 0xE9, "StuckEffectLookFix: SetOverlayMaterial's exec starts with the detour's jmp");
             Check(InstallStuckEffectLook(true), "StuckEffectLookFix: a second install finds it in place");
             SetStuckEffectLookFix(false);
+        }
+    }
+
+    // WeaponCameraStateFix (S-078): the name lookup and the decision on fake classes, objects and tags, then the two patterns
+    // (ProcessEvent, FName's constructor) on the mapped exe. No code is patched.
+    {
+        const int logic = WeaponCameraStateTestLogic();
+        if (logic) printf("  WeaponCameraStateFix: check %d failed\n", logic);
+        Check(logic == 0, "WeaponCameraStateFix: offsets and Reset found by name, a camera stuck in its weapon state (also sneaking) "
+                          "reset once after 1 s of its own time while the weapon is away, nothing while drawn, drawing, sheathing, "
+                          "paused, in dialogue, off, without a player controller or with another camera class; a break re-arms; "
+                          "a reset without effect not repeated until the state is entered anew; a missing name waits, a missing "
+                          "property or a Reset with parameters does nothing");
+        Check(InstallWeaponCameraStateFix(), "WeaponCameraStateFix: UObject::ProcessEvent and FName's constructor found by pattern");
+        SetWeaponCameraStateFix(false);
+    }
+
+    // InventoryScriptWalkFix (S-080, GitHub #53): the walk's patterns on the mapped exe (and its path from the script call
+    // to the restart, jump by jump), the call redirected to the stub, the stock-precise decision on fake lists, and the
+    // stub run from a fake walk (our own machine code laid out like the walk's frame: list field at [rsp+90h], entry at
+    // [rsp+0A8h], R12 / R15 the kept nodes, ESI / R13D the counts it compares) with a fake item-script run that changes
+    // the fake list as a script would.
+    {
+        Check(InstallInventoryScriptWalkFix(), "InventoryScriptWalkFix: the item-script walk, its path to the restart and the item-script run found by pattern");
+        InventoryScriptWalkInfoOut iw{};
+        if (Installed(InventoryScriptWalkInfo(&iw), "InventoryScriptWalkFix (inventory item-script walk)")) {
+            Check(iw.site == game.base + 0x6648152, "the walk's script call at exe+0x6648152");
+            Check(iw.scriptRun == game.base + 0x6630EE0, "the item-script run at exe+0x6630EE0");
+            Check(iw.site[0] == 0xE8 && RipTarget(iw.site, 1, 5) == iw.stub, "the script call goes to the stub");
+            Check(*reinterpret_cast<void* const*>(iw.stub + 88) == iw.hook, "the stub calls the hook");
+            Check(InstallInventoryScriptWalkFix(), "second installation finds the fix in place");
+
+            struct N {
+                void* item;
+                N* next;
+            };
+            // Fake inventory: head -> n2 -> n3 (3 entries); entry = {inner list head*, count, form}; entry 2's inner
+            // list: i1 -> i2 (2 lists). The walk is at n2 / entry 2 / i2 unless a case says otherwise.
+            static N head, n2, n3, n4, i1, i2, i3;
+            static void* entry1[3], *entry2[3], *entry3[3], *entry4[3];
+            static N* listField;
+            auto reset = [&]() {
+                i1 = {reinterpret_cast<void*>(0x1001), &i2};
+                i2 = {reinterpret_cast<void*>(0x1002), nullptr};
+                i3 = {reinterpret_cast<void*>(0x1003), nullptr};
+                entry1[0] = entry3[0] = entry4[0] = nullptr;
+                entry2[0] = &i1;
+                head = {entry1, &n2};
+                n2 = {entry2, &n3};
+                n3 = {entry3, nullptr};
+                n4 = {entry4, nullptr};
+                listField = &head;
+            };
+            reset();
+            void* const* lf = reinterpret_cast<void* const*>(&listField);
+            auto lost = [&]() { return InventoryScriptWalkLost(lf, &n2, entry2, &i2, 3, 2); };
+            Check(lost() == 0, "lost: nothing while the kept nodes and entry are linked");
+            head = {entry2, &n3};  // head removal of entry 1 (node 2 copied into the head, node 2 unlinked) ...
+            Check(lost() == 0, "lost: ... with the count changed: the walk restarts by itself, nothing forced");
+            n3.next = &n4;         // ... plus an added entry (count kept, issue #53's case)
+            Check(lost() == kInvWalkOuterGone, "lost: count kept, the kept outer node unlinked");
+            reset();
+            n2.item = entry4;      // the kept entry replaced (count kept)
+            Check(lost() == kInvWalkEntryGone, "lost: count kept, the kept entry no longer in the list");
+            reset();
+            n2.item = entry3;      // entries swapped: the kept entry still in the list, the kept nodes linked
+            n3.item = entry2;
+            Check(lost() == 0, "lost: entries swapped, nothing the walk reads left the list");
+            reset();
+            i1.next = &i3;         // the kept inner node unlinked, inner count kept: the walk would follow R15
+            Check(lost() == kInvWalkInnerGone, "lost: inner node unlinked with the inner count kept");
+            i1.next = nullptr;     // ... inner count changed: the walk goes to the next outer node through R12 (linked)
+            Check(lost() == 0, "lost: inner node unlinked with the inner count changed: the stock walk reads nothing freed");
+            reset();
+            n3.next = &head;       // a cycle: left to the stock walk
+            Check(lost() == kInvWalkTooLong, "lost: a damaged (cyclic) list is reported too long");
+            reset();
+
+            // The fake walk: uint32_t (void* listField, void* entry, void* outer, void* inner) -> ESI after the call;
+            // ESI and R13D are loaded from the counts after the code.
+            uint8_t walkCode[] = {
+                0x56, 0x41, 0x54, 0x41, 0x55, 0x41, 0x57,              // push rsi / r12 / r13 / r15
+                0x48, 0x81, 0xEC, 0xB8, 0x00, 0x00, 0x00,              // sub rsp,0B8h
+                0x48, 0x89, 0x8C, 0x24, 0x90, 0x00, 0x00, 0x00,        // mov [rsp+90h],rcx
+                0x48, 0x89, 0x94, 0x24, 0xA8, 0x00, 0x00, 0x00,        // mov [rsp+0A8h],rdx
+                0x4D, 0x8B, 0xE0, 0x4D, 0x8B, 0xF9,                    // mov r12,r8; mov r15,r9
+                0x8B, 0x35, 0, 0, 0, 0,                                // mov esi,[rip+d]     (36)
+                0x44, 0x8B, 0x2D, 0, 0, 0, 0,                          // mov r13d,[rip+d]    (42)
+                0xC6, 0x44, 0x24, 0x20, 0x05,                          // mov byte [rsp+20h],5
+                0x48, 0xC7, 0xC1, 0x11, 0x00, 0x00, 0x00, 0x48, 0xC7, 0xC2, 0x22, 0x00, 0x00, 0x00,  // rcx 11h, rdx 22h
+                0x49, 0xC7, 0xC0, 0x33, 0x00, 0x00, 0x00, 0x49, 0xC7, 0xC1, 0x44, 0x00, 0x00, 0x00,  // r8 33h, r9 44h
+                0xFF, 0x15, 0, 0, 0, 0,                                // call [rip+d] -> the stub (82)
+                0x8B, 0xC6,                                            // mov eax,esi
+                0x48, 0x81, 0xC4, 0xB8, 0x00, 0x00, 0x00,              // add rsp,0B8h
+                0x41, 0x5F, 0x41, 0x5D, 0x41, 0x5C, 0x5E, 0xC3};       // pop r15 / r13 / r12 / rsi; ret
+            static_assert(sizeof walkCode == 105, "fake walk layout");
+            constexpr size_t kStubPtr = 105, kOuterCount = 113, kInnerCount = 117;
+            auto setDisp = [&](size_t insn, size_t dispAt, size_t len, size_t target) {
+                const int32_t d = static_cast<int32_t>(target - (insn + len));
+                memcpy(walkCode + dispAt, &d, 4);
+            };
+            setDisp(36, 38, 6, kOuterCount);
+            setDisp(42, 45, 7, kInnerCount);
+            setDisp(82, 84, 6, kStubPtr);
+            auto* code = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+            if (code) {
+                memcpy(code, walkCode, sizeof walkCode);
+                memcpy(code + kStubPtr, &iw.stub, sizeof(void*));
+                auto counts = [&](uint32_t outer, uint32_t inner) {
+                    memcpy(code + kOuterCount, &outer, 4);
+                    memcpy(code + kInnerCount, &inner, 4);
+                    FlushInstructionCache(GetCurrentProcess(), code, 4096);
+                };
+                using FakeWalk = uint32_t (*)(void*, void*, void*, void*);
+                const auto walk = reinterpret_cast<FakeWalk>(code);
+                static int scenario = 0;
+                static uint64_t args[5];
+                struct Run {
+                    static uint64_t Script(void* a1, void* a2, void* a3, void* a4, uint64_t a5)
+                    {
+                        args[0] = reinterpret_cast<uint64_t>(a1);
+                        args[1] = reinterpret_cast<uint64_t>(a2);
+                        args[2] = reinterpret_cast<uint64_t>(a3);
+                        args[3] = reinterpret_cast<uint64_t>(a4);
+                        args[4] = a5 & 0xFF;
+                        if (scenario == 1) head = {entry2, &n3}, n3.next = &n4;  // add one + remove the head entry: node 2 freed
+                        if (scenario == 2) head = {entry2, &n3};                   // the same without the add: count changed
+                        if (scenario == 3) i1.next = &i3;                         // kept inner node unlinked, inner count kept
+                        if (scenario == 4) i1.next = nullptr;                     // kept inner node unlinked, inner count changed
+                        if (scenario == 5) n2.item = entry3, n3.item = entry2;    // entries swapped
+                        if (scenario == 6) n2.item = entry4;                      // kept entry replaced
+                        if (scenario == 7) n3.next = &head;                       // a cycle
+                        return 0xAB;
+                    }
+                };
+                InventoryScriptWalkTestSetup(reinterpret_cast<void*>(&Run::Script));
+                SetInventoryScriptWalkFix(true);
+                counts(3, 2);
+                const uint32_t kRestarted = 0xFFFFFFFFu;
+                scenario = 0;
+                Check(walk(&listField, entry2, &n2, &i2) == 3, "stub: nothing lost -> the walk's count untouched");
+                Check(args[0] == 0x11 && args[1] == 0x22 && args[2] == 0x33 && args[3] == 0x44 && args[4] == 5,
+                      "stub: the item-script run gets the walk's five arguments");
+                const struct {
+                    int scenario;
+                    uint32_t esi;
+                    const char* what;
+                } cases[] = {
+                    {1, kRestarted, "stub: count kept, kept node freed (#53) -> ESI = -1 (the walk restarts)"},
+                    {2, 3, "stub: count changed -> nothing forced (the walk restarts by itself)"},
+                    {3, kRestarted, "stub: kept inner node lost, inner count kept -> restart"},
+                    {4, 3, "stub: kept inner node lost, inner count changed -> nothing forced (stock goes on through R12)"},
+                    {5, 3, "stub: entries swapped -> nothing forced"},
+                    {6, kRestarted, "stub: kept entry gone -> restart"},
+                    {7, 3, "stub: a cyclic list -> left to the stock walk"},
+                };
+                for (const auto& c : cases) {
+                    reset();
+                    scenario = c.scenario;
+                    Check(walk(&listField, entry2, &n2, &i2) == c.esi, c.what);
+                }
+                InventoryScriptWalkInfo(&iw);
+                Check(iw.restarts == 3 && iw.runs == 8, "stub: runs and restarts counted");
+                SetInventoryScriptWalkFix(false);
+                reset();
+                scenario = 1;
+                Check(walk(&listField, entry2, &n2, &i2) == 3, "stub, fix switched off: the stock walk unchanged");
+                InventoryScriptWalkInfo(&iw);
+                Check(iw.runs == 8, "stub, fix switched off: nothing checked");
+                LogInventoryScriptWalkStats();
+                reset();
+                VirtualFree(code, 0, MEM_RELEASE);
+            }
         }
     }
 
@@ -3484,6 +3679,8 @@ int wmain(int argc, wchar_t** argv)
     rbc::Run(game);
     // ScreenshotParallel: the screenshot's copies on helper threads (selftest_parallel.h).
     spar::Run(game);
+    // SlotClickPayloadCopy: the slot click's payload copies on the same helpers (selftest_slotclick.h).
+    sclick::Run(game);
     // OsPageCache: the OS page cache (selftest_oscache.h).
     osc::Run(game);
     // PsoPrecompileFast: the start-up PSO precompile's pace (selftest_pso.h).
@@ -3516,6 +3713,8 @@ int wmain(int argc, wchar_t** argv)
     GcMarkRun(game);
     // StreamRegisterGranularity (selftest_streamgran.h): the cvar's bound int on the mapped exe and the set rules.
     StreamGranRun();
+    // StreamInHeavySkipMs (selftest_streamgran.h): UWorld fields on the mapped exe, the rule (pending level only), the train, clean off.
+    StreamHeavySkipRun();
     // NavQueryPriority (selftest_navprio.h): the cvar's name on the mapped exe and the set rules with a fake console variable.
     NavPrioRun();
     // PhysicsSubstepCap (selftest_physcap.h): fake object list, class, properties and FName constructor; Engine.ini lines.
@@ -3541,12 +3740,23 @@ int wmain(int argc, wchar_t** argv)
     OtFrameTrimRun(game);
     // LooseMissCache (selftest_loosemiss.h): rewrites the file finder's two _access calls (no later test reads them).
     LooseMissRun(game);
+    // MenuFileCache (selftest_menufile.h): rewrites the file get's call of the menu XML loader (no later test calls it).
+    MenuFileRun(game);
     // PowerAttackAnimKeep (selftest_poweranim.h): rewrites 8 bytes of the animation release (no later test reads them).
     PowerAnimRun(game);
     // FlowOverlapsOnce (selftest_flowonce.h): patches the adoption's entry and one call; then fakes (no later test reads them).
     FlowOverlapsRun(game);
+    // PrePlacedRecordGuard (selftest_preplaced.h): retargets one jz inside the adoption (after FlowOverlapsOnce patched its entry).
+    PrePlacedRecordGuardRun(game);
+    // HeadCancelNoWait (selftest_headcancel.h): patches one call inside the old engine's composite child loop.
+    HeadCancelNoWaitRun(game);
     // AnimTeardownParallel (lab prototype): dying NPC animation data's interpolators on helper threads (selftest_animpar.h).
     apar::Run(game);
+    // RiderBindGuard (selftest_riderbind.h): two vtable slots and StoreTargets' calls, then fakes (after AnimTeardownParallel,
+    // which checks BSAnimGroupSequence's destructor; no later test reads them).
+    rbind::Run(game);
+    // FurnitureStandUpFix (selftest_standup.h): IsDocked's exec function call, then the decision on fakes.
+    stup::Run(game);
     // CellBufferPacedEvict (lab prototype): spare cell buffer slots, overflow torn down one cell per OT frame (selftest_cellbuf.h); after
     // the ledger's test, which detours the same grid-change entry. RowPreload first: it reads CellBufferPacedEvict's real
     // sites, which the cell buffer test replaces with fakes.
@@ -7028,6 +7238,8 @@ int wmain(int argc, wchar_t** argv)
     }
 
     clr::ClothRegSelfTest(game);  // ClothRegisterLite (lab: also ClothRegisterSkip, ClothRegisterVerify)
+    ers::SelfTest(game);  // EquipRefreshOneSpawn (after ClothRegisterLiteRefresh's install: both on)
+    ufz::SelfTest(game);  // UnfreezeClothSkip (dlgedge)
     cdf::ClothDeferSelfTest(game);  // ClothBuildDefer (its hooks run inside ClothRegisterLite's, as in the game)
 
     // ParallelStaticBodies: InitStaticBodies' call of CreateShapesAndActors (build 19115871), then the split against a fake.
@@ -7243,13 +7455,21 @@ int wmain(int argc, wchar_t** argv)
     ipl::ImpactPreloadSelfTest(game);  // ImpactPreload
     nbl::NpcBodiesSelfTest(game);   // NpcBodiesOneLock
     rts::RtSceneSelfTest(game);     // RtSceneBufferKeep
+    DfAtlasRun(game);               // DfAtlasKeep (selftest_dfatlas.h): discovery only (nothing installed), logic with fakes
+    DfSceneRun(game);               // S-087 keys (selftest_dfscene.h): discovery only (nothing installed), logic with fakes
     pkp::PoolKeepSelfTest(game);    // GpuPoolKeepMB
+    psp::PoolSpareSelfTest(game);   // GpuPoolSpareAhead
+    rfn::ResidencyFreshSelfTest(game);  // ResidencyFreshNew
+    upg::UploadPageSelfTest(game);  // UploadPagePreGrow / UploadPageScreenRelease (after poolspare: its end state reset)
     BufferFloorRun(game);           // InstanceBufferFloor / lab SceneBufferFloorMiB (after GpuSceneKeepCapacity's and RtSceneBufferKeep's tests)
     nsb::NaniteSelfTest(game);      // NaniteInitialRootPages (lab: NaniteStreamProbe / Nanite*MinMB)
     wtr::WaterInfoSelfTest(game);   // WaterCaptureFsrSkip / NoRhiFlush / NoOcclusionWait / FastMeshScan (lab: WaterInfoProbe)
     WaterInfoSkipRun(game);         // WaterInfoSkip (selftest_waterinfo_skip.h): after the install above (its game-thread detour)
     WaterSpreadRun(game);           // WaterInfoSpread (selftest_waterspread.h): discovery only (nothing installed), logic with fakes
     MapSpreadRun(game);             // MapPopupSpread (selftest_mapspread.h): discovery only (nothing installed), logic with fakes
+    LoadKeepRun(game);              // MenuLoadKeep (selftest_loadkeep.h): TryLoad by pattern (nothing installed), logic with fakes
+    WaterRebuildSkipRun(game);      // WaterRebuildSkip (selftest_waterskip.h): discovery only (nothing installed), logic on fakes
+    StringTableMemoRun(game);       // StringTableMemo (selftest_stmemo.h): discovery only (nothing installed), logic with a fake
     GpuShotRun(game);               // GpuMenuShot (selftest_gpushot.h): discovery only, the shader's arithmetic, the shader on this GPU
     ThumbLeftoverRun(game);         // SaveThumbLeftoverFix (selftest_thumbleft.h)
     fpc::FpsCapSelfTest(game);      // FrameRateLimitAtStart
@@ -7658,6 +7878,54 @@ int wmain(int argc, wchar_t** argv)
         Check(os.dispatches == 6 && os.inOrder == 3 && os.noConfigure == 1 && os.noPrepare == 1 && os.outOfOrder == 1 &&
                   os.idJumps == 2 && passed == 16,
               "frame generation order: missing configure, missing prepare, configure after prepare and frameID jumps counted");
+
+        // S-060: the configured frame generation state CmdMemPregrow waits on (frameGenerationEnabled at desc +56). Inside a
+        // configure the presenter may still have presents pending (AMD's configure waits for them): never quiet there.
+        static int inside = -9, quietInside = -9;
+        static uint32_t ret = 0;
+        struct FakeQ {
+            static uint32_t Configure(void**, const void*) { inside = FrameGenQuietTestInConfigure(); quietInside = FrameGenPresentsQuiet(); return ret; }
+        };
+        FrameGenOrderTestReset(reinterpret_cast<void*>(&FakeQ::Configure), reinterpret_cast<void*>(&Fake::Dispatch));
+        FrameGenQuietTestReset(false);
+        Check(FrameGenPresentsQuiet() == (GetModuleHandleW(L"amd_fidelityfx_dx12.dll") ? -1 : 1),
+              "frame generation quiet: configure not watched = quiet without AMD's library, unknown with it");
+        FrameGenQuietTestReset(true);
+        const bool noneSeen = FrameGenPresentsQuiet() == 1;
+        cfg[56] = 1;
+        C(20);
+        const bool onInside = inside == 1 && quietInside == 0;
+        const bool onAfter = FrameGenPresentsQuiet() == 0 && FrameGenQuietTestInConfigure() == 0;
+        cfg[56] = 0;
+        C(21);
+        const bool offInside = inside == 1 && quietInside == 0;
+        const bool offAfter = FrameGenPresentsQuiet() == 1;
+        FrameGenOrderTestCall(true, kvDesc);  // a key-value configure is not a frame generation configure: no change
+        const bool kvNoChange = FrameGenPresentsQuiet() == 1;
+        cfg[56] = 1;
+        C(22);
+        const bool onAgain = FrameGenPresentsQuiet() == 0;
+        cfg[56] = 0;
+        ret = 7;  // an "off" that AMD's configure refused: still on
+        C(23);
+        const bool offFailed = FrameGenPresentsQuiet() == 0;
+        ret = 0;
+        C(24);
+        const bool offOkAgain = FrameGenPresentsQuiet() == 1;
+        ret = 7;
+        C(25);  // a failed "off" while already off: stays off
+        const bool offFailedWasOff = FrameGenPresentsQuiet() == 1;
+        ret = 0;
+        FrameGenQuietTestReset(true);
+        ret = 7;
+        C(26);  // a failed "off" with nothing seen before: not quiet
+        const bool offFailedNone = FrameGenPresentsQuiet() == 0;
+        ret = 0;
+        Check(offFailed && offOkAgain && offFailedWasOff && offFailedNone,
+              "frame generation quiet: an \"off\" is taken only when AMD's configure returned OK");
+        Check(noneSeen && onInside && onAfter && offInside && offAfter && kvNoChange && onAgain,
+              "frame generation quiet: none seen quiet; on = not quiet; inside any configure not quiet; quiet once the \"off\" returned");
+        FrameGenQuietTestReset(false);
     }
 
     // FrameGenCameraInfo: the camera desc linked to the frame generation prepare desc (build 19115871: the pNext store at
@@ -7756,6 +8024,8 @@ int wmain(int argc, wchar_t** argv)
         }
     }
 
+    GpuMemRun();  // before the GPU crash report test (that one removes the WARP device)
+
     // GPU crash report: the device is found among a crashing thread's stack words, and the DRED part of the report is
     // read, on a WARP device with DRED set up as the game does (markers only, with their names).
     {
@@ -7848,6 +8118,20 @@ int wmain(int argc, wchar_t** argv)
         if (warp) warp->Release();
         if (factory) factory->Release();
     }
+
+    printf("\nCrashReport / HangReport: report file, exception handler and late check, owner registry, hang clock, stacks, ring\n");
+    {
+        const int crFails = CrashReportSelfTest(L".");
+        printf("      (%d failure(s); the [crash] self-test lines are in selftest.log)\n", crFails);
+        Check(crFails == 0, "CrashReport / HangReport self-test (handled AV dropped, AV in a slow handler written with its key, UE "
+                            "fatal message, no recursion, exit writer, owners, hang clock, stack set, ring, report file kept / gone)");
+        Check(FindGFrameCounter() != nullptr, "HangReport: the engine's GFrameCounter found (ConditionalCollectGarbage's compare)");
+        char alWhy[400];
+        const int alFails = NpcPacingActorLocationSelfTest(alWhy, sizeof alWhy);
+        printf("      (%s)\n", alWhy);
+        Check(alFails == 0, "NpcCreationPacing ActorLocation: the class check gives the old reads' results, without their faults on non-actors");
+    }
+    GpuMemRun2();  // GpuMemoryRecord part 2: the GPU crash record in the crash file (after CrashReport's own self-test)
 
     printf("\nSharedMemoryGpu: the GPU's memory kind from fake D3D12 answers, and what it turns to the game's way\n");
     {

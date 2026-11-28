@@ -64,6 +64,21 @@
 // vtable slots for RequiresPreEndOfFrameSync and CalcBounds, and EquipBodyPart with its vtable slots and the one direct
 // call. The native table entries are only read when the engine registers the class, so the fix is installed only while
 // the game starts (version.dll); afterwards the ini switches it on and off live.
+//
+// ClothRegisterLiteRefresh (play1125, 2026-11-25; evidence dlgrun): Altar's equipment-slot refresh (exe+0x4830170, rcx =
+// the character, dl = the slot 2/4/7/8) does EquipBodyPart's work for one slot: it asks the character for the slot's item,
+// calls UChildActorComponent::SetChildActorClass(cac, info->Class, nullptr) (the same function EquipBodyPart calls; on a
+// registered component UE 5.3 always destroys the child actor and spawns a new one, no same-class early-out, unchanged up
+// to 5.7), then (review revclothref S3-1, from its disassembly; no attach calls, unlike EquipBodyPart) a check, a flag on the
+// new actor, its leader pose and two Blueprint events: OnAttachedToPhenotype and a second parameterless event after it.
+// So the cloth builds inside one refresh call have the same shape as inside an EquipBodyPart call (registration build,
+// then the Blueprint's rebuilds, all in one game-thread call; a Blueprint event cannot tick a component). With the key on,
+// each direct call of the refresh (exe+0x4833EAE, exe+0x4840738; found only when the key is on, by scanning .text for
+// calls of the function: exactly 2, each after its argument set-up movzx edx,... / mov rcx,r64) runs
+// inside the same window as an EquipBodyPart call: ClothRegisterLite's rules then apply to its builds unchanged (every
+// build lite, the one left at the call's end completed in place = the game's constraints; lab ClothRegisterVerify: 108
+// compared, 0 mismatches). Nothing else in the call changes (the child actor is still destroyed and respawned as in the
+// game). A refresh inside an EquipBodyPart call (or the reverse) nests: each window completes the builds opened in it.
 #include "common.h"
 
 #include <atomic>
@@ -104,6 +119,18 @@ constexpr size_t kOnRegisterUpdateCall = 0x11, kOnRegisterResetCall = 0x19, kOnR
 // ResetConfigProperties; RecreateClothSimulationProxy (call at +0x1C) }
 constexpr char kSetAsset[] = "F6 83 ?? ?? 00 00 01 74 ?? 48 8B CB E8 ?? ?? ?? ?? 48 8B CB E8 ?? ?? ?? ?? 48 8B CB E8";
 constexpr size_t kSetAssetUpdateCall = 0x0C, kSetAssetResetCall = 0x14, kSetAssetRecreateCall = 0x1C;
+// EquipRefreshKeepCloth 2 (review S2-3): ResetConfigProperties (OnRegister's call at +0x19, exe+0x53CD560): if (IsRegistered)
+// { GetSkinnedAsset (exe+0x30627C0: the call at +0x18 of kResetHead, exe+0x53CD593) ...; PropertyCollections.Reset():
+// lea r15,[rbx+PropertyCollections] (+0x920); xor edx,edx; mov rcx,r15; call; mov edx,[rdi+Num of the asset's collections].
+// USkinnedMeshComponent::GetPhysicsAsset (exe+0x3077D30): PhysicsAssetOverride (+0x7A0) ?: the skinned asset's (+0x5E0 / +0x5E8).
+constexpr char kResetHead[] = "F6 81 ?? ?? 00 00 01 48 8B D9 0F 84 ?? ?? ?? ?? 48 89 BC 24 ?? ?? 00 00 E8 ?? ?? ?? ?? 48 8B F8 48 85 C0 0F 84";
+constexpr size_t kResetHeadCall = 0x18;
+constexpr char kResetColl[] = "4C 8D BB ?? ?? 00 00 33 D2 49 8B CF E8 ?? ?? ?? ?? 8B 97 ?? ?? 00 00 85 D2 0F 88";
+constexpr char kGetPhys[] =
+    "40 57 48 83 EC 20 48 8B 81 ?? ?? 00 00 48 8B F9 48 85 C0 75 ?? 48 8B 89 ?? ?? 00 00 48 89 5C 24 30 48 85 C9 75 ?? "
+    "48 39 8F ?? ?? 00 00 74 ?? 48 8B 8F ?? ?? 00 00 48 8B 01 FF 90 ?? ?? 00 00";
+constexpr size_t kGetPhysAssetDisp = 0x18;  // mov rcx,[rcx+SkinnedAsset] (the same field GetSkinnedAsset reads first)
+constexpr char kGetAsset[] = "48 8B 81 ?? ?? 00 00 48 85 C0 75 07 48 8B 81 ?? ?? 00 00 C3";
 // RequiresPreEndOfFrameSync (exe+0x53CD370): !IsSimulationSuspended && !ShouldWaitForParallelSimulationInTickComponent
 constexpr char kRequiresSync[] =
     "40 53 48 83 EC 20 48 8B D9 E8 ?? ?? ?? ?? 84 C0 75 ?? 48 8B CB E8 ?? ?? ?? ?? 84 C0 75 ?? B0 01";
@@ -121,6 +148,14 @@ constexpr ptrdiff_t kSlotRequiresSync = (0x448 - 0x348) / 8, kSlotCalcBounds = (
 constexpr char kEquip[] =
     "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 20 57 41 56 41 57 48 83 EC 70 49 8B E8 4C 8B F1 E8 ?? ?? ?? ?? "
     "48 8B 55 10 45 33 C0 48 8B C8 48 8B D8 E8";
+// ClothRegisterLiteRefresh: Altar's equipment-slot refresh (exe+0x4830170) from its start to its call of
+// SetChildActorClass at +0x6C (the four slot loads' displacements wildcarded); that call's target must be EquipBodyPart's.
+constexpr char kRefresh[] =
+    "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 60 0F B6 F2 48 8B D9 44 8B C6 41 83 E8 02 74 ?? 41 83 E8 02 74 ?? "
+    "41 83 E8 03 74 ?? 41 83 F8 01 74 ?? 33 FF EB ?? 48 8B B9 ?? ?? 00 00 EB ?? 48 8B B9 ?? ?? 00 00 EB ?? "
+    "48 8B B9 ?? ?? 00 00 EB ?? 48 8B B9 ?? ?? 00 00 40 0F B6 D6 E8 ?? ?? ?? ?? 45 33 C0 48 8B CF 48 8B 90 ?? ?? 00 00 E8";
+constexpr size_t kRefreshSetClassCall = 0x6C;
+constexpr int kMaxRefreshCalls = 4;
 // A subclass's override (exe+0x4823DC0) that calls EquipBodyPart directly (call at +0x1D), then sets visibility.
 constexpr char kEquipCaller[] = "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 20 49 8B F8 0F B6 DA 48 8B E9 E8";
 constexpr size_t kEquipCallerCall = 0x1D;
@@ -186,6 +221,7 @@ using ExecFn = void (*)(uint8_t* context, void* stack, void* result);
 using BoolFn = bool (*)(uint8_t* component);
 using CalcBoundsFn = void* (*)(uint8_t* component, void* out, const void* localToWorld);
 using EquipFn = void (*)(void* character, void* a2, void* a3, void* a4);
+using RefreshFn = uint64_t (*)(void* character, void* slot, void* a3, void* a4);  // void in the game; rax passed through
 using AddRulesFn = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 using CcEnableFn = void (*)(uint8_t* constraints, bool enable);
 using CcUpdateFn = void (*)(uint8_t* constraints, const void* props, const void* weightMaps, float meshScale, float maxDistancesScale);
@@ -205,11 +241,17 @@ struct Sites {
     void** equipSlots[4] = {};
     int numEquipSlots = 0;
     uint8_t* equipCall = nullptr;  // the direct call, or nullptr
+    uint8_t* refresh = nullptr;    // ClothRegisterLiteRefresh: the equipment-slot refresh, or nullptr (unavailable)
+    uint8_t* refreshCalls[kMaxRefreshCalls] = {};  // its direct calls
+    int numRefreshCalls = 0;
     uint8_t* addRulesCall = nullptr;  // ClothRegisterLite: FLODData::Add's call of AddRules, or nullptr (lite unavailable)
     uint8_t* ccEnable = nullptr;      // identical completion: FClothConstraints::Enable(bool)
     uint8_t* ccUpdateCall = nullptr;  // FLODData::Update's call of FClothConstraints::Update, or nullptr (lite unavailable)
     void* clothVtable = nullptr;   // a UChaosClothComponent's vtable pointer
     uint32_t proxyOff = 0, registeredOff = 0;
+    uint8_t* getAsset = nullptr;   // EquipRefreshKeepCloth 2's record: GetSkinnedAsset, GetPhysicsAsset, PropertyCollections
+    uint8_t* getPhys = nullptr;    // (nullptr / 0 = mode 2 leaves nothing out)
+    uint32_t collOff = 0;
 } g;
 
 RecreateFn g_recreate = nullptr;
@@ -219,6 +261,9 @@ RecreateFn g_onUnregister = nullptr;
 CalcBoundsFn g_calcBounds = nullptr;
 void* g_calcBoundsGame = nullptr;   // the game's CalcBounds as found at installation (for ClothBuildDefer; test set-ups leave it)
 EquipFn g_equip = nullptr;
+RefreshFn g_refresh = nullptr;
+bool g_refreshInstalled = false;
+std::atomic<bool> g_refreshOn{false};  // ClothRegisterLiteRefresh
 AddRulesFn g_addRules = nullptr;
 CcEnableFn g_ccEnable = nullptr;
 CcUpdateFn g_ccUpdate = nullptr;
@@ -264,6 +309,7 @@ struct Pending {
     char seq[12];     // lite mode: the builds' paths in order: R registration, E Blueprint Recreate, S SetSkinnedAsset
     void* lastProxy;  // lite mode: the proxy object the latest build left in the component
     int rec = -1;     // lite mode: the latest lite build's record (g_recs), or -1
+    bool keepOpen = false;  // EquipRefreshKeepCloth 1: opened by a Blueprint rebuild of a component with no entry (not a registration)
 };
 constexpr int kMaxPending = 64;
 Pending g_pending[kMaxPending];
@@ -278,6 +324,8 @@ std::atomic<uint64_t> s_registers{0}, s_skipped{0}, s_learning{0}, s_kept{0}, s_
 // lite mode
 std::atomic<uint64_t> s_liteRegisters{0}, s_liteBuilds{0}, s_liteLearning{0}, s_liteKept{0}, s_liteReplaced{0},
     s_liteFallbacks{0}, s_rulesLeftOut{0}, s_liteUs{0}, s_liteSavedUs{0};
+std::atomic<uint64_t> s_refreshes{0};  // ClothRegisterLiteRefresh: refresh calls run inside the window
+#define CLOTHREG_COUNT_BUILD() ((void)0)
 
 uint64_t NowUs()
 {
@@ -680,6 +728,166 @@ void OnUnregisterHook(uint8_t* comp)
     g_onUnregister(comp);
 }
 
+// ---- EquipRefreshKeepCloth (worker dlgedge, 2026-11-26; S-050) ----
+// With EquipRefreshKeepActor the player's clothing actor stays at a view switch, but a robe's own Blueprint event
+// (OnAttachedToPhenotype, run by the refresh on the kept actor) still calls RecreateClothSimulationProxy, 3 times per edge on the
+// bench robe: three full builds (3.6-5.0 ms) of a component that was not registered in the window, so ClothRegisterLite's
+// rules (which start at a registration) did not apply (findings clothrun1126).
+//  1 = identical: a Blueprint rebuild inside a dressing / refresh window of a component that has no entry there opens one
+//      (as a registration does), so every build of it in the window but the last is lite and the last is completed in place
+//      at the window's end = the game's proxy, bit for bit (ClothRegisterLite mode 3's own rules and completion).
+//  2 = optional tweak (user decision 2026-11-25: the kept clothing's cloth may continue instead of restarting): the Blueprint
+//      rebuild of a cloth component of an actor kept by the current view switch is left out when the component is registered,
+//      holds a proxy, and was not built in this view switch by anything else (registration, a new skinned asset): the proxy
+//      built from the same component and asset keeps simulating. The exec thunk's own P_FINISH (Stack.Code += Stack.Code !=
+//      nullptr) is done here. Anything else: mode 1's rules (if a window is open) or the game's call.
+std::atomic<int> g_keepCloth{0};
+std::atomic<uint64_t> s_keepClothSkips{0}, s_keepClothLiteOpens{0}, s_keepClothEntries{0}, s_keepClothEntryBuilds{0};
+constexpr int kMaxKeepBuilt = 32;
+const uint8_t* g_keepBuilt[kMaxKeepBuilt];  // components built in the current view switch outside a Blueprint rebuild (game thread)
+int g_numKeepBuilt = 0;
+uint32_t g_keepBuiltSerial = 0;
+bool g_keepBuiltFull = false;
+
+void KeepClothSync()
+{
+    const uint32_t serial = EquipRefreshKeepSwitchSerial();
+    if (serial != g_keepBuiltSerial) { g_keepBuiltSerial = serial; g_numKeepBuilt = 0; g_keepBuiltFull = false; }
+}
+
+// a registration or SetSkinnedAsset build inside a view switch (game thread): mode 2 then leaves that component's rebuilds alone
+void KeepClothNoteBuild(const uint8_t* comp)
+{
+    if (g_keepCloth.load(std::memory_order_relaxed) != 2) return;  // noted under the current view switch's serial (reset at the next)
+    KeepClothSync();
+    for (int i = 0; i < g_numKeepBuilt; ++i)
+        if (g_keepBuilt[i] == comp) return;
+    if (g_numKeepBuilt < kMaxKeepBuilt) g_keepBuilt[g_numKeepBuilt++] = comp;
+    else g_keepBuiltFull = true;  // full: every component counts as built in this view switch (never skipped)
+}
+
+bool KeepClothBuiltHere(const uint8_t* comp)
+{
+    KeepClothSync();
+    if (g_keepBuiltFull) return true;
+    for (int i = 0; i < g_numKeepBuilt; ++i)
+        if (g_keepBuilt[i] == comp) return true;
+    return false;
+}
+
+const void* OuterOf(const uint8_t* obj)
+{
+    const void* o = nullptr;
+    __try { memcpy(&o, obj + 0x20, sizeof o); } __except (EXCEPTION_EXECUTE_HANDLER) { o = nullptr; }  // UObjectBase::OuterPrivate
+    return o;
+}
+
+// Mode 2's record of what each proxy was built from (review S2-3). UE 5.3 FClothSimulationProxy's constructor
+// (ClothSimulationProxy.cpp) takes the cloth asset (GetClothAsset = the skinned asset), the colliders of GetPhysicsAsset()
+// (PhysicsAssetOverride, else the asset's) and copies of GetPropertyCollections() (UChaosClothComponent::PropertyCollections,
+// replaced by ResetConfigProperties with new shared collections). RecreateClothSimulationProxy has exactly three callers in the
+// exe (OnRegister, SetSkinnedAssetAndUpdate, the exec thunk), all hooked here, so after every build the record holds the proxy
+// (and its reference controller) with those inputs. Mode 2 leaves a rebuild out only when the component's current proxy is the
+// recorded one and all three inputs are unchanged: a rebuild would then make a proxy from the same asset, colliders and
+// property collections. A collection pointer can only come back equal by allocator reuse after ResetConfigProperties, whose new
+// collections are copies of the same (unchanged) asset's collections: equal contents. More than 4 collections: never left out.
+using GetObjFn = void* (*)(const uint8_t* comp);
+GetObjFn g_getAsset = nullptr, g_getPhys = nullptr;  // USkinnedMeshComponent::GetSkinnedAsset / GetPhysicsAsset
+uint32_t g_collOff = 0;                               // UChaosClothComponent::PropertyCollections (TArray of TSharedPtr, 16 bytes)
+struct KeepSnap {
+    const uint8_t* comp;
+    void *proxy, *ctrl, *asset, *phys, *collData;
+    int32_t collNum;
+    void* coll[4];
+};
+constexpr int kMaxSnaps = 256;
+KeepSnap g_snaps[kMaxSnaps];
+int g_numSnaps = 0, g_nextSnap = 0;
+SRWLOCK g_snapLock = SRWLOCK_INIT;
+std::atomic<uint64_t> s_keepClothChanged{0};
+
+bool KeepClothInputs(uint8_t* comp, KeepSnap* out)
+{
+    if (!g_getAsset || !g_getPhys || !g_collOff) return false;
+    __try {
+        out->comp = comp;
+        out->proxy = ProxyOf(comp);
+        out->ctrl = CtrlOf(comp);
+        out->asset = g_getAsset(comp);
+        out->phys = g_getPhys(comp);
+        out->collData = *reinterpret_cast<void**>(comp + g_collOff);
+        out->collNum = *reinterpret_cast<int32_t*>(comp + g_collOff + 8);
+        memset(out->coll, 0, sizeof out->coll);
+        if (out->collNum < 0 || out->collNum > 4) return false;
+        for (int32_t i = 0; i < out->collNum; ++i) out->coll[i] = static_cast<void**>(out->collData)[2 * i];
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    return true;
+}
+
+// after every proxy build through the three hooks (mode 2 only; a live switch to 2 starts with no records = nothing left out)
+void KeepClothRecord(uint8_t* comp)
+{
+    if (g_keepCloth.load(std::memory_order_relaxed) != 2) return;
+    KeepSnap now{};
+    const bool ok = KeepClothInputs(comp, &now) && now.proxy;
+    AcquireSRWLockExclusive(&g_snapLock);
+    int at = -1;
+    for (int i = 0; i < g_numSnaps && at < 0; ++i)
+        if (g_snaps[i].comp == comp) at = i;
+    if (!ok) {
+        if (at >= 0) g_snaps[at].comp = nullptr;  // no usable record: never left out
+    } else {
+        if (at < 0) {
+            if (g_numSnaps < kMaxSnaps) at = g_numSnaps++;
+            else { at = g_nextSnap; g_nextSnap = (g_nextSnap + 1) % kMaxSnaps; }
+        }
+        g_snaps[at] = now;
+    }
+    ReleaseSRWLockExclusive(&g_snapLock);
+}
+
+// the current proxy is the recorded one and was built from the asset, colliders and collections the component holds now
+bool KeepClothUnchanged(uint8_t* comp)
+{
+    KeepSnap now{};
+    if (!KeepClothInputs(comp, &now)) return false;
+    bool same = false;
+    AcquireSRWLockShared(&g_snapLock);
+    for (int i = 0; i < g_numSnaps; ++i)
+        if (g_snaps[i].comp == comp) {
+            const KeepSnap& r = g_snaps[i];
+            same = r.proxy == now.proxy && r.ctrl == now.ctrl && r.asset == now.asset && r.phys == now.phys &&
+                   r.collData == now.collData && r.collNum == now.collNum && memcmp(r.coll, now.coll, sizeof r.coll) == 0;
+            break;
+        }
+    ReleaseSRWLockShared(&g_snapLock);
+    return same;
+}
+
+// mode 2's decision (separate for the self-test)
+bool KeepClothContinues(uint8_t* comp)
+{
+    if (*reinterpret_cast<void**>(comp) != g.clothVtable || !Registered(comp)) return false;
+    void* const proxy = ProxyOf(comp);
+    if (!proxy || proxy == g_placeholder) return false;
+    if (!EquipRefreshKeepIsKeptActor(OuterOf(comp))) return false;
+    if (g_numPending && GetCurrentThreadId() == g_equipThread && Open(comp)) return false;  // registered / tracked in this window
+    if (KeepClothBuiltHere(comp)) return false;
+    if (!KeepClothUnchanged(comp)) {  // no record, another proxy, or a changed asset / physics asset / property collection
+        s_keepClothChanged.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    return true;
+}
+
+void Pending_Init(Pending& p, uint8_t* comp, int cls)
+{
+    p = Pending{comp, cls, false, false, false, false};
+    p.lite = true;
+}
+
 // Lite mode's part of OnRegister's call (game thread, inside EquipBodyPart, a cloth component): the call's first build.
 void LiteRegister(uint8_t* comp)
 {
@@ -716,8 +924,10 @@ Pending* LiteOpen(const uint8_t* comp)
 }
 
 // OnRegister's call to RecreateClothSimulationProxy.
-void OnRegisterRecreateHook(uint8_t* comp)
+void OnRegisterRecreateBody(uint8_t* comp)
 {
+    CLOTHREG_COUNT_BUILD();
+    KeepClothNoteBuild(comp);
     const bool lite = g_lite.load(std::memory_order_relaxed);
     if ((!g_on.load(std::memory_order_relaxed) && !lite) || g_depth == 0 || GetCurrentThreadId() != g_equipThread ||
         *reinterpret_cast<void**>(comp) != g.clothVtable || g_numPending == kMaxPending) {
@@ -749,6 +959,12 @@ void OnRegisterRecreateHook(uint8_t* comp)
     }
 }
 
+void OnRegisterRecreateHook(uint8_t* comp)
+{
+    OnRegisterRecreateBody(comp);
+    KeepClothRecord(comp);  // EquipRefreshKeepCloth 2: what this proxy was built from
+}
+
 void NoteRebuild(uint8_t* comp)
 {
     if (g_numPending == 0 || GetCurrentThreadId() != g_equipThread) return;
@@ -764,27 +980,55 @@ void TrackBounds(uint8_t* comp);
 // SetSkinnedAssetAndUpdate's call to RecreateClothSimulationProxy (a rebuild as well).
 void SetAssetRecreateHook(uint8_t* comp)
 {
+    CLOTHREG_COUNT_BUILD();
+    KeepClothNoteBuild(comp);
     if (Pending* p = LiteOpen(comp)) {
         p->rebuilt = true;
         LiteBuild(*p, [&] { g_recreate(comp); }, 'S');
+        KeepClothRecord(comp);
         return;
     }
     if (g_lite.load(std::memory_order_relaxed)) TrackRebuild(comp);
     NoteRebuild(comp);
     g_recreate(comp);
+    KeepClothRecord(comp);
 }
 
 // Blueprint: RecreateClothSimulationProxy (the robe's (b)).
 void ExecRecreateHook(uint8_t* context, void* stack, void* result)
 {
+    CLOTHREG_COUNT_BUILD();
     if (Pending* p = LiteOpen(context)) {
         p->rebuilt = true;
         LiteBuild(*p, [&] { g_execRecreate(context, stack, result); }, 'E');
+        KeepClothRecord(context);
         return;
+    }
+    if (const int kc = g_keepCloth.load(std::memory_order_relaxed)) {
+        if (kc == 2 && KeepClothContinues(context)) {
+            uint8_t*& code = *reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(stack) + 0x20);  // FFrame::Code: P_FINISH
+            code += code != nullptr;
+            s_keepClothSkips.fetch_add(1, std::memory_order_relaxed);
+            return;  // the kept cloth keeps simulating
+        }
+        // mode 1 (and mode 2's other cases): a rebuild inside an open window of a component with no entry opens one, lite
+        if (g_lite.load(std::memory_order_relaxed) && g_liteMode.load(std::memory_order_relaxed) == 3 && g_depth > 0 &&
+            GetCurrentThreadId() == g_equipThread && g_numPending < kMaxPending && !Open(context) &&
+            *reinterpret_cast<void**>(context) == g.clothVtable && Registered(context)) {
+            Pending_Init(g_pending[g_numPending], context, ClassIndex(context));
+            Pending& e = g_pending[g_numPending++];
+            e.rebuilt = true;
+            e.keepOpen = true;
+            s_keepClothLiteOpens.fetch_add(1, std::memory_order_relaxed);
+            LiteBuild(e, [&] { g_execRecreate(context, stack, result); }, 'E');
+            KeepClothRecord(context);
+            return;
+        }
     }
     if (g_lite.load(std::memory_order_relaxed)) TrackRebuild(context);
     NoteRebuild(context);
     g_execRecreate(context, stack, result);
+    KeepClothRecord(context);
 }
 
 // The pointer-testing readers: a placeholder stands in for the left-out proxy during the call.
@@ -1066,6 +1310,19 @@ void CloseCalls(int from)
             }
             DropRec(p, false);
             if (Registered(p.comp)) TrackAdd(p.comp, p.cls);
+            if (p.keepOpen) {
+                // EquipRefreshKeepCloth 1 (review S2-4): the gain is (builds - 1) rule sets per entry; one build = no gain. Not fed
+                // to the class learning (S3-8: a one-rebuild window would mark the class "full").
+                s_keepClothEntries.fetch_add(1, std::memory_order_relaxed);
+                s_keepClothEntryBuilds.fetch_add(static_cast<uint64_t>(p.builds), std::memory_order_relaxed);
+                static int s_seqLogs = 0;
+                if (s_seqLogs < 12) {
+                    ++s_seqLogs;
+                    Log("[clothreg] EquipRefreshKeepCloth 1: a Blueprint-opened entry closed after %d build(s) (%s): %d rule set(s) left out",
+                        p.builds, p.seq, p.builds > 0 ? p.builds - 1 : 0);
+                }
+                continue;
+            }
             if (c && c->lite == Verdict::kLearning) {
                 // Two learning calls, both with >= 2 builds; the fewer of the two counts is used.
                 if (c->liteObs < 2) memcpy(c->seqs[c->liteObs], p.seq, sizeof p.seq);
@@ -1111,6 +1368,22 @@ void EquipHook(void* character, void* a2, void* a3, void* a4)
     g_equip(character, a2, a3, a4);
     --g_depth;
     CloseCalls(mark);
+}
+
+// ClothRegisterLiteRefresh: a direct call of the equipment-slot refresh, run inside the same window as EquipHook's.
+uint64_t RefreshHook(void* character, void* slot, void* a3, void* a4)
+{
+    const DWORD tid = GetCurrentThreadId();
+    if (!g_refreshOn.load(std::memory_order_relaxed) || (g_depth > 0 && tid != g_equipThread))
+        return g_refresh(character, slot, a3, a4);
+    g_equipThread = tid;
+    const int mark = g_numPending;
+    ++g_depth;
+    const uint64_t r = g_refresh(character, slot, a3, a4);
+    --g_depth;
+    CloseCalls(mark);
+    if (g_lite.load(std::memory_order_relaxed)) s_refreshes.fetch_add(1, std::memory_order_relaxed);  // review S3-3
+    return r;
 }
 
 // ---- finding the sites ----
@@ -1199,6 +1472,20 @@ bool Find()
             s.setAssetCall = m + kSetAssetRecreateCall;
         }
     if (!s.setAssetCall) return Fail("SetSkinnedAssetAndUpdate's rebuild not found");
+    {   // EquipRefreshKeepCloth 2's record (optional: not found = mode 2 leaves nothing out, logged at install)
+        uint8_t* const reset = RipTarget(onRegister + kOnRegisterResetCall, 1, 5);
+        const uint8_t* const head = game.text.Contains(reset) ? Within(reset, 0x40, ParsePattern(kResetHead)) : nullptr;
+        const uint8_t* const coll = head ? Within(reset, 0x140, ParsePattern(kResetColl)) : nullptr;
+        uint8_t* const asset = head ? RipTarget(const_cast<uint8_t*>(head) + kResetHeadCall, 1, 5) : nullptr;
+        const auto phys = FindAll(game.text, ParsePattern(kGetPhys));
+        if (coll && asset && game.text.Contains(asset) && MatchesAt(asset, ParsePattern(kGetAsset)) && phys.size() == 1 &&
+            Read<uint32_t>(phys[0], kGetPhysAssetDisp) == Read<uint32_t>(asset, 3)) {
+            s.getAsset = asset;
+            s.getPhys = phys[0];
+            s.collOff = Read<uint32_t>(coll, 3);
+            if (s.collOff < 0x400 || s.collOff > 0x2000) s.getAsset = s.getPhys = nullptr, s.collOff = 0;
+        }
+    }
 
     // The component's vtable: the only slot holding OnRegister; then RequiresPreEndOfFrameSync and CalcBounds.
     const std::vector<void**> regSlots = SlotsHolding(game, onRegister);
@@ -1307,6 +1594,14 @@ bool Find()
         rva(g.recreate), g.registeredOff, g.proxyOff, rva(g.onRegisterCall), rva(g.setAssetCall), rva(g.execRecreateSlot),
         rva(g.execSuspendedSlot), rva(g.execEnabledSlot), rva(g.clothVtable), rva(g.vtable), rva(*g.requiresSyncSlot),
         rva(*g.calcBoundsSlot), rva(g.equip), g.numEquipSlots, g.equipCall ? "exe+" : "none ", g.equipCall ? rva(g.equipCall) : 0);
+    if (g.getAsset)
+        Log("[clothreg] keep-cloth record: GetSkinnedAsset exe+0x%X, GetPhysicsAsset exe+0x%X, PropertyCollections +0x%X", rva(g.getAsset),
+            rva(g.getPhys), g.collOff);
+    else
+        Log("[clothreg] keep-cloth record sites not found: EquipRefreshKeepCloth 2 leaves no rebuild out (acts as 1)");
+    g_getAsset = reinterpret_cast<GetObjFn>(g.getAsset);
+    g_getPhys = reinterpret_cast<GetObjFn>(g.getPhys);
+    g_collOff = g.collOff;
     if (g.addRulesCall)
         Log("[clothreg] lite build: AddRules call exe+0x%X -> exe+0x%X; completion: Enable exe+0x%X, Update call exe+0x%X -> exe+0x%X",
             rva(g.addRulesCall), rva(RipTarget(g.addRulesCall, 1, 5)), rva(g.ccEnable), rva(g.ccUpdateCall),
@@ -1331,9 +1626,80 @@ bool RedirectCall(uint8_t* call, void* hook)
     return WriteCode(call + 1, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&rel32), 4));
 }
 
+// ClothRegisterLiteRefresh (review revclothref S2-3): the instruction that ends right before a call of the refresh must be
+// mov rcx,r64 (48/49 8B C8+r), and the one before it a movzx edx,byte (optional REX without R, 0F B6, ModRM reg = edx, any
+// register or memory operand, its length decoded). A stray E8 byte inside other code fails this.
+bool RefreshArgsBefore(const uint8_t* call)
+{
+    const uint8_t* const mov = call - 3;
+    if (!((mov[0] == 0x48 || mov[0] == 0x49) && mov[1] == 0x8B && (mov[2] & 0xF8) == 0xC8)) return false;
+    for (int len = 3; len <= 9; ++len) {
+        const uint8_t* q = mov - len;
+        if (*q >= 0x40 && *q <= 0x4F) {
+            if (*q & 0x04) continue;  // REX.R: not edx
+            ++q;
+        }
+        if (q[0] != 0x0F || q[1] != 0xB6) continue;
+        const uint8_t modrm = q[2], mod = modrm >> 6, rm = modrm & 7;
+        if (((modrm >> 3) & 7) != 2) continue;
+        const uint8_t* e = q + 3;
+        if (mod != 3 && rm == 4) {  // SIB
+            const uint8_t sib = *e++;
+            if (mod == 0 && (sib & 7) == 5) e += 4;
+        }
+        if (mod == 0 && rm == 5) e += 4;  // rip-relative
+        else if (mod == 1) e += 1;
+        else if (mod == 2) e += 4;
+        if (e == mov) return true;
+    }
+    return false;
+}
+
+// ClothRegisterLiteRefresh (review S2-2: searched only when the key is on): the refresh by its pattern (once), whose
+// SetChildActorClass call must reach EquipBodyPart's, and its direct calls (every E8 in .text whose target is its first
+// byte): exactly 2, each with RefreshArgsBefore. Anything else: unavailable (the game's path stays).
+bool FindRefreshSites()
+{
+    if (g.refresh) return true;
+    if (!g.equip) return false;
+    const GameModule& game = Game();
+    const std::vector<uint8_t*> hits = FindAll(game.text, ParsePattern(kRefresh));
+    uint8_t* const fn = hits.size() == 1 ? hits[0] : nullptr;
+    const size_t equipCallAt = ParsePattern(kEquip).size() - 1;
+    // the call may already go to EquipRefreshOneSpawn's hook: then its original target is compared (one source of truth)
+    uint8_t* setClass = fn ? RipTarget(fn + kRefreshSetClassCall, 1, 5) : nullptr;
+    if (fn && !game.text.Contains(setClass) && EquipRefreshOneSpawnSetClass()) setClass = EquipRefreshOneSpawnSetClass();
+    if (!fn || setClass != RipTarget(g.equip + equipCallAt, 1, 5)) {
+        Log("[clothreg] the equipment-slot refresh not found (%zu matches): ClothRegisterLiteRefresh off", hits.size());
+        return false;
+    }
+    uint8_t* calls[kMaxRefreshCalls] = {};
+    int n = 0, badArgs = 0;
+    for (uint8_t* p = game.text.begin; p + 5 <= game.text.end;) {
+        p = static_cast<uint8_t*>(memchr(p, 0xE8, static_cast<size_t>(game.text.end - p) - 4));
+        if (!p) break;
+        if (RipTarget(p, 1, 5) == fn) {
+            if (p - 12 < game.text.begin || !RefreshArgsBefore(p)) ++badArgs;
+            else if (n < kMaxRefreshCalls) calls[n++] = p;
+            else ++n;
+        }
+        ++p;
+    }
+    if (n != 2 || badArgs) {
+        Log("[clothreg] the equipment-slot refresh's calls not as expected (%d with their argument set-up, %d without; 2 wanted): "
+            "ClothRegisterLiteRefresh off", n, badArgs);
+        return false;
+    }
+    for (int i = 0; i < n; ++i) g.refreshCalls[i] = calls[i];
+    g.numRefreshCalls = n;
+    g.refresh = fn;
+    return true;
+}
+
 }  // namespace
 
 bool FindClothRegisterSkip() { return g.recreate != nullptr || Find(); }
+
 
 bool InstallClothRegisterSkip(bool beforeGameCode)
 {
@@ -1402,6 +1768,51 @@ void SetClothRegisterLite(int mode)
 
 bool ClothRegisterLiteAvailable() { return g.addRulesCall != nullptr; }
 
+void SetEquipRefreshKeepCloth(int mode)
+{
+    const int m = mode == 1 || mode == 2 ? mode : 0;
+    if (g_keepCloth.exchange(m) == m) return;
+    if (m && !g_installed) {
+        Log("[clothreg] EquipRefreshKeepCloth %d has no effect: ClothRegisterLite not installed (its hooks carry it)", m);
+        return;
+    }
+    Log("[clothreg] EquipRefreshKeepCloth %d: %s", m,
+        m == 0   ? "Blueprint cloth rebuilds as in the game"
+        : m == 1 ? "a Blueprint cloth rebuild in a dressing / refresh window opens a lite entry (identical completion at the window's end)"
+                 : "the kept clothing's Blueprint cloth rebuilds left out (its cloth continues); other rebuilds as mode 1");
+}
+
+// ClothRegisterLiteRefresh: the refresh's direct calls redirected to RefreshHook (after InstallClothRegisterSkip).
+bool InstallClothRegisterRefresh()
+{
+    if (g_refreshInstalled) return true;
+    if (!g_installed) {
+        Log("[clothreg] ClothRegisterLiteRefresh off (ClothRegisterLite not installed)");
+        return false;
+    }
+    if (!FindRefreshSites()) return false;  // logged
+    g_refresh = reinterpret_cast<RefreshFn>(g.refresh);
+    int done = 0;
+    for (int i = 0; i < g.numRefreshCalls; ++i)
+        if (RedirectCall(g.refreshCalls[i], reinterpret_cast<void*>(&RefreshHook))) ++done;
+    if (done == 0) {  // review S3-2: ClothRegisterLite itself stays on
+        Log("[clothreg] ClothRegisterLiteRefresh off: could not redirect the refresh's calls");
+        return false;
+    }
+    g_refreshInstalled = true;
+    Log("[clothreg] equipment-slot refresh exe+0x%X: %d of %d calls run in the dressing window when ClothRegisterLiteRefresh is on",
+        static_cast<unsigned>(g.refresh - Game().base), done, g.numRefreshCalls);
+    return true;
+}
+
+void SetClothRegisterRefresh(int mode)
+{
+    const bool on = mode != 0;
+    if (!g_refreshInstalled || g_refreshOn.exchange(on) == on) return;
+    Log("[clothreg] %s", on ? "equipment-slot refreshes: their cloth builds made as in a dressing call (ClothRegisterLite's rules)"
+                            : "equipment-slot refreshes: cloth built as in the game");
+}
+
 // For ClothBuildDefer (npcs/cloth_defer.cpp): the component's OnUnregister vtable slot while it holds this file's hook
 // (ClothBuildDefer's hook then goes in front of it), else nullptr.
 void** ClothRegisterUnregisterSlot()
@@ -1411,6 +1822,17 @@ void** ClothRegisterUnregisterSlot()
 
 void LogClothRegisterStats()
 {
+    {
+        static uint64_t lastK[5] = {};
+        const uint64_t nowK[5] = {s_keepClothSkips.load(), s_keepClothLiteOpens.load(), s_keepClothEntries.load(),
+                                  s_keepClothEntryBuilds.load(), s_keepClothChanged.load()};
+        if (memcmp(nowK, lastK, sizeof nowK) != 0)
+            Log("[clothreg] EquipRefreshKeepCloth since last report: %llu kept-cloth rebuilds left out (cloth continues), %llu not left "
+                "out (no record / another proxy / asset, physics asset or property collections changed), %llu Blueprint rebuilds opened "
+                "lite in a window (%llu entries closed with %llu builds)",
+                nowK[0] - lastK[0], nowK[4] - lastK[4], nowK[1] - lastK[1], nowK[2] - lastK[2], nowK[3] - lastK[3]);
+        memcpy(lastK, nowK, sizeof nowK);
+    }
     {
         static uint64_t lastL[9] = {};
         const uint64_t nowL[9] = {s_liteRegisters.load(), s_liteBuilds.load(), s_liteLearning.load(), s_liteKept.load(),
@@ -1444,6 +1866,12 @@ void LogClothRegisterStats()
                 d[0], d[1], d[1] ? d[7] / 1000.0 / d[1] : 0.0, d[6], d[4], d[5], d[8] / 1000.0, d[2], d[3],
                 fullN ? fullUs / 1000.0 / fullN : 0.0, lite, full, learn);
         }
+    }
+    {
+        static uint64_t lastR = 0;
+        const uint64_t nowR = s_refreshes.load(), dR = nowR - lastR;
+        lastR = nowR;
+        if (dR) Log("[clothreg] %llu equipment-slot refreshes run in the dressing window since last report", static_cast<unsigned long long>(dR));
     }
     static uint64_t last[11] = {};
     const uint64_t now[11] = {s_registers.load(), s_skipped.load(), s_learning.load(), s_kept.load(), s_rebuiltAfterSkip.load(),
@@ -1479,6 +1907,13 @@ bool ClothRegisterInfo(ClothRegisterInfoOut* out)
     out->numEquipSlots = g.numEquipSlots;
     for (int i = 0; i < 4; ++i) out->equipSlots[i] = g.equipSlots[i];
     out->equipCall = g.equipCall;
+    out->refresh = g.refresh;
+    out->numRefreshCalls = g.numRefreshCalls;
+    for (int i = 0; i < 4; ++i) out->refreshCalls[i] = i < g.numRefreshCalls ? g.refreshCalls[i] : nullptr;
+    out->refreshHook = reinterpret_cast<void*>(&RefreshHook);
+    out->getAsset = g.getAsset;
+    out->getPhys = g.getPhys;
+    out->collOff = g.collOff;
     out->proxyOff = g.proxyOff;
     out->registeredOff = g.registeredOff;
     out->onRegisterHook = reinterpret_cast<void*>(&OnRegisterRecreateHook);
@@ -1544,6 +1979,20 @@ void ClothRegisterTestSetup(void* recreate, void* execRecreate, void* execSuspen
     g_numClasses = 0;
     g_numPending = 0;
     g_depth = 0;
+}
+
+void ClothKeepRecordTestSetup(void* getAsset, void* getPhys, uint32_t collOff)
+{
+    g_getAsset = reinterpret_cast<GetObjFn>(getAsset);
+    g_getPhys = reinterpret_cast<GetObjFn>(getPhys);
+    g_collOff = collOff;
+    g_numSnaps = g_nextSnap = 0;
+}
+
+void ClothRegisterRefreshTestSetup(void* refresh)
+{
+    g_refresh = reinterpret_cast<RefreshFn>(refresh);
+    g_refreshInstalled = true;
 }
 
 void ClothRegisterLiteTestSetup(void* addRules, void* ccEnable, void* ccUpdate)

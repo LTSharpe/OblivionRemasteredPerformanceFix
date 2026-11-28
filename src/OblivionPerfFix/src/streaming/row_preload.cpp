@@ -214,7 +214,7 @@ void Step(uint8_t* tes)
             if (!g.s.isInterior(cell) && g.s.inExtBuffer(*g.s.tesSlot, reinterpret_cast<uint64_t>(cell))) {
                 c_already.fetch_add(1, std::memory_order_relaxed);
                 if (!g.testFakes) CreateAheadCell(cell);  // CreateAhead: its character references (no-op unless on)
-                if (!g.testFakes) CellObjectPreloadCell(cell);  // CellObjectPreload: its objects' files (no-op unless on)
+                if (!g.testFakes) CellObjectPreloadCell(cell, r.x, r.y);  // CellObjectPreload: its objects' files (no-op unless on)
                 continue;
             }
         }
@@ -242,7 +242,7 @@ void Step(uint8_t* tes)
         if (us > 4000) c_over4.fetch_add(1, std::memory_order_relaxed);
         if (g.nPre < kMaxPre) g.pre[g.nPre++] = cell;
         if (!g.testFakes) CreateAheadCell(cell);  // CreateAhead: its character references (no-op unless on)
-        if (!g.testFakes) CellObjectPreloadCell(cell);  // CellObjectPreload: its objects' files (no-op unless on)
+        if (!g.testFakes) CellObjectPreloadCell(cell, r.x, r.y);  // CellObjectPreload: its objects' files (no-op unless on)
         return;
     }
 }
@@ -255,6 +255,18 @@ void RowPreloadGridCall(uint8_t* tes, bool shifted)
 {
     if (!g.installed || !shifted || !tes) return;
     c_shifts.fetch_add(1, std::memory_order_relaxed);
+    {  // CellObjectPreloadRelook: the stored base forms of the cells walked ahead that the shift attached are queued again (no-op
+       // unless CellObjectPreload is installed and both keys are on; not skipped under the test fakes: the self-test checks this read)
+        uint8_t* const* buf = nullptr;
+        uint32_t n = 0;
+        __try {
+            buf = *reinterpret_cast<uint8_t* const* const*>(tes + 0x60);
+            n = *g.s.grids * *g.s.grids;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            buf = nullptr;
+        }
+        CellObjectPreloadShift(buf, n);
+    }
     if (g.nPre) {
         uint32_t hit = 0;
         __try {
@@ -468,6 +480,9 @@ void SetRowPreload(int mode)
             m ? "the next row's cells are loaded ahead, one per calm old-engine frame (as the 2006 game did)"
               : "the next row's cells are loaded at the crossing (the remaster's way)");
 }
+
+// CreateAheadDueMs (create_ahead.cpp, game thread): the grid shifts seen so far (0 unless installed)
+uint64_t RowPreloadShifts() { return c_shifts.load(std::memory_order_relaxed); }
 
 void LogRowPreloadStats()
 {

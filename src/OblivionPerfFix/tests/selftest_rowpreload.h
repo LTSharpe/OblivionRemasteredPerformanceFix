@@ -190,6 +190,32 @@ inline void RowPreloadSelfTest(const opf::GameModule& game)
     loadMakesNothing = false;
     c = RowPreloadTestRead();
     Check(loads == 5 && inserts == 4 && c.attached == 1 && c.noCell == 1, "rowpreload: an attached cell skipped; no record = nothing parked");
+    // CellObjectPreloadRelook's wiring (review revbookrelook S2b): a shift hands CellObjectPreload the grid part of the cell
+    // buffer (tes+0x60, uGridsToLoad squared entries): a remembered cell at index 3 is matched, one at index 30 is not
+    {
+        static uint8_t inGrid[0x100], behind[0x100];  // fake cells without references
+        memset(inGrid, 0, sizeof inGrid);
+        memset(behind, 0, sizeof behind);
+        uint8_t* const keep3 = buf[3];
+        uint8_t* const keep30 = buf[30];
+        CellObjectPreloadTestSetup(&cop::Step, &cop::Now);
+        SetCellObjectPreload(1);
+        SetCellObjectPreloadRelook(1);
+        CellObjectPreloadCell(inGrid, 13, 20);
+        CellObjectPreloadCell(behind, 13, 22);
+        buf[3] = inGrid;
+        buf[30] = behind;
+        RowPreloadGridCall(tes, true);
+        const auto cc = CellObjectPreloadTestRead();
+        Check(cc.relookCells == 1 && cc.ahead == 0,
+              "rowpreload: a shift hands CellObjectPreloadRelook the grid part of the buffer (tes+0x60, 25 entries): the cell at "
+              "index 3 is matched, the one at index 30 is not");
+        SetCellObjectPreloadRelook(0);
+        SetCellObjectPreload(0);
+        CellObjectPreloadTestSetup(nullptr, nullptr);
+        buf[3] = keep3;
+        buf[30] = keep30;
+    }
     // off: requests forwarded, nothing noted, nothing loaded
     SetRowPreload(0);
     RowPreloadTestRequest(1, world, 14, 19);

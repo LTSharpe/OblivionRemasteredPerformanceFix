@@ -66,6 +66,12 @@ jobs:
             New-Item -ItemType Directory -Force $bin | Out-Null
             Copy-Item src/OblivionPerfFix/build/OblivionPerfFix.dll "$bin/$($v.Dll)"
             Copy-Item src/OblivionPerfFix/OblivionPerfFix.ini $bin
+            # The crash-report collector (OblivionPerfFix-CollectReport.bat + .ps1) goes next to the DLL: the player double-clicks
+            # it and gets one zip to attach to a bug report. Windows line ends, whatever the checkout did.
+            foreach ($f in 'OblivionPerfFix-CollectReport.bat', 'OblivionPerfFix-CollectReport.ps1') {
+              $text = [IO.File]::ReadAllText("src/OblivionPerfFix/collect/$f") -replace "`r?`n", "`r`n"
+              [IO.File]::WriteAllText((Join-Path (Resolve-Path $bin).Path $f), $text, (New-Object Text.UTF8Encoding $false))
+            }
             New-ReleaseZip $root "OblivionPerfFix-$ver$($v.Suffix).zip"
           }
 

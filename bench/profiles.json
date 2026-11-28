@@ -81,6 +81,10 @@
     "description": "VRAM study (2026-10-07): small without hardware ray tracing (software Lumen), to split ray tracing memory off in an RMV trace",
     "res": "854x480", "mode": "windowed", "upscaler": "none", "scale": 100, "fg": 0, "rt": 0
   },
+  "gh54-fsrq": {
+    "description": "(2026-11-28, worker gh54fsr, issue #54 repro) the monitor's resolution borderless, FSR quality, frame generation on, ray tracing on, Ultra, no frame cap: the reporter's FSR Quality + FG case",
+    "res": "native", "mode": "borderless", "upscaler": "fsr", "fsrQuality": 1, "fg": 1, "rt": 1
+  },
   "vram-1440b": {
     "description": "VRAM study (2026-10-07): how a 12 GB card owner might play: 2560x1440 window, FSR balanced (render ~1506x847), ray tracing on, frame generation on, Ultra",
     "res": "2560x1440", "mode": "windowed", "upscaler": "fsr", "fsrQuality": 2, "fg": 1, "rt": 1

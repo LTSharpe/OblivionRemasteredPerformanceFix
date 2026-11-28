@@ -30,9 +30,9 @@ static void InstallOrderRun()
     struct Pair { const char* pre; const char* dep; const char* what; };
     static const Pair pairs[] = {
         {"InstallGcPassAfterBusy(", "InstallCapSleepSkip(", "CapSleepSkip after GcPassAfterBusy (its GC timer and FApp::DeltaTime readings)"},
-        {"g_pacingHooked = InstallNpcPacing(", "InstallCapSleepSkip(", "CapSleepSkip after NpcCreationPacing (its frame-rate cap hook)"},
-        {"g_pacingHooked = InstallNpcPacing(", "InstallBodyRemovalSpread(", "BodyRemovalSpread after NpcCreationPacing (its frame hooks)"},
-        {"g_npcBodies = InstallNpcBodiesOneLock(", "InstallSceneLockWaitProbe(", "SceneLockWaitProbe after NpcBodiesOneLock (the scene lock)"},
+        {"g_pacingHooked = OPF_INSTALL(\"NpcCreationPacing\", InstallNpcPacing(", "InstallCapSleepSkip(", "CapSleepSkip after NpcCreationPacing (its frame-rate cap hook)"},
+        {"g_pacingHooked = OPF_INSTALL(\"NpcCreationPacing\", InstallNpcPacing(", "InstallBodyRemovalSpread(", "BodyRemovalSpread after NpcCreationPacing (its frame hooks)"},
+        {"g_npcBodies = OPF_INSTALL(\"NpcBodiesOneLock\", InstallNpcBodiesOneLock(", "InstallSceneLockWaitProbe(", "SceneLockWaitProbe after NpcBodiesOneLock (the scene lock)"},
     };
     const size_t init = text.find("void Init(");
     for (const Pair& p : pairs) {

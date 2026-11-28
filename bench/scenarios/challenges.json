@@ -672,6 +672,109 @@
     "riding"
    ],
    "comment": "Challenge \"galloping\": the same track on foot (running, ~410 units/s): the on-foot control for ride-track-fly."
+  },
+  {
+   "id": "ride-track-gallop",
+   "type": "walk",
+   "at": "ride-track-start",
+   "mode": "inject",
+   "mount": {
+    "id": "0001F11A",
+    "pattern": "Horse"
+   },
+   "press": [
+    "Movement/IA_Game_Movement_Gallop"
+   ],
+   "hour": 12,
+   "weather": "Clear",
+   "timescale": 1,
+   "settle": 15,
+   "measure": 120,
+   "waypoints": [
+    [
+     -63074,
+     17500
+    ],
+    [
+     -65097,
+     15772
+    ],
+    [
+     -67284,
+     14209
+    ],
+    [
+     -69282,
+     12868
+    ],
+    [
+     -71090,
+     10891
+    ],
+    [
+     -73107,
+     9415
+    ],
+    [
+     -73413,
+     6747
+    ],
+    [
+     -78023,
+     5765
+    ],
+    [
+     -80699,
+     5682
+    ],
+    [
+     -83369,
+     5730
+    ],
+    [
+     -85889,
+     5478
+    ],
+    [
+     -88358,
+     4451
+    ],
+    [
+     -90432,
+     2896
+    ],
+    [
+     -91074,
+     386
+    ],
+    [
+     -92903,
+     -1210
+    ],
+    [
+     -93890,
+     -3216
+    ],
+    [
+     -95747,
+     -4974
+    ],
+    [
+     -97362,
+     -6922
+    ],
+    [
+     -99630,
+     -5582
+    ]
+   ],
+   "tags": [
+    "challenge",
+    "traversal",
+    "outdoor",
+    "riding"
+   ],
+   "comment": "Challenge \"galloping\": the same track on a horse at a gallop. After the teleport the player mounts a new black horse (HorseBlack 0001F11A, placeatme, then the activate key, as a player does) and the walk presses the gallop toggle once: ~670 units/s (the play session: 633-658), the whole track at a gallop in ~80 s. Compare with ride-track-fly (the same speed without a horse) and ride-track-foot (running)."
   }
  ]
 }

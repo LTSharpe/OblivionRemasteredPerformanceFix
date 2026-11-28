@@ -90,6 +90,8 @@ constexpr uint32_t kDefragOn = 0x24, kCs = 0x28, kPools = 0x50, kPoolNum = 0x58,
                    kFrameFence = 0x548, kCompleted = 0x20;
 constexpr uint32_t kPoolSize = 0x10, kFreeSize = 0x28, kLastUsed = 0xD8;
 constexpr uint64_t kGameLag = 20;
+constexpr uint64_t kDrainLag = 2;  // LoadPeakDrain
+std::atomic<uint64_t> g_drainLag{0};
 constexpr uint64_t kNever = 1ull << 40;  // a frame lag no fence reaches (60 fps: 580 years)
 constexpr uint64_t kStaleFrames = 600;   // kept entries of an allocator whose clean-up has not run for this long are dropped
 constexpr int kMaxKept = 1024;           // kept pools of all allocators (the budget at 4096 MB holds 128 of 32 MB)
@@ -184,6 +186,13 @@ void Hook(void* self, uint64_t lag, bool force)
 {
     CleanFn const orig = g_testOrig ? g_testOrig : g_orig;
     uint8_t* const a = static_cast<uint8_t*>(self);
+    // LoadPeakDrain: behind a loading screen near the budget an emptied pool of an allocator we keep nothing for (no defragmentation:
+    // the ray-tracing pools) goes after 2 frames instead of 20 (the game's own rule otherwise; empty pools only)
+    if (!force && lag == kGameLag && !a[kDefragOn] && LoadPeakDrainNow()) {
+        g_drainLag.fetch_add(1, std::memory_order_relaxed);
+        orig(self, kDrainLag, false);
+        return;
+    }
     // not ours (another lag, a forced free), off with nothing kept, or an allocator without defragmentation: the game's call
     if (force || lag != kGameLag || (!g_budget.load(std::memory_order_relaxed) && !g_anyKept.load(std::memory_order_relaxed)) ||
         !a[kDefragOn]) {
@@ -199,7 +208,9 @@ void Hook(void* self, uint64_t lag, bool force)
         g_failed.store(true, std::memory_order_relaxed);
         completed = g_lastCompleted.load(std::memory_order_relaxed);  // ages from the last good reading: give back one per frame
     }
-    const uint64_t budget = g_failed.load(std::memory_order_relaxed) ? 0 : g_budget.load(std::memory_order_relaxed);
+    uint64_t budget = g_failed.load(std::memory_order_relaxed) ? 0 : g_budget.load(std::memory_order_relaxed);
+    const uint64_t spare = GpuPoolSpareBytes();  // GpuPoolSpareAhead's spare pools count inside this budget
+    budget = budget > spare ? budget - spare : 0;
     uint64_t useLag = kGameLag;
     AcquireSRWLockExclusive(&g_lock);
     if (completed) {
@@ -435,9 +446,13 @@ int GpuPoolKeepBudgetNow(int mb, bool relief)
     return GpuPoolKeepBudgetStep(mb, relief, vram, budget);
 }
 
+
 void LogGpuPoolKeepStats()
 {
     if (!g_installed) return;
+    if (const uint64_t d = g_drainLag.exchange(0))
+        Log("[loaddrain] since last report: %llu pool clean-ups of allocators without defragmentation with a 2-frame lag behind loading screens",
+            static_cast<unsigned long long>(d));
     const uint64_t reused = g_reused.exchange(0), released = g_released.exchange(0), moves = g_cursorMoves.exchange(0),
                    overflow = g_overflow.exchange(0);
     if (g_failed.load() && !g_failLogged) {

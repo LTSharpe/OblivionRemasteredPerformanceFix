@@ -315,10 +315,48 @@ void NoteOrder(uint64_t type, const ApiHeader* desc)
             static_cast<unsigned long long>(id), GetCurrentThreadId(), verdict);
 }
 
+// ---- whether AMD's frame generation presenter can have presents pending (S-060; CmdMemPregrow asks) ----
+// AMD's frame generation swap chain (FidelityFX SDK FrameInterpolationSwapchainDX12.cpp, the driver's ML provider in the same way:
+// dump of 2026-11-21) presents a generated frame and its real frame from its own presenter thread: before each Present that thread
+// waits for the GPU to finish the frame's composition, and after it signals its present fence on the GPU with the frame's number. A
+// frame without generation goes out on the game's own thread at once and signals the next number. When the game hands over such a
+// frame right behind a generated one and the presenter's last Present comes after it, the presenter's lower number is signalled
+// last: the fence stays one behind what the swap chain counts as sent, and the next configure that changes the generation state
+// waits for it with no time limit (AMD's waitForPresents). That is the freeze at the first loading screen: the game turns
+// generation off there, two frames go out back to back, and in the frozen launches the presenter's real frame went out 5-8 ms
+// after the game's own (0.2-0.4 ms before it in the launches that loaded; findings "freeze1122"). CmdMemPregrow's burst of
+// driver memory work fell on that moment. So it does its driver work only while this says quiet: generation configured off (or never
+// configured) and no configure under way, i.e. after the configure that turned it off has returned OK (which waited for every pending
+// present). Known gaps, outside the race window: a library unload and reload is not watched (the state stays as it was).
+std::atomic<int> g_fgEnabled{-1};        // the last frame generation configure entered: -1 none seen, 0 generation off, 1 on
+std::atomic<int> g_fgInConfigure{0};     // frame generation configures under way
+std::atomic<uint32_t> g_fgSwitches{0};   // changes of the configured state (logged: the first few)
+std::atomic<bool> g_configureWatched{false};
+constexpr uint32_t kConfigureEnabled = 56;  // ffxConfigureDescFrameGeneration::frameGenerationEnabled (bool; SDK 1.1 and 2.x headers)
+constexpr uint32_t kSwitchesLogged = 12;
+
 uint32_t ConfigureHook(void** context, const ApiHeader* desc)
 {
+    const bool fg = desc && desc->type == kTypeFgConfigure;
     NoteOrder(desc ? desc->type : 0, desc);
-    return g_configureNext.load(std::memory_order_relaxed)(context, desc);
+    if (!fg) return g_configureNext.load(std::memory_order_relaxed)(context, desc);
+    const int on = reinterpret_cast<const uint8_t*>(desc)[kConfigureEnabled] ? 1 : 0;
+    const auto note = [&](int was) {
+        if (was == on) return;
+        const uint32_t n = g_fgSwitches.fetch_add(1) + 1;
+        if (n <= kSwitchesLogged)
+            Log("[fgpace] frame generation configured %s by the game (frameID %llu, change %u)%s", on ? "on" : "off",
+                static_cast<unsigned long long>(FrameIdAt(desc, kConfigureFrameId)), n, n == kSwitchesLogged ? "; later changes not logged" : "");
+    };
+    g_fgInConfigure.fetch_add(1);  // before the state: "quiet" is never seen while a configure turns generation on
+    if (on) note(g_fgEnabled.exchange(1));  // "on" counts from the entry: it can't be missed
+    const uint32_t r = g_configureNext.load(std::memory_order_relaxed)(context, desc);
+    if (!on) {
+        if (r == 0) note(g_fgEnabled.exchange(0));  // "off" counts only when AMD's configure returned OK (FFX_API_RETURN_OK)
+        else { int none = -1; g_fgEnabled.compare_exchange_strong(none, 1); }  // a failed "off": AMD may still be on, so not quiet
+    }
+    g_fgInConfigure.fetch_sub(1);
+    return r;
 }
 
 uint32_t DispatchHook(void** context, const ApiHeader* desc)
@@ -390,6 +428,7 @@ bool HookLibrary(uint8_t* base, uint32_t sizeOfImage)
     const bool ok1 = Redirect(base, stubs, create, reinterpret_cast<const void*>(&CreateHook));
     const bool ok2 = Redirect(base, stubs + 16, destroy, reinterpret_cast<const void*>(&DestroyHook));
     const bool ok3 = Redirect(base, stubs + 32, configure, reinterpret_cast<const void*>(&ConfigureHook));
+    g_configureWatched = ok3;
     const bool ok4 = dispatch && Redirect(base, stubs + 48, dispatch, reinterpret_cast<const void*>(&DispatchHook));
     VirtualProtect(stubs, 64, PAGE_EXECUTE_READ, &old);
     FlushInstructionCache(GetCurrentProcess(), stubs, 64);
@@ -418,6 +457,13 @@ VOID CALLBACK OnDllLoaded(ULONG reason, const DllNotificationData* data, PVOID)
 }
 
 }  // namespace
+
+int FrameGenPresentsQuiet()
+{
+    if (!g_configureWatched.load()) return GetModuleHandleW(kLibrary) ? -1 : 1;  // no library: no presenter of AMD's
+    return g_fgEnabled.load() != 1 && g_fgInConfigure.load() == 0 ? 1 : 0;
+}
+uint32_t FrameGenSwitches() { return g_fgSwitches.load(); }
 
 FsrLibraryInfo DescribeFsrLibrary(const void* module)
 {
@@ -584,6 +630,14 @@ void FrameGenOrderTestReset(void* fakeConfigure, void* fakeDispatch)
     g_anyPrepare = false;
     ReleaseSRWLockExclusive(&g_orderLock);
 }
+void FrameGenQuietTestReset(bool watched)
+{
+    g_configureWatched = watched;
+    g_fgEnabled = -1;
+    g_fgInConfigure = 0;
+    g_fgSwitches = kSwitchesLogged;  // the self-test's switches stay out of the log
+}
+int FrameGenQuietTestInConfigure() { return g_fgInConfigure.load(); }
 uint32_t FrameGenOrderTestCall(bool configure, void* desc)
 {
     void* ctx = reinterpret_cast<void*>(0x1234);

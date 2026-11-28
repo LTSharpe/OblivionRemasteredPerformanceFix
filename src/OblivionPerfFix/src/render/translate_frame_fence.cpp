@@ -115,6 +115,7 @@ bool EventComplete(void* ev)
 void BeginFrameHook(void* cmdList)
 {
     g.original(cmdList);
+    CrashReportRenderFrame();  // HangReport: the render thread's frames (one counter)
     if (!g_on.load(std::memory_order_acquire)) return;
     void* ev = nullptr;
     reinterpret_cast<ThreadFenceFn>(g.threadFence)(cmdList, &ev, true);

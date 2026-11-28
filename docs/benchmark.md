@@ -264,13 +264,22 @@ results.
 ## Mini-scenarios: iterate on one problem spot
 Full scenarios are for confirming; while working on one problem, run a scene that reproduces just that spot in 30-60 s
 and keep the game open between runs (`-Session reuse`), switching the fix's ini key between runs (A-B-B-A).
+`-LiveFixIni` writes a run's `-FixIni` into the reused game's ini for you, reads it back and waits for the fix to
+re-read it; this works only for keys the fix reads while the game runs, and each key's comment in the ini says whether
+it is one. `-Close` puts the ini back (if you close the game by hand instead, the installed ini keeps the live value until
+the next benchmark run or `-Close`).
 `tools/slice_flight.py` cuts such scenes out of a timed `fly` scene, with the original's waypoints, speeds, hour, weather
 and timescale, starting a few seconds before each spot so its cells and characters load during the measured part:
 
 ```
 py -3 tools\slice_flight.py --src showcase --scene rumare-loop-flight --out my-spots --spot waterfront:23.9:26.5:"the Waterfront"
 .\tools\Run-Benchmark.ps1 -Scenario my-spots -Scenes waterfront -Runs 2
+# A-B-B-A in one game kept in the world: key on, off, off, on
+.\tools\Run-Benchmark.ps1 -Scenario my-spots -Scenes waterfront -Label a1 -Session fresh -After keep
+.\tools\Run-Benchmark.ps1 -Scenario my-spots -Scenes waterfront -Label b1 -Session reuse -KeepWorld -After keep -LiveFixIni -FixIni @{ RigTraceReuse = 0 }
 ```
+
+`-Scenes` runs the scenes in the order given (`-Scenes waterfront,control`: the waterfront first).
 
 Spot times are seconds into the full flight (the plots' time axis). Check once that the slice shows the problem before
 you iterate on it. Runs are made comparable by default (pinned conditions, a fixed random seed: below); start each pass from a fresh
@@ -280,8 +289,8 @@ world (the default), and note what still differs between runs (characters' behav
 The open problems we invite help on (GitHub issues labelled "challenge") each have a save-free scene in
 `bench/scenarios/challenges.json`: `ic-waterfront-pass` (the Imperial City Waterfront's character bursts),
 `brindle-corral-hold`, `brindle-control-hold` and `brindle-corral-walk` (the Brindle Home horse corral, a control spot
-~120 m west, and a walk inside the corral), `ride-track-fly` and `ride-track-foot` (a riding track flown at horse speed
-and walked; riding a horse itself is not in the benchmark yet). Iterate small with one game kept open, then confirm at
+~120 m west, and a walk inside the corral), `ride-track-fly`, `ride-track-foot` and `ride-track-gallop` (a riding track
+flown at horse speed, run on foot, and ridden at a gallop). Iterate small with one game kept open, then confirm at
 your own settings; with `HitchLedger=1` and `HitchLedgerTickSplit=1` in the ini (set before the game starts) each run
 also leaves the tick split, which `py -3 tools\tick_split.py <csv> --run <run folder>` ranks per scene:
 
@@ -292,6 +301,13 @@ also leaves the tick split, which `py -3 tools\tick_split.py <csv> --run <run fo
 
 Run the hold and its control in the same game, one after the other, so they differ only in the place. The issue for each
 challenge says what we know and what we already tried.
+
+A walk scene can ride a horse: `"mount": { "id": "0001F11A" }` puts a new horse (that base form, here the game's black
+horse) next to the player after the teleport and mounts it with the activate key, as a player does (up to four tries;
+the run's log says which), and `"press": ["Movement/IA_Game_Movement_Gallop"]` presses that input action once as the walk
+starts (on a horse the gallop is a toggle). The player gets off the horse at the end of the scene, so the next teleport
+works (a mounted player cannot be teleported). Afterwards the game's third-person camera runs for one second
+(the game keeps a pointer to the horse that only a third-person frame clears). The mod's `press <Folder/IA_Name>` and `pawn` verbs do the work.
 
 ### Identical runs: pinned conditions, `-FixedSeed` and `tools\Repro-Check.ps1`
 Every run is pinned by default (`-NoPin` for the old behaviour): every scene gets the same conditions in every run: the weather (the scene's, else the scenario's default, else
